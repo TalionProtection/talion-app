@@ -4634,3 +4634,15 @@ startDispatchPTT = function() {
 
 /// Initial load of PTT channels after a delay
 setTimeout(() => { loadPTTChannels(); }, 3000);
+
+// ─── Initialize AudioContext on first user gesture ────────────────────────
+document.addEventListener('click', function initAudioOnClick() {
+  if (typeof getAudioContext === 'function') {
+    const ctx = getAudioContext();
+    if (ctx && ctx.state === 'suspended') {
+      ctx.resume().then(() => {
+        console.log('[Audio] AudioContext resumed on user gesture');
+      });
+    }
+  }
+}, { once: false });
