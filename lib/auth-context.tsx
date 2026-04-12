@@ -169,7 +169,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       // Create auth user
       const { data, error } = await supabase.auth.signUp({ email, password });
-      if (error) throw new Error(error.message);
+    if (error) throw new Error(error.message);
       if (!data.user) throw new Error('Création du compte échouée');
 
       // Insert profile in correct table based on role
