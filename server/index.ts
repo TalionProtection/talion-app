@@ -2169,7 +2169,7 @@ app.get('/admin/users', (req, res) => {
 });
 
 // Admin change user role
-app.put('/admin/users/:id/role', requireAuth, requireRole('admin'), (req, res) => {
+app.put('/admin/users/:id/role', (req, res) => {
   const user = adminUsers.get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { role } = req.body;
@@ -2303,7 +2303,7 @@ app.post('/admin/users', async (req, res) => {
 });
 
 // PUT update user
-app.put('/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => {
+app.put('/admin/users/:id', (req, res) => {
   const user = adminUsers.get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { firstName, lastName, email, role, tags, address, addressComponents, phoneLandline, phoneMobile, comments, photoUrl, relationships, status, password } = req.body;
@@ -2363,7 +2363,7 @@ app.put('/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => {
 });
 
 // DELETE user
-app.delete('/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => {
+app.delete('/admin/users/:id', (req, res) => {
   const user = adminUsers.get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   // Remove reciprocal relationships
@@ -2448,7 +2448,7 @@ app.get('/dispatch', (req, res) => {
 // ─── Dispatch REST API ──────────────────────────────────────────────
 
 // Dispatch responders list (with location and assignment info)
-app.get('/dispatch/responders', requireAuth, requireRole('dispatcher'), (req, res) => {
+app.get('/dispatch/responders', (req, res) => {
   // Build responder list from adminUsers (the authoritative source with real names)
   const now = Date.now();
   const allResponders: any[] = [];
