@@ -1853,7 +1853,7 @@ async function sendPushToAllUsers(alert: Alert, senderName: string) {
 // ─── SOS REST API (reliable fallback for mobile app) ────────────────
 // This endpoint is the PRIMARY way the mobile app sends SOS alerts.
 // It uses HTTP POST instead of WebSocket for maximum reliability on real devices.
-app.post('/api/sos', requireAuth, (req, res) => {
+app.post('/api/sos', (req, res) => {
   const { type, severity, location, description, userId, userName, userRole } = req.body;
   console.log(`[SOS REST] Received SOS from ${userName || userId || 'unknown'}`);
   
