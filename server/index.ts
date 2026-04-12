@@ -10,6 +10,13 @@ import fs from 'fs';
 import { requireAuth, requireRole } from './auth-middleware';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 
+// ─── Supabase Admin Client (singleton) ───────────────────────────────────
+const supabaseAdmin = createSupabaseClient(
+  process.env.SUPABASE_URL || '',
+  process.env.SUPABASE_SERVICE_ROLE_KEY || '',
+  { auth: { autoRefreshToken: false, persistSession: false } }
+);
+
 const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server, maxPayload: 50 * 1024 * 1024 });
@@ -2241,11 +2248,6 @@ app.post('/admin/users', async (req, res) => {
   // ─── Créer le compte Supabase Auth ───────────────────────────────
   let supabaseUserId: string | null = null;
   try {
-  const supabaseAdmin = createSupabaseClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  { auth: { autoRefreshToken: false, persistSession: false } }
-);
     const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
       email,
       password: password || Math.random().toString(36).slice(-12), // mot de passe aléatoire si non fourni
@@ -2285,6 +2287,7 @@ app.post('/admin/users', async (req, res) => {
     passwordHash: password ? bcrypt.hashSync(password, 10) : undefined,
   };
   adminUsers.set(id, newUser);
+  saveAdminUserToSupabase(newUser);
   // Add reciprocal relationships
   (relationships || []).forEach((rel: { userId: string; type: string }) => {
     const relUser = adminUsers.get(rel.userId);
@@ -2357,6 +2360,7 @@ app.put('/admin/users/:id', (req, res) => {
     changes.push('relationships');
   }
   adminUsers.set(user.id, user);
+  saveAdminUserToSupabase(user);
   addAuditEntry('user', 'User Updated', 'Admin', `Updated: ${changes.join(', ')}`, user.name);
   const { passwordHash: _pw, ...safeUpdatedUser } = user;
   res.json({ ...safeUpdatedUser, hasPassword: !!user.passwordHash });
@@ -2375,6 +2379,7 @@ app.delete('/admin/users/:id', (req, res) => {
     }
   });
   adminUsers.delete(user.id);
+  deleteAdminUserFromSupabase(user.id);
   addAuditEntry('user', 'User Deleted', 'Admin', `Deleted user: ${user.name} (${user.email})`, user.name);
   res.json({ success: true, deletedUser: user.name });
 });
@@ -3971,6 +3976,7 @@ server.keepAliveTimeout = 65000; // 65 seconds
 server.headersTimeout = 66000;   // slightly > keepAliveTimeout
 
 server.listen(Number(PORT), '0.0.0.0', () => {
+  loadAdminUsersFromSupabase();
   console.log(`Talion Crisis Comm Server running on port ${PORT}`);
   console.log(`WebSocket endpoint: ws://localhost:${PORT}`);
   console.log(`Admin Console: http://localhost:${PORT}/admin-console/`);
@@ -3980,3 +3986,49 @@ server.listen(Number(PORT), '0.0.0.0', () => {
 });
 
 export { app, server, wss };
+
+// ─── Sync admin_users from Supabase on startup ───────────────────────────
+async function loadAdminUsersFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('admin_users').select('*');
+    if (error) { console.error('[Supabase] Failed to load admin_users:', error.message); return; }
+    if (data && data.length > 0) {
+      adminUsers.clear();
+      data.forEach((u: any) => {
+        adminUsers.set(u.id, {
+          id: u.id, firstName: u.first_name || '', lastName: u.last_name || '',
+          name: u.name || `${u.first_name} ${u.last_name}`.trim(),
+          email: u.email, role: u.role, status: u.status || 'active',
+          lastLogin: u.last_login || 0, createdAt: u.created_at || Date.now(),
+          tags: u.tags || [], address: u.address || '',
+          phoneLandline: u.phone_landline || '', phoneMobile: u.phone_mobile || '',
+          comments: u.comments || '', photoUrl: u.photo_url || '',
+          relationships: u.relationships || [], passwordHash: u.password_hash || undefined,
+        });
+      });
+      console.log(`[Supabase] Loaded ${data.length} users from admin_users`);
+    }
+  } catch (e) { console.error('[Supabase] loadAdminUsersFromSupabase error:', e); }
+}
+
+async function saveAdminUserToSupabase(user: AdminUser): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('admin_users').upsert({
+      id: user.id, first_name: user.firstName, last_name: user.lastName,
+      name: user.name, email: user.email, role: user.role, status: user.status,
+      last_login: user.lastLogin, created_at: user.createdAt,
+      tags: user.tags || [], address: user.address || '',
+      phone_landline: user.phoneLandline || '', phone_mobile: user.phoneMobile || '',
+      comments: user.comments || '', photo_url: user.photoUrl || '',
+      relationships: user.relationships || [], password_hash: user.passwordHash || null,
+    });
+    if (error) console.error('[Supabase] saveAdminUserToSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] saveAdminUserToSupabase error:', e); }
+}
+
+async function deleteAdminUserFromSupabase(userId: string): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('admin_users').delete().eq('id', userId);
+    if (error) console.error('[Supabase] deleteAdminUserFromSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] deleteAdminUserFromSupabase error:', e); }
+}
