@@ -645,6 +645,7 @@ seedDemoData();
 // Helper: persist alerts to disk (debounced)
 function persistAlerts() {
   debouncedSave(ALERTS_FILE, Array.from(alerts.values()));
+  alerts.forEach(alert => saveAlertToSupabase(alert));
 }
 
 // Helper: persist family perimeters to disk (debounced)
@@ -3977,6 +3978,7 @@ server.headersTimeout = 66000;   // slightly > keepAliveTimeout
 
 server.listen(Number(PORT), '0.0.0.0', () => {
   loadAdminUsersFromSupabase();
+  loadAlertsFromSupabase();
   console.log(`Talion Crisis Comm Server running on port ${PORT}`);
   console.log(`WebSocket endpoint: ws://localhost:${PORT}`);
   console.log(`Admin Console: http://localhost:${PORT}/admin-console/`);
@@ -4031,4 +4033,59 @@ async function deleteAdminUserFromSupabase(userId: string): Promise<void> {
     const { error } = await supabaseAdmin.from('admin_users').delete().eq('id', userId);
     if (error) console.error('[Supabase] deleteAdminUserFromSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] deleteAdminUserFromSupabase error:', e); }
+}
+
+// ─── Sync alerts from Supabase on startup ────────────────────────────────
+async function loadAlertsFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('alerts').select('*');
+    if (error) { console.error('[Supabase] Failed to load alerts:', error.message); return; }
+    if (data && data.length > 0) {
+      alerts.clear();
+      data.forEach((a: any) => {
+        alerts.set(a.id, {
+          id: a.id,
+          type: a.type,
+          severity: a.severity,
+          status: a.status,
+          description: a.description || '',
+          createdBy: a.created_by,
+          createdAt: a.created_at,
+          location: a.location || { latitude: 0, longitude: 0, address: 'Unknown' },
+          respondingUsers: a.responding_users || [],
+          responderStatuses: a.responder_statuses || {},
+          statusHistory: a.status_history || [],
+          photos: a.photos || [],
+        });
+      });
+      console.log(`[Supabase] Loaded ${data.length} alerts`);
+    }
+  } catch (e) { console.error('[Supabase] loadAlertsFromSupabase error:', e); }
+}
+
+async function saveAlertToSupabase(alert: Alert): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('alerts').upsert({
+      id: alert.id,
+      type: alert.type,
+      severity: alert.severity,
+      status: alert.status,
+      description: alert.description,
+      created_by: alert.createdBy,
+      created_at: alert.createdAt,
+      location: alert.location,
+      responding_users: alert.respondingUsers || [],
+      responder_statuses: alert.responderStatuses || {},
+      status_history: alert.statusHistory || [],
+      photos: alert.photos || [],
+    });
+    if (error) console.error('[Supabase] saveAlertToSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] saveAlertToSupabase error:', e); }
+}
+
+async function deleteAlertFromSupabase(alertId: string): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('alerts').delete().eq('id', alertId);
+    if (error) console.error('[Supabase] deleteAlertFromSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] deleteAlertFromSupabase error:', e); }
 }
