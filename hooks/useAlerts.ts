@@ -46,6 +46,7 @@ interface UseAlertsOptions {
    */
   userRole?: string;
   /** Whether to play sounds when new alerts arrive (default: false) */
+  userId?: string;
   playSounds?: boolean;
 }
 
@@ -56,7 +57,7 @@ interface UseAlertsOptions {
  * Optionally plays sounds when new alerts are detected.
  */
 export function useAlerts(options: UseAlertsOptions = {}) {
-  const { pollInterval = 10000, autoStart = true, userRole, playSounds = false } = options;
+  const { pollInterval = 10000, autoStart = true, userRole, userId, playSounds = false } = options;
   const [allAlerts, setAllAlerts] = useState<ServerAlert[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -69,11 +70,14 @@ export function useAlerts(options: UseAlertsOptions = {}) {
   const fetchAlerts = useCallback(async () => {
     try {
       const baseUrl = getApiBaseUrl();
-      const response = await fetchWithTimeout(`${baseUrl}/alerts`, {
-        method: 'GET',
-        headers: { 'Accept': 'application/json' },
-        timeout: 10000,
-      });
+const params = new URLSearchParams();
+if (userRole) params.set('role', userRole);
+if (userId) params.set('userId', userId);
+const response = await fetchWithTimeout(`${baseUrl}/alerts?${params}`, {
+  method: 'GET',
+  headers: { 'Accept': 'application/json' },
+  timeout: 10000,
+});
 
       if (!response.ok) {
         throw new Error(`Server returned ${response.status}`);

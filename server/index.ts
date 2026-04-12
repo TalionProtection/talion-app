@@ -1554,19 +1554,23 @@ app.get('/api/geocode', async (req, res) => {
 });
 
 app.get('/alerts', (req, res) => {
-  // Return active AND acknowledged alerts (not resolved)
-  const visibleAlerts = Array.from(alerts.values()).filter(a => a.status !== 'resolved').map(a => {
-    // Enrich with responder names for UI display
+  const userRole = req.query.role as string;
+  const userId = req.query.userId as string;
+  const visibleAlerts = Array.from(alerts.values()).filter(a => {
+    if (a.status === 'resolved') return false;
+    if (userRole === 'user') return a.createdBy === userId;
+    return true;
+  }).map(a => {
     const respondingNames = (a.respondingUsers || []).map(uid => {
       const admin = adminUsers.get(uid);
       return admin?.name || uid;
     });
-    return { ...a, respondingNames };
+    const creatorName = adminUsers.get(a.createdBy)?.name || a.createdBy;
+    return { ...a, respondingNames, createdByName: creatorName };
   });
   res.json(visibleAlerts);
 });
 
-// Get single alert details (full data including location coordinates)
 app.get('/alerts/:id', (req, res) => {
   const alert = alerts.get(req.params.id);
   if (!alert) return res.status(404).json({ error: 'Alert not found' });

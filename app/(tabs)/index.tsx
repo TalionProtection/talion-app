@@ -158,7 +158,7 @@ export default function HomeScreen() {
   }, [user]);
 
   // Fetch real alerts from server with 10s polling
-  const { alerts: serverAlerts, isLoading, error: alertsError, refresh: refreshAlerts } = useAlerts({ pollInterval: 10000, userRole: user?.role, playSounds: true });
+  const { alerts: serverAlerts, isLoading, error: alertsError, refresh: refreshAlerts } = useAlerts({ pollInterval: 10000, userRole: user?.role, userId: user?.id, playSounds: true });
 
   // Convert server alerts to local Incident format
   const incidents = useMemo(() => {
