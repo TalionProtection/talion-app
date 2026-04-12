@@ -2218,7 +2218,7 @@ app.get('/admin/users/:id', (req, res) => {
 });
 
 // POST create new user
-app.post('/admin/users', (req, res) => {
+app.post('/admin/users', async (req, res) => {
   const { firstName, lastName, email, role, tags, address, addressComponents, phoneLandline, phoneMobile, comments, photoUrl, relationships, password } = req.body;
   if (!firstName || !lastName || !email) {
     return res.status(400).json({ error: 'firstName, lastName, and email are required' });
@@ -2231,7 +2231,30 @@ app.post('/admin/users', (req, res) => {
   if (existing) {
     return res.status(409).json({ error: 'A user with this email already exists' });
   }
-  const id = `usr-${uuidv4().slice(0, 8)}`;
+
+  // ─── Créer le compte Supabase Auth ───────────────────────────────
+  let supabaseUserId: string | null = null;
+  try {
+    const supabaseAdmin = createSupabaseClient(
+      process.env.SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!,
+      { auth: { autoRefreshToken: false, persistSession: false } }
+    );
+    const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
+      email,
+      password: password || Math.random().toString(36).slice(-12),
+      email_confirm: true,
+    });
+    if (authError) {
+      console.error("[Admin] Supabase Auth create error:", authError.message);
+    } else {
+      supabaseUserId = authData.user.id;
+      console.log("[Admin] Supabase Auth user created:", supabaseUserId);
+    }
+  } catch (e) {
+    console.error("[Admin] Supabase Auth error:", e);
+  }
+  const id = supabaseUserId || `usr-${uuidv4().slice(0, 8)}`;
   const now = Date.now();
   const newUser: AdminUser = {
     id,
