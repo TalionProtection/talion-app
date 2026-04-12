@@ -7,6 +7,8 @@ import path from 'path';
 import bcrypt from 'bcryptjs';
 import multer from 'multer';
 import fs from 'fs';
+import { requireAuth, requireRole } from './auth-middleware';
+import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 
 const app = express();
 const server = createServer(app);
@@ -15,6 +17,10 @@ const wss = new WebSocketServer({ server, maxPayload: 50 * 1024 * 1024 });
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+// ─── Supabase Admin (pour auth middleware) ────────────────────────────────
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+  console.warn('[Auth] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set — auth middleware disabled');
+}
 
 // ─── Resolve project root (works from server/ in dev and dist/ in prod) ───
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -1601,7 +1607,7 @@ app.get('/responders', (req, res) => {
   res.json(responders);
 });
 
-app.post('/alerts', (req, res) => {
+app.post('/alerts', requireAuth, (req, res) => {
   const { type, severity, location, description, createdBy } = req.body;
   const alert: Alert = {
     id: uuidv4(),
@@ -1837,7 +1843,7 @@ async function sendPushToAllUsers(alert: Alert, senderName: string) {
 // ─── SOS REST API (reliable fallback for mobile app) ────────────────
 // This endpoint is the PRIMARY way the mobile app sends SOS alerts.
 // It uses HTTP POST instead of WebSocket for maximum reliability on real devices.
-app.post('/api/sos', (req, res) => {
+app.post('/api/sos', requireAuth, (req, res) => {
   const { type, severity, location, description, userId, userName, userRole } = req.body;
   console.log(`[SOS REST] Received SOS from ${userName || userId || 'unknown'}`);
   
@@ -2154,7 +2160,7 @@ app.get('/admin/health', (req, res) => {
 });
 
 // Admin users list
-app.get('/admin/users', (req, res) => {
+app.get('/admin/users', requireAuth, requireRole('admin'), (req, res) => {
   const users = Array.from(adminUsers.values()).map(u => {
     const { passwordHash, ...safeUser } = u;
     return { ...safeUser, hasPassword: !!passwordHash };
@@ -2163,7 +2169,7 @@ app.get('/admin/users', (req, res) => {
 });
 
 // Admin change user role
-app.put('/admin/users/:id/role', (req, res) => {
+app.put('/admin/users/:id/role', requireAuth, requireRole('admin'), (req, res) => {
   const user = adminUsers.get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { role } = req.body;
@@ -2235,25 +2241,27 @@ app.post('/admin/users', async (req, res) => {
   // ─── Créer le compte Supabase Auth ───────────────────────────────
   let supabaseUserId: string | null = null;
   try {
-    const supabaseAdmin = createSupabaseClient(
-      process.env.SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!,
-      { auth: { autoRefreshToken: false, persistSession: false } }
-    );
+  const supabaseAdmin = createSupabaseClient(
+  process.env.SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!,
+  { auth: { autoRefreshToken: false, persistSession: false } }
+);
     const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
       email,
-      password: password || Math.random().toString(36).slice(-12),
+      password: password || Math.random().toString(36).slice(-12), // mot de passe aléatoire si non fourni
       email_confirm: true,
     });
     if (authError) {
-      console.error("[Admin] Supabase Auth create error:", authError.message);
-    } else {
-      supabaseUserId = authData.user.id;
-      console.log("[Admin] Supabase Auth user created:", supabaseUserId);
-    }
+  console.error('[Admin] Supabase Auth create error:', authError.message, authError.status);
+} else {
+  supabaseUserId = authData.user.id;
+  console.log('[Admin] Supabase Auth user created:', supabaseUserId);
+}
   } catch (e) {
-    console.error("[Admin] Supabase Auth error:", e);
+    console.error('[Admin] Supabase Auth import error:', e);
   }
+
+  // Utilise l'UUID Supabase si disponible, sinon génère un ID local
   const id = supabaseUserId || `usr-${uuidv4().slice(0, 8)}`;
   const now = Date.now();
   const newUser: AdminUser = {
@@ -2295,7 +2303,7 @@ app.post('/admin/users', async (req, res) => {
 });
 
 // PUT update user
-app.put('/admin/users/:id', (req, res) => {
+app.put('/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => {
   const user = adminUsers.get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { firstName, lastName, email, role, tags, address, addressComponents, phoneLandline, phoneMobile, comments, photoUrl, relationships, status, password } = req.body;
@@ -2355,7 +2363,7 @@ app.put('/admin/users/:id', (req, res) => {
 });
 
 // DELETE user
-app.delete('/admin/users/:id', (req, res) => {
+app.delete('/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => {
   const user = adminUsers.get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   // Remove reciprocal relationships
@@ -2440,7 +2448,7 @@ app.get('/dispatch', (req, res) => {
 // ─── Dispatch REST API ──────────────────────────────────────────────
 
 // Dispatch responders list (with location and assignment info)
-app.get('/dispatch/responders', (req, res) => {
+app.get('/dispatch/responders', requireAuth, requireRole('dispatcher'), (req, res) => {
   // Build responder list from adminUsers (the authoritative source with real names)
   const now = Date.now();
   const allResponders: any[] = [];

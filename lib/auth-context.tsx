@@ -139,6 +139,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   setIsLoading(true);
   try {
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    console.log('Supabase auth result:', JSON.stringify({ error, userId: data?.user?.id })); // ← ajoute cette ligne
     if (error) throw new Error(error.message);
 
     const profile = await fetchUserProfile(data.user.id);
@@ -169,7 +170,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       // Create auth user
       const { data, error } = await supabase.auth.signUp({ email, password });
-    if (error) throw new Error(error.message);
+      if (error) throw new Error(error.message);
       if (!data.user) throw new Error('Création du compte échouée');
 
       // Insert profile in correct table based on role

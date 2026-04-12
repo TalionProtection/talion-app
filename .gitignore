@@ -44,4 +44,3 @@ app-example
 
 # Persisted runtime data (regenerated from seed on startup)
 data/
-.env
