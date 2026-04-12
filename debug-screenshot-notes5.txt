@@ -1,0 +1,6 @@
+Screenshot 5 - After messaging implementation:
+- Home screen shows 4 incidents (3 non-SOS visible for user role + 1 ACK'd fire alarm)
+- Tab bar shows: Home, Messages, PTT, Map, admin, dispatcher
+- SOS button visible
+- App is running correctly
+- Need to test Messages tab and Dispatch console messaging panel

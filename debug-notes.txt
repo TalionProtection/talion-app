@@ -1,0 +1,17 @@
+KEY FINDING from server logs:
+
+[2026-03-25T12:54:47.505Z] [metro]  WARN  [SOSButton] WebSocket not connected, alert only sent locally
+
+This confirms the WebSocket is NOT connected when the SOS button is pressed on the phone.
+
+The WebSocketProvider connects to ws://localhost:3000, but on a real phone, localhost refers
+to the phone itself, NOT the server. The phone needs to connect to the server's public URL.
+
+The wsManager singleton is initialized with:
+  process.env.EXPO_PUBLIC_WS_URL || 'ws://localhost:3000'
+
+The EXPO_PUBLIC_WS_URL env var is likely not set, so it defaults to ws://localhost:3000,
+which doesn't work on a real device.
+
+FIX: Need to set EXPO_PUBLIC_WS_URL to the server's public WebSocket URL (wss://3000-...).
+Also need to check if the old websocketService has the same issue.

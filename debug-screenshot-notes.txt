@@ -1,0 +1,11 @@
+Screenshot analysis (webdev-preview-1774446298.png):
+- Home screen shows 6 "Nearby Incidents" including SOS alerts, Medical Emergency, Fire Alarm
+- The user role is "User" with "Available" status
+- SOS alerts ARE showing for regular users on Home screen - this needs to be filtered
+- The tab bar shows: Home, Messages, PTT, Map, admin, dispatcher
+- The SOS button is visible at the bottom center
+- The dispatcher tab is visible in the tab bar
+
+Issues to fix:
+1. SOS alerts should NOT appear for regular users (only for dispatchers)
+2. The useAlerts hook filtering should be working - need to verify the userRole is passed correctly

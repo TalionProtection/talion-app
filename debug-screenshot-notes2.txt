@@ -1,0 +1,7 @@
+Screenshot analysis (webdev-preview-1774450126.png):
+- Home screen for "User" role now shows only 3 "Nearby Incidents" (was 6 before)
+- SOS alerts are FILTERED OUT correctly - only Medical Emergency, Fire Alarm, and Alert (hazard) are shown
+- The filtering by userRole is working correctly now
+- Server logs show dispatch-console and admin-console authenticated via WebSocket
+- No Metro errors after restart
+- The fix is working: regular users don't see SOS alerts anymore

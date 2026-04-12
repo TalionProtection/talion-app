@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Talion Crisis Comm - Dispatch Console</title>
+  <link rel="stylesheet" href="styles.v2.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+<body>
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-icon">T</div>
+      <div class="brand-text">
+        <span class="brand-name">TALION</span>
+        <span class="brand-sub">Dispatch Console</span>
+      </div>
+    </div>
+    <nav class="sidebar-nav">
+      <a href="#" class="nav-item active" data-tab="overview">
+        <span class="nav-icon">&#x1F4CA;</span> Vue d'ensemble
+      </a>
+      <a href="#" class="nav-item" data-tab="incidents">
+        <span class="nav-icon">&#x1F6A8;</span> Incidents
+      </a>
+      <a href="#" class="nav-item" data-tab="responders">
+        <span class="nav-icon">&#x1F46E;</span> Unités
+      </a>
+      <a href="#" class="nav-item" data-tab="broadcast">
+        <span class="nav-icon">&#x1F4E2;</span> Broadcast
+      </a>
+      <a href="#" class="nav-item" data-tab="messages">
+        <span class="nav-icon">&#x1F4AC;</span> Messages <span class="msg-badge" id="msgNavBadge" style="display:none;">0</span>
+      </a>
+      <a href="#" class="nav-item" data-tab="map">
+        <span class="nav-icon">&#x1F5FA;</span> Carte
+      </a>
+      <a href="#" class="nav-item" data-tab="patrol">
+        <span class="nav-icon">&#x1F4CB;</span> Rondes <span class="patrol-badge" id="patrolNavBadge" style="display:none;">0</span>
+      </a>
+      <a href="#" class="nav-item" data-tab="ptt">
+        <span class="nav-icon">&#x1F399;</span> PTT
+      </a>
+    </nav>
+    <div class="sidebar-footer">
+      <a href="/admin-console/" class="console-link">&#x1F6E1; Admin Console</a>
+      <div class="server-status">
+        <span class="status-dot online" id="serverStatusDot"></span>
+        <span id="serverStatusText">Connecting...</span>
+      </div>
+      <div class="sidebar-info">
+        <span id="connectedCount">0</span> connected users
+      </div>
+      <div id="wsIndicator" class="ws-indicator ws-connecting">⏳ Connecting</div>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main-content">
+    <!-- Top Bar -->
+    <header class="topbar">
+      <h1 class="page-title" id="pageTitle">Vue d'ensemble</h1>
+      <div class="topbar-actions">
+        <span id="wsTopIndicator" class="ws-top-indicator">⚡ Real-time</span>
+        <button id="btnNotifToggle" class="btn btn-notif" onclick="toggleBrowserNotifications()" title="Toggle browser notifications">🔔 Notifications</button>
+        <button id="btnThemeToggle" class="btn btn-theme" onclick="toggleTheme()" title="Toggle dark/light mode">☀️ Light</button>
+        <span class="last-updated">Mis à jour : <span id="lastUpdated">--</span></span>
+        <button class="btn btn-primary" onclick="refreshData()">&#x21BB; Refresh</button>
+      </div>
+    </header>
+
+    <!-- Overview Tab -->
+    <section class="tab-content active" id="tab-overview">
+      <!-- Stats Row -->
+      <div class="stats-row">
+        <div class="stat-card stat-red">
+          <div class="stat-number" id="statActive">0</div>
+          <div class="stat-label">Actifs</div>
+          <div class="stat-pulse" id="pulseActive"></div>
+        </div>
+        <div class="stat-card stat-yellow">
+          <div class="stat-number" id="statAcknowledged">0</div>
+          <div class="stat-label">Acquittés</div>
+        </div>
+        <div class="stat-card stat-blue">
+          <div class="stat-number" id="statDispatched">0</div>
+          <div class="stat-label">Dispatchés</div>
+        </div>
+        <div class="stat-card stat-green">
+          <div class="stat-number" id="statAvailable">0</div>
+          <div class="stat-label">Disponibles</div>
+        </div>
+        <div class="stat-card stat-navy">
+          <div class="stat-number" id="statOnDuty">0</div>
+          <div class="stat-label">En service</div>
+        </div>
+      </div>
+
+      <!-- Active Incidents Quick View -->
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">&#x1F6A8; Incidents actifs</h3>
+          <button class="btn btn-sm" onclick="switchTab('incidents')">Voir tout</button>
+        </div>
+        <div id="overviewIncidents" class="incident-list"></div>
+      </div>
+
+      <!-- Responders Quick View -->
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">&#x1F46E; Unités d'intervention</h3>
+          <button class="btn btn-sm" onclick="switchTab('responders')">Voir tout</button>
+        </div>
+        <div id="overviewResponders" class="responder-grid"></div>
+      </div>
+    </section>
+
+    <!-- Incidents Tab -->
+    <section class="tab-content" id="tab-incidents">
+      <div class="toolbar">
+        <div class="filter-chips">
+          <button class="chip active" data-filter="all" onclick="filterIncidents('all')">All Open</button>
+          <button class="chip" data-filter="active" onclick="filterIncidents('active')">&#x1F534; Active</button>
+          <button class="chip" data-filter="acknowledged" onclick="filterIncidents('acknowledged')">&#x1F7E1; Acknowledged</button>
+          <button class="chip" data-filter="dispatched" onclick="filterIncidents('dispatched')">&#x1F535; Dispatched</button>
+          <button class="chip" data-filter="resolved" onclick="filterIncidents('resolved')">&#x1F7E2; Resolved</button>
+        </div>
+        <div class="toolbar-stats">
+          <button class="btn btn-primary" onclick="openCreateIncidentModal()">&#x2795; Create Incident</button>
+          <span class="stat-badge stat-red" id="incActiveCount">0 Active</span>
+          <span class="stat-badge stat-blue" id="incTotalCount">0 Total</span>
+        </div>
+      </div>
+      <div id="incidentsList" class="incident-cards"></div>
+    </section>
+
+    <!-- Create Incident Modal -->
+    <div class="modal-overlay" id="createIncidentModal" style="display:none;" onclick="if(event.target===this)closeCreateIncidentModal()">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>&#x1F6A8; Create New Incident</h3>
+          <button class="modal-close" onclick="closeCreateIncidentModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label>Incident Type</label>
+            <div class="incident-type-options" id="incidentTypeOptions">
+              <button class="type-btn" data-type="accident" onclick="selectIncidentType('accident')">&#x1F697; Accident</button>
+              <button class="type-btn" data-type="home_jacking" onclick="selectIncidentType('home_jacking')">&#x1F3E0; Home-Jacking</button>
+              <button class="type-btn" data-type="cambriolage" onclick="selectIncidentType('cambriolage')">&#x1F513; Cambriolage</button>
+              <button class="type-btn" data-type="medical" onclick="selectIncidentType('medical')">&#x1F3E5; M&eacute;dical</button>
+              <button class="type-btn" data-type="fire" onclick="selectIncidentType('fire')">&#x1F525; Feu</button>
+              <button class="type-btn" data-type="animal_perdu" onclick="selectIncidentType('animal_perdu')">&#x1F43E; Animal perdu</button>
+              <button class="type-btn" data-type="evenement_climatique" onclick="selectIncidentType('evenement_climatique')">&#x1F32A;&#xFE0F; &Eacute;v. climatique</button>
+              <button class="type-btn" data-type="rodage" onclick="selectIncidentType('rodage')">&#x1F3CD;&#xFE0F; Rodage</button>
+              <button class="type-btn" data-type="vehicule_suspect" onclick="selectIncidentType('vehicule_suspect')">&#x1F699; V&eacute;h. suspect</button>
+              <button class="type-btn" data-type="fugue" onclick="selectIncidentType('fugue')">&#x1F3C3; Fugue</button>
+              <button class="type-btn" data-type="route_bloquee" onclick="selectIncidentType('route_bloquee')">&#x1F6A7; Route bloqu&eacute;e</button>
+              <button class="type-btn" data-type="route_fermee" onclick="selectIncidentType('route_fermee')">&#x26D4; Route ferm&eacute;e</button>
+              <button class="type-btn" data-type="other" onclick="selectIncidentType('other')">&#x2753; Autre</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Severity</label>
+            <div class="severity-options" id="incidentSeverityOptions">
+              <button class="sev-btn" data-sev="low" onclick="selectIncidentSeverity('low')">Low</button>
+              <button class="sev-btn" data-sev="medium" onclick="selectIncidentSeverity('medium')">Medium</button>
+              <button class="sev-btn" data-sev="high" onclick="selectIncidentSeverity('high')">High</button>
+              <button class="sev-btn" data-sev="critical" onclick="selectIncidentSeverity('critical')">Critical</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Description</label>
+            <textarea id="incidentDescription" rows="3" placeholder="Describe the incident..."></textarea>
+          </div>
+          <div class="form-group">
+            <label>Adresse / Lieu</label>
+            <div style="position:relative">
+              <input type="text" id="incidentAddress" placeholder="Saisir une adresse..." autocomplete="off" oninput="onAddressInput(this.value)">
+              <div id="addressSuggestions" class="address-suggestions" style="display:none"></div>
+            </div>
+            <div class="poi-quick-select">
+              <span style="font-size:11px;color:var(--text-muted);">Lieux de référence:</span>
+              <button type="button" class="poi-btn" onclick="selectPOI('H\u00f4pital de la Tour',46.1930,6.1490)">&#x1F3E5; H\u00f4p. de la Tour</button>
+              <button type="button" class="poi-btn" onclick="selectPOI('HUG - Cl. de Champel',46.1910,6.1500)">&#x1F3E5; HUG Champel</button>
+              <button type="button" class="poi-btn" onclick="selectPOI('Clinique Beaulieu',46.2000,6.1550)">&#x1F3E5; Cl. Beaulieu</button>
+              <button type="button" class="poi-btn" onclick="selectPOI('Caserne pompiers Frontenex',46.2050,6.1650)">&#x1F692; Pompiers Frontenex</button>
+              <button type="button" class="poi-btn" onclick="selectPOI('SIS Caserne V\u00e9senaz',46.2280,6.2020)">&#x1F692; Pompiers V\u00e9senaz</button>
+              <button type="button" class="poi-btn" onclick="selectPOI('Police Champel',46.1940,6.1560)">&#x1F46E; Police Champel</button>
+              <button type="button" class="poi-btn" onclick="selectPOI('Gendarmerie V\u00e9senaz',46.2320,6.2070)">&#x1F46E; Gend. V\u00e9senaz</button>
+              <button type="button" class="poi-btn" onclick="selectPOI('Police Florissant',46.1960,6.1700)">&#x1F46E; Police Florissant</button>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group form-half">
+              <label>Latitude</label>
+              <input type="number" id="incidentLat" step="0.000001" placeholder="46.1950">
+            </div>
+            <div class="form-group form-half">
+              <label>Longitude</label>
+              <input type="number" id="incidentLng" step="0.000001" placeholder="6.1580">
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="closeCreateIncidentModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="submitCreateIncident()">&#x1F6A8; Create Incident</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Responders Tab -->
+    <section class="tab-content" id="tab-responders">
+      <div class="toolbar">
+        <div class="filter-chips">
+          <button class="chip active" data-filter="all" onclick="filterResponders('all')">Tous</button>
+          <button class="chip" data-filter="available" onclick="filterResponders('available')">&#x1F7E2; Disponible</button>
+          <button class="chip" data-filter="on_duty" onclick="filterResponders('on_duty')">&#x26A1; En service</button>
+          <button class="chip" data-filter="responding" onclick="filterResponders('responding')">&#x1F6A8; En intervention</button>
+          <button class="chip" data-filter="off_duty" onclick="filterResponders('off_duty')">&#x26AA; Hors service</button>
+        </div>
+      </div>
+      <div id="respondersGrid" class="responder-full-grid"></div>
+    </section>
+
+    <!-- Broadcast Tab -->
+    <section class="tab-content" id="tab-broadcast">
+      <div class="broadcast-panel">
+        <div class="broadcast-form card">
+          <h3 class="card-title">&#x1F4E2; Zone Broadcast</h3>
+          <p class="broadcast-desc">Send an alert message to all units within a specified radius.</p>
+          <div class="form-group">
+            <label>Message</label>
+            <textarea id="broadcastMessage" rows="4" placeholder="Enter broadcast message..."></textarea>
+          </div>
+          <div class="form-group">
+            <label>Severity</label>
+            <div class="severity-options">
+              <button class="sev-btn" data-sev="low" onclick="selectSeverity('low')">Low</button>
+              <button class="sev-btn active" data-sev="medium" onclick="selectSeverity('medium')">Medium</button>
+              <button class="sev-btn" data-sev="high" onclick="selectSeverity('high')">High</button>
+              <button class="sev-btn" data-sev="critical" onclick="selectSeverity('critical')">Critical</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Radius</label>
+            <div class="radius-options">
+              <button class="radius-btn" data-r="1" onclick="selectRadius('1')">1 km</button>
+              <button class="radius-btn active" data-r="5" onclick="selectRadius('5')">5 km</button>
+              <button class="radius-btn" data-r="10" onclick="selectRadius('10')">10 km</button>
+              <button class="radius-btn" data-r="25" onclick="selectRadius('25')">25 km</button>
+            </div>
+          </div>
+          <button class="btn btn-broadcast" onclick="sendBroadcast()">&#x1F4E1; Send Broadcast</button>
+        </div>
+        <div class="broadcast-history card">
+          <h3 class="card-title">Recent Broadcasts</h3>
+          <div id="broadcastHistory" class="broadcast-list"></div>
+        </div>
+      </div>
+    </section>
+    <!-- Messages Tab -->
+    <section class="tab-content" id="tab-messages">
+      <div class="msg-layout">
+        <!-- Conversations Sidebar -->
+        <div class="msg-sidebar">
+          <div class="msg-sidebar-header">
+            <h3>Conversations</h3>
+            <button class="btn btn-sm btn-primary" onclick="openNewConversationModal()">+ New</button>
+          </div>
+          <div class="msg-search">
+            <input type="text" id="msgSearchInput" placeholder="Search conversations..." oninput="filterConversations()">
+          </div>
+          <div class="msg-conv-list" id="msgConvList">
+            <div class="msg-empty">No conversations yet. Click + New to start.</div>
+          </div>
+        </div>
+        <!-- Chat Area -->
+        <div class="msg-chat-area">
+          <div class="msg-chat-header" id="msgChatHeader" style="display:none;">
+            <div class="msg-chat-avatar" id="msgChatAvatar"></div>
+            <div class="msg-chat-info">
+              <div class="msg-chat-name" id="msgChatName"></div>
+              <div class="msg-chat-meta" id="msgChatMeta"></div>
+            </div>
+            <div class="msg-chat-actions">
+              <button class="btn btn-sm" onclick="refreshChatMessages()" title="Refresh">&#x21BB;</button>
+            </div>
+          </div>
+          <div class="msg-chat-placeholder" id="msgChatPlaceholder">
+            <div class="msg-placeholder-icon">&#x1F4AC;</div>
+            <div class="msg-placeholder-text">Select a conversation to start messaging</div>
+          </div>
+          <div class="msg-messages" id="msgMessages" style="display:none;"></div>
+          <div class="msg-input-area" id="msgInputArea" style="display:none;">
+            <textarea id="msgInput" rows="1" placeholder="Type a message..." onkeydown="handleMsgKeydown(event)"></textarea>
+            <button class="btn btn-primary msg-send-btn" onclick="sendChatMessage()">&#x27A4; Send</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Map Tab -->
+    <section class="tab-content" id="tab-map">
+      <div class="map-toolbar">
+        <div class="map-search-container">
+          <input type="text" id="mapUserSearch" class="map-search-input" placeholder="&#x1F50D; Rechercher un utilisateur..." oninput="onMapSearchInput(this.value)" autocomplete="off">
+          <div class="map-search-results" id="mapSearchResults" style="display:none;"></div>
+        </div>
+        <div class="map-filters">
+          <label class="map-filter-label">
+            <input type="checkbox" id="filterIncidents" checked onchange="updateMapFilters()">
+            <span class="filter-chip filter-incidents">&#x1F6A8; Incidents</span>
+          </label>
+          <label class="map-filter-label">
+            <input type="checkbox" id="filterResponders" checked onchange="updateMapFilters()">
+            <span class="filter-chip filter-responders">&#x1F46E; Responders</span>
+          </label>
+          <label class="map-filter-label">
+            <input type="checkbox" id="filterUsers" checked onchange="updateMapFilters()">
+            <span class="filter-chip filter-users">&#x1F464; Users</span>
+          </label>
+        </div>
+        <div class="incident-type-filters" id="incidentTypeFilters">
+          <span style="font-size:11px;color:var(--text-muted);margin-right:4px;">Type:</span>
+          <button class="btn btn-type-filter active" data-type="all" onclick="filterMapByType('all')">📋 Tous</button>
+          <button class="btn btn-type-filter" data-type="sos" onclick="filterMapByType('sos')">🆘 SOS</button>
+          <button class="btn btn-type-filter" data-type="medical" onclick="filterMapByType('medical')">🏥 Médical</button>
+          <button class="btn btn-type-filter" data-type="fire" onclick="filterMapByType('fire')">🔥 Incendie</button>
+          <button class="btn btn-type-filter" data-type="security" onclick="filterMapByType('security')">🔒 Sécurité</button>
+          <button class="btn btn-type-filter" data-type="accident" onclick="filterMapByType('accident')">💥 Accident</button>
+          <button class="btn btn-type-filter" data-type="hazard" onclick="filterMapByType('hazard')">⚠️ Danger</button>
+          <button class="btn btn-type-filter" data-type="broadcast" onclick="filterMapByType('broadcast')">📢 Broadcast</button>
+        </div>
+        <div class="map-legend">
+          <span class="legend-item"><span class="legend-dot" style="background:#dc2626"></span> Critical</span>
+          <span class="legend-item"><span class="legend-dot" style="background:#f59e0b"></span> High</span>
+          <span class="legend-item"><span class="legend-dot" style="background:#3b82f6"></span> Medium</span>
+          <span class="legend-item"><span class="legend-dot" style="background:#6b7280"></span> Low</span>
+          <span class="legend-item"><span class="legend-dot" style="background:#059669"></span> Responder</span>
+          <span class="legend-item"><span class="legend-dot" style="background:#8b5cf6"></span> User</span>
+        </div>
+        <div class="zone-quick-filters">
+          <span style="font-size:11px;color:var(--text-muted);margin-right:4px;">Zones:</span>
+          <button class="btn btn-zone-filter" data-zone="all" onclick="zoomToZone('all')" title="Vue d'ensemble Genève">&#x1F30D; Tout</button>
+          <button class="btn btn-zone-filter" data-zone="Champel" onclick="zoomToZone('Champel')" style="border-color:#8b5cf6;color:#8b5cf6;">Champel</button>
+          <button class="btn btn-zone-filter" data-zone="Florissant" onclick="zoomToZone('Florissant')" style="border-color:#06b6d4;color:#06b6d4;">Florissant</button>
+          <button class="btn btn-zone-filter" data-zone="Malagnou" onclick="zoomToZone('Malagnou')" style="border-color:#f59e0b;color:#f59e0b;">Malagnou</button>
+          <button class="btn btn-zone-filter" data-zone="V\u00e9senaz" onclick="zoomToZone('V\u00e9senaz')" style="border-color:#22c55e;color:#22c55e;">Vésenaz</button>
+          <button class="btn btn-zone-filter" id="btnTogglePoi" onclick="togglePOIs()" title="Afficher/masquer les points d'intérêt">&#x1F3E5; POI</button>
+        </div>
+        <button class="btn btn-geofence" id="btnDrawZone" onclick="toggleGeofenceMode()">&#x1F4CD; Draw Zone</button>
+        <button class="btn btn-sound" id="btnSoundToggle" onclick="toggleGeofenceSounds()" title="Toggle geofence alert sounds">&#x1F50A; Sound ON</button>
+        <div class="live-users-counter" id="liveUsersCounter" title="Users currently sharing their location">
+          <span class="live-pulse"></span>
+          <span class="live-icon">&#x1F4CD;</span>
+          <span class="live-count" id="liveUsersCount">0</span>
+          <span class="live-label">live</span>
+        </div>
+      </div>
+      <div class="map-container-wrapper">
+        <div id="dispatchMap" style="width:100%;height:calc(100vh - 160px);border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;"></div>
+        <!-- Geofence Drawing Panel (overlay on map) -->
+        <div class="geofence-panel" id="geofencePanel" style="display:none;">
+          <div class="gf-header">
+            <h4>&#x1F4E1; Broadcast Zone</h4>
+            <button class="gf-close" onclick="cancelGeofence()">&times;</button>
+          </div>
+          <div class="gf-body">
+            <div class="gf-info" id="gfInfo">Click on the map to place zone center</div>
+            <div class="gf-field" id="gfRadiusField" style="display:none;">
+              <label>Radius: <strong id="gfRadiusValue">5</strong> km</label>
+              <input type="range" id="gfRadiusSlider" min="0.5" max="25" step="0.5" value="5" oninput="updateGeofenceRadius(this.value)">
+            </div>
+            <div class="gf-field" id="gfSeverityField" style="display:none;">
+              <label>Severity</label>
+              <div class="gf-severity-btns">
+                <button class="gf-sev-btn" data-sev="low" onclick="selectGfSeverity('low')">Low</button>
+                <button class="gf-sev-btn active" data-sev="medium" onclick="selectGfSeverity('medium')">Medium</button>
+                <button class="gf-sev-btn" data-sev="high" onclick="selectGfSeverity('high')">High</button>
+                <button class="gf-sev-btn" data-sev="critical" onclick="selectGfSeverity('critical')">Critical</button>
+              </div>
+            </div>
+            <div class="gf-field" id="gfMessageField" style="display:none;">
+              <label>Message</label>
+              <textarea id="gfMessage" rows="3" placeholder="Enter broadcast message..."></textarea>
+            </div>
+            <div class="gf-stats" id="gfStats" style="display:none;"></div>
+            <div class="gf-actions" id="gfActions" style="display:none;">
+              <button class="btn btn-secondary" onclick="cancelGeofence()">Cancel</button>
+              <button class="btn btn-broadcast" onclick="sendGeofenceBroadcast()">&#x1F4E1; Send Broadcast</button>
+            </div>
+          </div>
+        </div>
+        <!-- Active Zones List -->
+        <div class="active-zones-panel" id="activeZonesPanel" style="display:none;">
+          <div class="az-header">
+            <h4>&#x1F30D; Active Zones <span class="az-count" id="azCount">0</span></h4>
+            <button class="gf-close" onclick="toggleActiveZones()">&times;</button>
+          </div>
+          <div class="az-list" id="azList"></div>
+        </div>
+        <!-- Geofence Event Log -->
+        <div class="geofence-events-panel" id="geofenceEventsPanel" style="display:none;">
+          <div class="gfe-header">
+            <h4>&#x1F4CB; Geofence Events <span class="gfe-count" id="gfeCount">0</span></h4>
+            <div class="gfe-actions">
+              <button class="gfe-btn" onclick="refreshGeofenceEvents()" title="Refresh">&#x21BB;</button>
+              <button class="gfe-btn" onclick="toggleGeofenceEvents()" title="Close">&times;</button>
+            </div>
+          </div>
+          <div class="gfe-list" id="gfeList">
+            <div class="gfe-empty">No geofence events yet. Create a zone and simulate responder movement to see events.</div>
+          </div>
+        </div>
+        <!-- User Profile Panel -->
+        <div class="user-profile-panel" id="userProfilePanel" style="display:none;">
+          <div class="up-header">
+            <h4 id="upTitle">User Profile</h4>
+            <button class="gf-close" onclick="closeUserProfile()">&times;</button>
+          </div>
+          <div class="up-body" id="upBody">
+            <div class="up-loading">Loading profile...</div>
+          </div>
+        </div>
+
+        <!-- Simulate Movement Panel -->
+        <div class="simulate-panel" id="simulatePanel" style="display:none;">
+          <div class="sim-header">
+            <h4>&#x1F3AE; Simulate Movement</h4>
+            <button class="gf-close" onclick="toggleSimulatePanel()">&times;</button>
+          </div>
+          <div class="sim-body">
+            <div class="sim-field">
+              <label>Responder</label>
+              <select id="simResponder" class="sim-select"></select>
+            </div>
+            <div class="sim-field">
+              <label>Action</label>
+              <div class="sim-actions">
+                <button class="sim-btn" onclick="simulateMoveInto()">&#x27A1;&#xFE0F; Move INTO zone</button>
+                <button class="sim-btn sim-btn-exit" onclick="simulateMoveOut()">&#x2B05;&#xFE0F; Move OUT of zone</button>
+              </div>
+            </div>
+            <div class="sim-status" id="simStatus"></div>
+          </div>
+        </div>
+      </div>
+      <!-- Map bottom toolbar -->
+      <div class="map-bottom-toolbar">
+        <button class="btn btn-sm btn-outline" onclick="toggleGeofenceEvents()">&#x1F4CB; Events <span class="badge" id="gfeBadge">0</span></button>
+        <button class="btn btn-sm btn-outline" onclick="toggleSimulatePanel()">&#x1F3AE; Simulate</button>
+      </div>
+    </section>
+
+    <!-- Patrol Reports Tab -->
+    <section class="tab-content" id="tab-patrol">
+      <div class="toolbar">
+        <div class="filter-chips">
+          <button class="chip active" onclick="filterPatrolReports('all')">Tous</button>
+          <button class="chip" onclick="filterPatrolReports('habituel')" style="--chip-color:#22C55E">&#x1F7E2; Habituel</button>
+          <button class="chip" onclick="filterPatrolReports('inhabituel')" style="--chip-color:#EAB308">&#x1F7E1; Inhabituel</button>
+          <button class="chip" onclick="filterPatrolReports('identification')" style="--chip-color:#F97316">&#x1F7E0; Identification</button>
+          <button class="chip" onclick="filterPatrolReports('suspect')" style="--chip-color:#EF4444">&#x1F534; Suspect</button>
+          <button class="chip" onclick="filterPatrolReports('menace')" style="--chip-color:#8B5CF6">&#x1F7E3; Menace</button>
+          <button class="chip" onclick="filterPatrolReports('attaque')" style="--chip-color:#000000">&#x26AB; Attaque</button>
+        </div>
+        <button class="btn btn-primary" onclick="refreshPatrolReports()">&#x1F504; Rafraîchir</button>
+      </div>
+      <div class="patrol-stats-row" id="patrolStatsRow">
+        <div class="stat-card"><div class="stat-number" id="patrolTotalCount">0</div><div class="stat-label">Total rapports</div></div>
+        <div class="stat-card"><div class="stat-number" style="color:#22C55E" id="patrolGreenCount">0</div><div class="stat-label">Habituel</div></div>
+        <div class="stat-card"><div class="stat-number" style="color:#EF4444" id="patrolAlertCount">0</div><div class="stat-label">Alertes</div></div>
+        <div class="stat-card"><div class="stat-number" style="color:#F97316" id="patrolPasOkCount">0</div><div class="stat-label">Tâches PAS OK</div></div>
+      </div>
+      <div class="patrol-reports-grid" id="patrolReportsGrid">
+        <div class="empty-state">&#x1F4CB; Aucun rapport de ronde</div>
+      </div>
+    </section>
+
+    <!-- PTT Tab -->
+    <section class="tab-content" id="tab-ptt">
+      <div class="ptt-layout">
+        <!-- Channel sidebar -->
+        <div class="ptt-channels">
+          <div class="ptt-channels-header">
+            <h3>Canaux PTT</h3>
+            <button class="btn btn-primary btn-sm" onclick="showDirectPTTCall()" title="Appel direct" style="margin-right:4px;">
+              📞 Direct
+            </button>
+            <button class="btn btn-primary btn-sm" onclick="showCreatePTTGroup()" title="Créer un groupe">
+              + Groupe
+            </button>
+          </div>
+          <div id="pttChannelList" class="ptt-channel-list">
+            <div class="empty-state">Chargement...</div>
+          </div>
+        </div>
+        <!-- Main PTT area -->
+        <div class="ptt-main">
+          <div class="ptt-main-header">
+            <div id="pttCurrentChannel" class="ptt-current-channel">Sélectionnez un canal</div>
+            <div id="pttTalkingIndicator" class="ptt-talking-indicator" style="display:none;">
+              <span class="ptt-talking-pulse"></span>
+              <span class="ptt-talking-icon">&#x1F3A4;</span>
+              <span id="pttTalkingName">...</span>
+              <span id="pttTalkingRole" class="ptt-talking-role"></span>
+            </div>
+          </div>
+          <!-- Emergency banner -->
+          <div id="pttEmergencyBanner" class="ptt-emergency-banner" style="display:none;">
+            <span>&#x26A0;&#xFE0F; MESSAGE D'URGENCE de <strong id="pttEmergencySender"></strong></span>
+            <button class="btn btn-sm" onclick="playEmergencyMessage()" id="pttEmergencyPlayBtn">&#x25B6; Écouter</button>
+            <button class="btn btn-sm" onclick="dismissDispatchEmergency()">✕</button>
+          </div>
+          <!-- Messages -->
+          <div id="pttMessages" class="ptt-messages">
+            <div class="empty-state">&#x1F399; Sélectionnez un canal pour voir les messages</div>
+          </div>
+          <!-- PTT Controls -->
+          <div class="ptt-controls">
+            <button id="pttRecordBtn" class="ptt-record-btn" onmousedown="startDispatchPTT()" onmouseup="stopDispatchPTT()" onmouseleave="stopDispatchPTT()" disabled>
+              &#x1F3A4; MAINTENIR POUR PARLER
+            </button>
+            <button id="pttEmergencyBtn" class="ptt-emergency-btn" onclick="toggleDispatchEmergency()">
+              &#x26A0;&#xFE0F; URGENCE
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Create PTT Group Modal -->
+  <div class="modal-overlay" id="pttGroupModal" style="display:none;">
+    <div class="modal" style="max-width:450px;">
+      <h3 class="modal-title">Créer un groupe PTT</h3>
+      <div class="form-group">
+        <label>Nom du groupe *</label>
+        <input type="text" id="pttGroupName" class="form-control" placeholder="Ex: Équipe Champel">
+      </div>
+      <div class="form-group">
+        <label>Description</label>
+        <input type="text" id="pttGroupDesc" class="form-control" placeholder="Description optionnelle">
+      </div>
+      <div class="form-group">
+        <label>Rôles autorisés</label>
+        <div class="ptt-roles-grid">
+          <label class="ptt-role-check"><input type="checkbox" value="user"> Utilisateurs</label>
+          <label class="ptt-role-check"><input type="checkbox" value="responder" checked> Intervenants</label>
+          <label class="ptt-role-check"><input type="checkbox" value="dispatcher" checked> Dispatchers</label>
+          <label class="ptt-role-check"><input type="checkbox" value="admin" checked> Admins</label>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+        <button class="btn btn-secondary" onclick="closePTTGroupModal()">Annuler</button>
+        <button class="btn btn-primary" onclick="createDispatchPTTGroup()">Créer</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Direct PTT Call Modal -->
+  <div class="modal-overlay" id="pttDirectModal" style="display:none;">
+    <div class="modal" style="max-width:450px;">
+      <h3 class="modal-title">📞 Appel direct PTT</h3>
+      <div class="form-group">
+        <label>Sélectionnez un utilisateur</label>
+        <div id="pttDirectUserList" class="ptt-direct-user-list" style="max-height:300px;overflow-y:auto;"></div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+        <button class="btn btn-secondary" onclick="closePTTDirectModal()">Annuler</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Patrol Report Detail Modal -->
+  <div class="modal-overlay" id="patrolDetailModal" style="display:none;">
+    <div class="modal" style="max-width:600px;">
+      <h3 class="modal-title">Détail du rapport de ronde</h3>
+      <div id="patrolDetailContent"></div>
+      <button class="btn btn-secondary modal-cancel" onclick="closePatrolDetailModal()">Fermer</button>
+    </div>
+  </div>
+
+  <!-- Assign Responder Modal -->
+  <div class="modal-overlay" id="assignModal">
+    <div class="modal">
+      <h3 class="modal-title">Assign Responder</h3>
+      <p class="modal-subtitle" id="assignModalSubtitle"></p>
+      <div class="responder-options" id="assignResponderList"></div>
+      <button class="btn btn-secondary modal-cancel" onclick="closeAssignModal()">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Resolve Confirm Modal -->
+  <div class="modal-overlay" id="resolveModal">
+    <div class="modal">
+      <h3 class="modal-title">Resolve Incident</h3>
+      <p class="modal-subtitle" id="resolveModalSubtitle"></p>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="closeResolveModal()">Cancel</button>
+        <button class="btn btn-success" onclick="confirmResolve()">Confirm Resolve</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Incident Detail Modal -->
+  <div class="modal-overlay" id="detailModal">
+    <div class="modal modal-detail">
+      <div class="detail-header">
+        <div class="detail-header-left">
+          <span class="detail-type-icon" id="detailTypeIcon"></span>
+          <div>
+            <h3 class="modal-title" id="detailTitle"></h3>
+            <p class="detail-id" id="detailId"></p>
+          </div>
+        </div>
+        <button class="detail-close" onclick="closeDetailModal()">&times;</button>
+      </div>
+
+      <div class="detail-badges" id="detailBadges"></div>
+
+      <!-- Mini Map -->
+      <div class="detail-map-container">
+        <div id="detailMiniMap" style="width:100%;height:200px;border-radius:10px;overflow:hidden;"></div>
+        <div class="detail-address" id="detailAddress"></div>
+        <div class="detail-coords" id="detailCoords"></div>
+      </div>
+
+      <!-- Info Grid -->
+      <div class="detail-grid">
+        <div class="detail-field">
+          <span class="detail-label">Reported By</span>
+          <span class="detail-value" id="detailReportedBy"></span>
+        </div>
+        <div class="detail-field">
+          <span class="detail-label">Created</span>
+          <span class="detail-value" id="detailCreatedAt"></span>
+        </div>
+        <div class="detail-field">
+          <span class="detail-label">Status</span>
+          <span class="detail-value" id="detailStatus"></span>
+        </div>
+        <div class="detail-field">
+          <span class="detail-label">Severity</span>
+          <span class="detail-value" id="detailSeverity"></span>
+        </div>
+      </div>
+
+      <!-- Description -->
+      <div class="detail-section" id="detailDescSection">
+        <h4 class="detail-section-title">Description</h4>
+        <p class="detail-desc" id="detailDescription"></p>
+      </div>
+
+      <!-- Photos -->
+      <div class="detail-section" id="detailPhotosSection" style="display:none;">
+        <h4 class="detail-section-title">📷 Photos jointes</h4>
+        <div class="detail-photos" id="detailPhotos"></div>
+      </div>
+
+      <!-- Responding Units -->
+      <div class="detail-section" id="detailRespondersSection">
+        <h4 class="detail-section-title">Unités d'intervention</h4>
+        <div class="detail-responders" id="detailResponders"></div>
+      </div>
+
+      <!-- Status History Timeline -->
+      <div class="detail-section" id="detailHistorySection" style="display:none;">
+        <h4 class="detail-section-title">Historique des statuts</h4>
+        <div class="status-timeline" id="detailStatusHistory"></div>
+      </div>
+
+      <!-- Actions -->
+      <div class="detail-actions" id="detailActions"></div>
+    </div>
+  </div>
+
+  <!-- New Conversation Modal -->
+  <div class="modal-overlay" id="newConvModal">
+    <div class="modal modal-newconv">
+      <div class="modal-header-row">
+        <h3 class="modal-title">New Conversation</h3>
+        <button class="detail-close" onclick="closeNewConvModal()">&times;</button>
+      </div>
+      <div class="newconv-tabs">
+        <button class="newconv-tab active" data-mode="direct" onclick="switchNewConvMode('direct')">&#x1F464; Direct</button>
+        <button class="newconv-tab" data-mode="group-users" onclick="switchNewConvMode('group-users')">&#x1F465; Group (Users)</button>
+        <button class="newconv-tab" data-mode="group-role" onclick="switchNewConvMode('group-role')">&#x1F3AD; Group (Role)</button>
+        <button class="newconv-tab" data-mode="group-tags" onclick="switchNewConvMode('group-tags')">&#x1F3F7; Group (Tags)</button>
+      </div>
+      <!-- Direct Mode -->
+      <div class="newconv-panel active" id="newconv-direct">
+        <div class="newconv-user-list" id="newconvDirectUsers"></div>
+      </div>
+      <!-- Group by Users -->
+      <div class="newconv-panel" id="newconv-group-users">
+        <div class="form-group">
+          <label>Group Name</label>
+          <input type="text" id="newconvGroupName" placeholder="Enter group name...">
+        </div>
+        <div class="newconv-user-list" id="newconvGroupUsers"></div>
+        <button class="btn btn-primary" style="width:100%;margin-top:12px;" onclick="createGroupByUsers()">Create Group</button>
+      </div>
+      <!-- Group by Role -->
+      <div class="newconv-panel" id="newconv-group-role">
+        <div class="form-group">
+          <label>Group Name</label>
+          <input type="text" id="newconvRoleGroupName" placeholder="Enter group name...">
+        </div>
+        <div class="form-group">
+          <label>Select Role</label>
+          <div class="newconv-role-list">
+            <button class="role-select-btn" data-role="user" onclick="selectConvRole('user')">&#x1F464; Users</button>
+            <button class="role-select-btn" data-role="responder" onclick="selectConvRole('responder')">&#x1F46E; Responders</button>
+            <button class="role-select-btn" data-role="dispatcher" onclick="selectConvRole('dispatcher')">&#x1F4E1; Dispatchers</button>
+            <button class="role-select-btn" data-role="admin" onclick="selectConvRole('admin')">&#x1F6E1; Admins</button>
+          </div>
+        </div>
+        <button class="btn btn-primary" style="width:100%;margin-top:12px;" onclick="createGroupByRole()">Create Group</button>
+      </div>
+      <!-- Group by Tags -->
+      <div class="newconv-panel" id="newconv-group-tags">
+        <div class="form-group">
+          <label>Group Name</label>
+          <input type="text" id="newconvTagGroupName" placeholder="Enter group name...">
+        </div>
+        <div class="form-group">
+          <label>Select Tags</label>
+          <div class="newconv-tags-list" id="newconvTagsList"></div>
+        </div>
+        <button class="btn btn-primary" style="width:100%;margin-top:12px;" onclick="createGroupByTags()">Create Group</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.v2.js"></script>
+</body>
+</html>

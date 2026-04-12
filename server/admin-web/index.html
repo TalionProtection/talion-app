@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Talion Crisis Comm - Admin Console</title>
+  <link rel="stylesheet" href="styles.v2.css">
+</head>
+<body>
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-icon">T</div>
+      <div class="brand-text">
+        <span class="brand-name">TALION</span>
+        <span class="brand-sub">Admin Console</span>
+      </div>
+    </div>
+    <nav class="sidebar-nav">
+      <a href="#" class="nav-item active" data-tab="dashboard">
+        <span class="nav-icon">&#x1F4CA;</span> Dashboard
+      </a>
+      <a href="#" class="nav-item" data-tab="users">
+        <span class="nav-icon">&#x1F465;</span> Users
+      </a>
+      <a href="#" class="nav-item" data-tab="incidents">
+        <span class="nav-icon">&#x1F6A8;</span> Incidents
+      </a>
+      <a href="#" class="nav-item" data-tab="audit">
+        <span class="nav-icon">&#x1F4CB;</span> Audit Log
+      </a>
+      <a href="#" class="nav-item" data-tab="login-history">
+        <span class="nav-icon">&#x1F512;</span> Login History
+      </a>
+    </nav>
+    <div class="sidebar-footer">
+      <a href="/dispatch-console/" style="display:block;padding:8px 12px;margin-bottom:8px;border-radius:6px;background:#243447;color:#94a3b8;text-decoration:none;font-size:12px;text-align:center;transition:all 0.15s;">&#x1F4E1; Dispatch Console</a>
+      <div class="server-status">
+        <span class="status-dot online" id="serverStatusDot"></span>
+        <span id="serverStatusText">Connecting...</span>
+      </div>
+      <div class="sidebar-info">
+        <span id="connectedCount">0</span> connected users
+      </div>
+      <div id="wsIndicator" class="ws-indicator ws-connecting">⏳ Connecting</div>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main-content">
+    <!-- Top Bar -->
+    <header class="topbar">
+      <h1 class="page-title" id="pageTitle">Dashboard</h1>
+      <div class="topbar-actions">
+        <span id="wsTopIndicator" class="ws-top-indicator">⚡ Real-time</span>
+        <button id="btnNotifToggle" class="btn btn-notif" onclick="toggleBrowserNotifications()" title="Toggle browser notifications">🔔 Notifications</button>
+        <button id="btnThemeToggle" class="btn btn-theme" onclick="toggleTheme()" title="Toggle dark/light mode">☀️ Light</button>
+        <span class="last-updated">Last updated: <span id="lastUpdated">--</span></span>
+        <button class="btn btn-primary" onclick="refreshData()">&#x21BB; Refresh</button>
+      </div>
+    </header>
+
+    <!-- Dashboard Tab -->
+    <section class="tab-content active" id="tab-dashboard">
+      <!-- KPI Cards -->
+      <div class="kpi-grid">
+        <div class="kpi-card kpi-purple">
+          <div class="kpi-icon">&#x1F465;</div>
+          <div class="kpi-data">
+            <span class="kpi-number" id="kpiTotalUsers">0</span>
+            <span class="kpi-label">Total Users</span>
+          </div>
+        </div>
+        <div class="kpi-card kpi-red">
+          <div class="kpi-icon">&#x1F6A8;</div>
+          <div class="kpi-data">
+            <span class="kpi-number" id="kpiActiveIncidents">0</span>
+            <span class="kpi-label">Active Incidents</span>
+          </div>
+        </div>
+        <div class="kpi-card kpi-green">
+          <div class="kpi-icon">&#x2705;</div>
+          <div class="kpi-data">
+            <span class="kpi-number" id="kpiResolvedIncidents">0</span>
+            <span class="kpi-label">Resolved</span>
+          </div>
+        </div>
+        <div class="kpi-card kpi-blue">
+          <div class="kpi-icon">&#x23F1;&#xFE0F;</div>
+          <div class="kpi-data">
+            <span class="kpi-number" id="kpiAvgResponse">--</span>
+            <span class="kpi-label">Avg Response (min)</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Charts Row -->
+      <div class="charts-row">
+        <div class="chart-card">
+          <h3 class="chart-title">Users by Role</h3>
+          <div class="bar-chart" id="chartUsersByRole"></div>
+        </div>
+        <div class="chart-card">
+          <h3 class="chart-title">Incidents by Severity</h3>
+          <div class="bar-chart" id="chartBySeverity"></div>
+        </div>
+      </div>
+
+      <!-- System Health -->
+      <div class="card">
+        <h3 class="card-title">System Health</h3>
+        <div class="health-grid" id="healthGrid"></div>
+      </div>
+
+      <!-- Recent Activity -->
+      <div class="card">
+        <h3 class="card-title">Recent Activity</h3>
+        <div class="activity-list" id="recentActivity"></div>
+      </div>
+    </section>
+
+    <!-- Users Tab -->
+    <section class="tab-content" id="tab-users">
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <input type="text" class="search-input" id="userSearch" placeholder="Rechercher par nom, email, rôle, tag..." oninput="filterUsers()">
+          <button class="btn btn-primary" onclick="openUserDrawer()">&#x2795; Nouvel Utilisateur</button>
+        </div>
+        <div class="toolbar-stats">
+          <span class="stat-badge stat-green" id="usersActive">0 Active</span>
+          <span class="stat-badge stat-yellow" id="usersSuspended">0 Suspended</span>
+          <span class="stat-badge stat-red" id="usersDeactivated">0 Deactivated</span>
+        </div>
+      </div>
+      <div class="table-container">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Utilisateur</th>
+              <th>Contact</th>
+              <th>Rôle</th>
+              <th>Tags</th>
+              <th>Statut</th>
+              <th>Relations</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="usersTableBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Incidents Tab -->
+    <section class="tab-content" id="tab-incidents">
+      <div class="toolbar">
+        <div class="filter-chips">
+          <button class="chip active" data-filter="all" onclick="filterIncidents('all')">All</button>
+          <button class="chip" data-filter="active" onclick="filterIncidents('active')">Active</button>
+          <button class="chip" data-filter="acknowledged" onclick="filterIncidents('acknowledged')">Acknowledged</button>
+          <button class="chip" data-filter="dispatched" onclick="filterIncidents('dispatched')">Dispatched</button>
+          <button class="chip" data-filter="resolved" onclick="filterIncidents('resolved')">Resolved</button>
+        </div>
+        <div class="toolbar-stats">
+          <span class="stat-badge stat-red" id="incActive">0 Active</span>
+          <span class="stat-badge stat-green" id="incResolved">0 Resolved</span>
+          <span class="stat-badge stat-blue" id="incTotal">0 Total</span>
+        </div>
+      </div>
+      <div class="table-container">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Type</th>
+              <th>Severity</th>
+              <th>Status</th>
+              <th>Reported By</th>
+              <th>Location</th>
+              <th>Time</th>
+              <th>Responders</th>
+            </tr>
+          </thead>
+          <tbody id="incidentsTableBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Audit Log Tab -->
+    <section class="tab-content" id="tab-audit">
+      <div class="toolbar">
+        <div class="filter-chips">
+          <button class="chip active" data-filter="all" onclick="filterAudit('all')">All</button>
+          <button class="chip" data-filter="auth" onclick="filterAudit('auth')">&#x1F510; Auth</button>
+          <button class="chip" data-filter="user" onclick="filterAudit('user')">&#x1F464; User</button>
+          <button class="chip" data-filter="incident" onclick="filterAudit('incident')">&#x1F6A8; Incident</button>
+          <button class="chip" data-filter="system" onclick="filterAudit('system')">&#x2699;&#xFE0F; System</button>
+          <button class="chip" data-filter="broadcast" onclick="filterAudit('broadcast')">&#x1F4E2; Broadcast</button>
+        </div>
+        <button class="btn btn-secondary" onclick="exportAuditCSV()">&#x1F4E5; Export CSV</button>
+      </div>
+      <div class="table-container">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Category</th>
+              <th>Action</th>
+              <th>Performed By</th>
+              <th>Target</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody id="auditTableBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Login History Tab -->
+    <section class="tab-content" id="tab-login-history">
+      <!-- Stats Cards -->
+      <div class="kpi-grid" id="loginStatsGrid">
+        <div class="kpi-card">
+          <div class="kpi-value" id="loginSuccess24h">0</div>
+          <div class="kpi-label">Connexions réussies (24h)</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-value" id="loginFailed24h" style="color:var(--error)">0</div>
+          <div class="kpi-label">Échecs de connexion (24h)</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-value" id="loginUniqueUsers24h">0</div>
+          <div class="kpi-label">Utilisateurs uniques (24h)</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-value" id="loginTotal">0</div>
+          <div class="kpi-label">Total enregistré</div>
+        </div>
+      </div>
+
+      <!-- Suspicious IPs Alert -->
+      <div id="suspiciousIpsAlert" style="display:none;margin-bottom:16px;padding:12px 16px;background:rgba(239,68,68,0.1);border:1px solid var(--error);border-radius:8px;color:var(--error);font-size:13px;">
+        <strong>&#x26A0;&#xFE0F; IPs suspectes (3+ échecs en 24h) :</strong>
+        <span id="suspiciousIpsList"></span>
+      </div>
+
+      <!-- Toolbar -->
+      <div class="toolbar">
+        <div class="filter-chips">
+          <button class="chip active" data-lh-filter="all" onclick="filterLoginHistory('all')">Tous</button>
+          <button class="chip" data-lh-filter="success" onclick="filterLoginHistory('success')">&#x2705; Succès</button>
+          <button class="chip" data-lh-filter="failed_password" onclick="filterLoginHistory('failed_password')">&#x274C; Mot de passe</button>
+          <button class="chip" data-lh-filter="failed_email" onclick="filterLoginHistory('failed_email')">&#x1F6AB; Email inconnu</button>
+          <button class="chip" data-lh-filter="account_deactivated" onclick="filterLoginHistory('account_deactivated')">&#x1F6D1; Désactivé</button>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input type="text" id="loginHistorySearch" placeholder="Rechercher..." class="search-input" oninput="searchLoginHistory()" style="width:200px;">
+          <select id="loginHistoryUserFilter" onchange="filterLoginHistoryByUser()" style="padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;">
+            <option value="">Tous les utilisateurs</option>
+          </select>
+          <button class="btn btn-secondary" onclick="exportLoginHistoryCSV()">&#x1F4E5; Export CSV</button>
+        </div>
+      </div>
+
+      <!-- Table -->
+      <div class="table-container">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Date / Heure</th>
+              <th>Utilisateur</th>
+              <th>Email</th>
+              <th>Statut</th>
+              <th>Adresse IP</th>
+              <th>Appareil</th>
+              <th>User Agent</th>
+            </tr>
+          </thead>
+          <tbody id="loginHistoryTableBody"></tbody>
+        </table>
+      </div>
+
+      <!-- Pagination -->
+      <div id="loginHistoryPagination" style="display:flex;justify-content:center;align-items:center;gap:12px;margin-top:16px;">
+        <button class="btn btn-secondary" id="lhPrevBtn" onclick="loadLoginHistory(currentLHPage - 1)" disabled>&laquo; Précédent</button>
+        <span id="lhPageInfo" style="font-size:13px;color:var(--text-secondary)">Page 1 / 1</span>
+        <button class="btn btn-secondary" id="lhNextBtn" onclick="loadLoginHistory(currentLHPage + 1)" disabled>Suivant &raquo;</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- Role Change Modal -->
+  <div class="modal-overlay" id="roleModal">
+    <div class="modal">
+      <h3 class="modal-title">Change User Role</h3>
+      <p class="modal-subtitle" id="roleModalSubtitle"></p>
+      <div class="role-options" id="roleOptions"></div>
+      <button class="btn btn-secondary modal-cancel" onclick="closeRoleModal()">Cancel</button>
+    </div>
+  </div>
+
+  <!-- User Drawer (Add/Edit/View) -->
+  <div class="drawer-overlay" id="userDrawer" onclick="closeUserDrawerOverlay(event)">
+    <div class="drawer">
+      <div class="drawer-header">
+        <h2 class="drawer-title" id="drawerTitle">Nouvel Utilisateur</h2>
+        <button class="drawer-close" onclick="closeUserDrawer()">&times;</button>
+      </div>
+      <div class="drawer-body" id="drawerBody">
+        <!-- Photo section -->
+        <div class="form-group full-width" style="margin-bottom:16px">
+          <div class="photo-upload-area">
+            <div class="photo-preview" id="photoPreview">&#x1F464;</div>
+            <div class="photo-actions">
+              <label class="btn btn-secondary btn-sm" style="cursor:pointer">
+                &#x1F4F7; Choisir photo
+                <input type="file" id="photoInput" accept="image/*" onchange="handlePhotoUpload(event)" style="display:none">
+              </label>
+              <button class="btn btn-sm btn-secondary" onclick="clearPhoto()" id="btnClearPhoto" style="display:none">Supprimer photo</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Identity -->
+        <div class="form-section"><span class="form-section-icon">&#x1F464;</span> Identité</div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Prénom *</label>
+            <input type="text" class="form-input" id="fieldFirstName" placeholder="Prénom">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Nom *</label>
+            <input type="text" class="form-input" id="fieldLastName" placeholder="Nom de famille">
+          </div>
+          <div class="form-group full-width">
+            <label class="form-label">Email *</label>
+            <input type="email" class="form-input" id="fieldEmail" placeholder="email@exemple.com">
+          </div>
+          <div class="form-group full-width">
+            <label class="form-label">Mot de passe</label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input type="password" class="form-input" id="fieldPassword" placeholder="Mot de passe" style="flex:1">
+              <button type="button" class="btn-toggle-pw" onclick="togglePasswordVisibility()" title="Afficher/masquer">&#x1F441;</button>
+            </div>
+            <span id="passwordIndicator" class="password-indicator"></span>
+          </div>
+        </div>
+
+        <!-- Contact -->
+        <div class="form-section"><span class="form-section-icon">&#x1F4DE;</span> Contact</div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Téléphone mobile</label>
+            <input type="tel" class="form-input" id="fieldPhoneMobile" placeholder="+33 6 ...">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Téléphone fixe</label>
+            <input type="tel" class="form-input" id="fieldPhoneLandline" placeholder="+33 1 ...">
+          </div>
+          <div class="form-group full-width address-autocomplete-wrapper">
+            <label class="form-label">Adresse complète</label>
+            <input type="text" class="form-input" id="fieldAddress" placeholder="Commencez à taper une adresse..." autocomplete="off">
+            <div class="address-suggestions" id="addressSuggestions"></div>
+          </div>
+        </div>
+
+        <!-- Role & Tags -->
+        <div class="form-section"><span class="form-section-icon">&#x1F3F7;&#xFE0F;</span> Rôle & Tags</div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Rôle dans l'app</label>
+            <select class="form-select" id="fieldRole">
+              <option value="user">Utilisateur</option>
+              <option value="responder">Intervenant</option>
+              <option value="dispatcher">Dispatcher</option>
+              <option value="admin">Administrateur</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Statut</label>
+            <select class="form-select" id="fieldStatus">
+              <option value="active">Actif</option>
+              <option value="suspended">Suspendu</option>
+              <option value="deactivated">Désactivé</option>
+            </select>
+          </div>
+          <div class="form-group full-width">
+            <label class="form-label">Tags (appuyez Entrée pour ajouter)</label>
+            <div class="tags-container" id="tagsContainer" onclick="document.getElementById('tagInput').focus()">
+              <input type="text" class="tag-input" id="tagInput" placeholder="Ajouter un tag..." onkeydown="handleTagKeydown(event)">
+            </div>
+          </div>
+        </div>
+
+        <!-- Comments -->
+        <div class="form-section"><span class="form-section-icon">&#x1F4DD;</span> Commentaires</div>
+        <div class="form-group full-width">
+          <textarea class="form-textarea" id="fieldComments" placeholder="Notes, commentaires libres..."></textarea>
+        </div>
+
+        <!-- Relationships -->
+        <div class="form-section"><span class="form-section-icon">&#x1F46A;</span> Relations (parenté, cohabitation...)</div>
+        <div class="relationships-list" id="relationshipsList"></div>
+        <div class="add-relationship-row" style="margin-top:10px">
+          <select class="form-select" id="relUserSelect" style="flex:2">
+            <option value="">-- Sélectionner un utilisateur --</option>
+          </select>
+          <select class="form-select" id="relTypeSelect" style="flex:1">
+            <option value="spouse">Conjoint(e)</option>
+            <option value="parent">Parent</option>
+            <option value="child">Enfant</option>
+            <option value="sibling">Frère/Sœur</option>
+            <option value="cohabitant">Cohabitant</option>
+            <option value="other">Autre</option>
+          </select>
+          <button class="btn btn-sm btn-primary" onclick="addRelationship()">Ajouter</button>
+        </div>
+
+        <!-- Same address info -->
+        <div id="sameAddressInfo" style="margin-top:16px;display:none"></div>
+
+        <!-- Delete zone (only for edit mode) -->
+        <div id="deleteZone" style="display:none">
+          <div class="delete-confirm-box">
+            <p>&#x26A0;&#xFE0F; Supprimer définitivement cet utilisateur ? Cette action est irréversible.</p>
+            <button class="btn btn-danger" onclick="deleteCurrentUser()">&#x1F5D1;&#xFE0F; Supprimer l'utilisateur</button>
+          </div>
+        </div>
+      </div>
+      <div class="drawer-footer">
+        <button class="btn btn-secondary" onclick="closeUserDrawer()">Annuler</button>
+        <button class="btn btn-primary" id="btnSaveUser" onclick="saveUser()">&#x1F4BE; Enregistrer</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.v2.js"></script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+Screenshot observations (alert-visibility-sounds checkpoint):
+- Home screen shows 4 Nearby Incidents (user role, SOS filtered out correctly)
+- Acknowledged alerts show "ACK" badge (INC-003 Fire Alarm, INC-004 Alert) - they remain visible!
+- Active alerts show without ACK badge (INC-008 Fire Alarm, INC-002 Alert)
+- Resolved alert (INC-001) is NOT shown - correct!
+- SOS alerts are not shown for user role - correct!
+- Badge shows "2" for nearby incidents count
+- App looks correct, all visibility rules working
