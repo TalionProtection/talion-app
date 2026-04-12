@@ -1867,7 +1867,7 @@ app.post('/api/sos', (req, res) => {
     severity: severity || 'critical',
     location: location || { latitude: 0, longitude: 0, address: 'Unknown' },
     description: description || `SOS Alert from ${userName || 'Unknown'}`,
-    createdBy: userId || 'mobile-user',
+    createdBy: userName || userId || 'mobile-user',
     createdAt: Date.now(),
     status: 'active',
     respondingUsers: [],
