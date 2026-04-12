@@ -528,7 +528,7 @@ let pttMessages: PTTMessageServer[] = loadJsonFile<PTTMessageServer[]>(PTT_MESSA
 // Keep only last 200 messages in memory
 if (pttMessages.length > 200) pttMessages = pttMessages.slice(-200);
 
-function persistPTTChannels() { fs.writeFileSync(PTT_CHANNELS_FILE, JSON.stringify(pttChannels, null, 2)); }
+function persistPTTChannels() { fs.writeFileSync(PTT_CHANNELS_FILE, JSON.stringify(pttChannels, null, 2)); pttChannels.forEach(c => savePTTChannelToSupabase(c)); }
 function persistPTTMessages() { fs.writeFileSync(PTT_MESSAGES_FILE, JSON.stringify(pttMessages.slice(-200), null, 2)); }
 
 // Location history storage (persisted, ring buffer per user)
@@ -651,6 +651,7 @@ function persistAlerts() {
 // Helper: persist family perimeters to disk (debounced)
 function persistPerimeters() {
   debouncedSave(FAMILY_PERIMETERS_FILE, Array.from(familyPerimeters.values()));
+  familyPerimeters.forEach(p => saveFamilyPerimeterToSupabase(p));
 }
 
 // Helper: persist proximity alerts to disk (debounced)
@@ -661,6 +662,7 @@ function persistProximityAlerts() {
 // Helper: persist patrol reports to disk (debounced)
 function persistPatrolReports() {
   debouncedSave(PATROL_REPORTS_FILE, patrolReports);
+  patrolReports.forEach(r => savePatrolReportToSupabase(r));
 }
 
 // Helper: persist location history to disk (debounced)
@@ -2109,6 +2111,7 @@ app.put('/api/family/perimeters/:id', (req, res) => {
 // DELETE /api/family/perimeters/:id - delete a perimeter
 app.delete('/api/family/perimeters/:id', (req, res) => {
   const existed = familyPerimeters.delete(req.params.id);
+  if (existed) deleteFamilyPerimeterFromSupabase(req.params.id);
   perimeterState.delete(req.params.id);
   if (existed) persistPerimeters();
   res.json({ success: existed });
@@ -3862,6 +3865,7 @@ app.delete('/api/ptt/channels/:id', (req, res) => {
   if (pttChannels[idx].isDefault) return res.status(400).json({ error: 'Cannot delete default channels' });
 
   const removed = pttChannels.splice(idx, 1)[0];
+  deletePTTChannelFromSupabase(id);
   persistPTTChannels();
 
   // Also remove messages for this channel
@@ -3979,6 +3983,9 @@ server.headersTimeout = 66000;   // slightly > keepAliveTimeout
 server.listen(Number(PORT), '0.0.0.0', () => {
   loadAdminUsersFromSupabase();
   loadAlertsFromSupabase();
+  loadPatrolReportsFromSupabase();
+  loadPTTChannelsFromSupabase();
+  loadFamilyPerimetersFromSupabase();
   console.log(`Talion Crisis Comm Server running on port ${PORT}`);
   console.log(`WebSocket endpoint: ws://localhost:${PORT}`);
   console.log(`Admin Console: http://localhost:${PORT}/admin-console/`);
@@ -4088,4 +4095,106 @@ async function deleteAlertFromSupabase(alertId: string): Promise<void> {
     const { error } = await supabaseAdmin.from('alerts').delete().eq('id', alertId);
     if (error) console.error('[Supabase] deleteAlertFromSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] deleteAlertFromSupabase error:', e); }
+}
+
+// ─── Patrol Reports ───────────────────────────────────────────────────────
+async function loadPatrolReportsFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('patrol_reports').select('*').order('created_at', { ascending: false });
+    if (error) { console.error('[Supabase] Failed to load patrol_reports:', error.message); return; }
+    if (data && data.length > 0) {
+      patrolReports.length = 0;
+      data.forEach((r: any) => patrolReports.push({
+        id: r.id, createdAt: r.created_at, createdBy: r.created_by,
+        createdByName: r.created_by_name, location: r.location,
+        status: r.status, tasks: r.tasks || [], notes: r.notes, media: r.media || [],
+      }));
+      console.log(`[Supabase] Loaded ${data.length} patrol reports`);
+    }
+  } catch (e) { console.error('[Supabase] loadPatrolReportsFromSupabase error:', e); }
+}
+
+async function savePatrolReportToSupabase(report: PatrolReport): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('patrol_reports').upsert({
+      id: report.id, created_at: report.createdAt, created_by: report.createdBy,
+      created_by_name: report.createdByName, location: report.location,
+      status: report.status, tasks: report.tasks, notes: report.notes || null, media: report.media || [],
+    });
+    if (error) console.error('[Supabase] savePatrolReportToSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] savePatrolReportToSupabase error:', e); }
+}
+
+// ─── PTT Channels ─────────────────────────────────────────────────────────
+async function loadPTTChannelsFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('ptt_channels').select('*');
+    if (error) { console.error('[Supabase] Failed to load ptt_channels:', error.message); return; }
+    if (data && data.length > 0) {
+      pttChannels.length = 0;
+      data.forEach((c: any) => pttChannels.push({
+        id: c.id, name: c.name, description: c.description || '',
+        allowedRoles: c.allowed_roles || [], isActive: c.is_active,
+        isDefault: c.is_default, createdBy: c.created_by,
+        createdAt: c.created_at, members: c.members || [],
+      }));
+      console.log(`[Supabase] Loaded ${data.length} PTT channels`);
+    }
+  } catch (e) { console.error('[Supabase] loadPTTChannelsFromSupabase error:', e); }
+}
+
+async function savePTTChannelToSupabase(channel: PTTChannelServer): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('ptt_channels').upsert({
+      id: channel.id, name: channel.name, description: channel.description,
+      allowed_roles: channel.allowedRoles, is_active: channel.isActive,
+      is_default: channel.isDefault, created_by: channel.createdBy,
+      created_at: channel.createdAt, members: channel.members || [],
+    });
+    if (error) console.error('[Supabase] savePTTChannelToSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] savePTTChannelToSupabase error:', e); }
+}
+
+async function deletePTTChannelFromSupabase(channelId: string): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('ptt_channels').delete().eq('id', channelId);
+    if (error) console.error('[Supabase] deletePTTChannelFromSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] deletePTTChannelFromSupabase error:', e); }
+}
+
+// ─── Family Perimeters ────────────────────────────────────────────────────
+async function loadFamilyPerimetersFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('family_perimeters').select('*');
+    if (error) { console.error('[Supabase] Failed to load family_perimeters:', error.message); return; }
+    if (data && data.length > 0) {
+      familyPerimeters.clear();
+      data.forEach((p: any) => familyPerimeters.set(p.id, {
+        id: p.id, ownerId: p.owner_id, targetUserId: p.target_user_id,
+        targetUserName: p.target_user_name, center: p.center,
+        radiusMeters: p.radius_meters, active: p.active,
+        createdAt: p.created_at, updatedAt: p.updated_at,
+      }));
+      console.log(`[Supabase] Loaded ${data.length} family perimeters`);
+    }
+  } catch (e) { console.error('[Supabase] loadFamilyPerimetersFromSupabase error:', e); }
+}
+
+async function saveFamilyPerimeterToSupabase(p: FamilyPerimeter): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('family_perimeters').upsert({
+      id: p.id, owner_id: p.ownerId, target_user_id: p.targetUserId,
+      target_user_name: p.targetUserName, center: p.center,
+      radius_meters: p.radiusMeters, active: p.active,
+      created_at: p.createdAt, updated_at: p.updatedAt,
+    });
+    if (error) console.error('[Supabase] saveFamilyPerimeterToSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] saveFamilyPerimeterToSupabase error:', e); }
+}
+
+async function deleteFamilyPerimeterFromSupabase(perimeterId: string): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('family_perimeters').delete().eq('id', perimeterId);
+    if (error) console.error('[Supabase] deleteFamilyPerimeterFromSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] deleteFamilyPerimeterFromSupabase error:', e); }
 }
