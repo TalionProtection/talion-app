@@ -562,20 +562,6 @@ function seedDemoData() {
     { id: 'user-005', firstName: 'Hugo', lastName: 'Leroy', name: 'Hugo Leroy', email: 'hugo@example.com', role: 'user', status: 'active', lastLogin: now - 2 * day, createdAt: now - 10 * day, tags: ['zone-vesenaz'], address: 'Avenue de Miremont 30, 1206 Genève, Suisse', phoneMobile: '+41 79 123 45 00', relationships: [{ userId: 'user-004', type: 'sibling' }, { userId: 'user-001', type: 'child' }, { userId: 'user-002', type: 'child' }], passwordHash: defaultPwHash },
   ];
   demoUsers.forEach(u => adminUsers.set(u.id, u));
-
-  // Seed incidents (alerts)
-  const demoAlerts: Alert[] = [
-    { id: 'INC-001', type: 'medical', severity: 'critical', location: { latitude: 46.1925, longitude: 6.1535, address: 'Avenue de Champel 24, 1206 Genève' }, description: 'Personne effondrée au centre commercial, inconsciente', createdBy: 'disp-001', createdAt: now - 2 * 60000, status: 'active', respondingUsers: [] },
-    { id: 'INC-002', type: 'fire', severity: 'high', location: { latitude: 46.1955, longitude: 6.1675, address: 'Route de Florissant 62, 1206 Genève' }, description: 'Alarme incendie déclenchée dans un immeuble de bureaux, fumée visible au 3e étage', createdBy: 'resp-001', createdAt: now - 8 * 60000, status: 'acknowledged', respondingUsers: ['resp-001'] },
-    { id: 'INC-003', type: 'other', severity: 'high', location: { latitude: 46.2005, longitude: 6.1615, address: 'Route de Malagnou 32, 1208 Genève' }, description: 'Déversement chimique dans le parking, zone en cours d\'évacuation', createdBy: 'disp-001', createdAt: now - 30 * 60000, status: 'active', respondingUsers: ['resp-002'] },
-    { id: 'INC-004', type: 'other', severity: 'medium', location: { latitude: 46.1970, longitude: 6.1690, address: 'Chemin des Crêts-de-Champel 2, 1206 Genève' }, description: 'Accès non autorisé détecté à l\'entrée principale', createdBy: 'disp-002', createdAt: now - 15 * 60000, status: 'acknowledged', respondingUsers: ['resp-002', 'resp-003'] },
-    { id: 'INC-005', type: 'sos', severity: 'critical', location: { latitude: 46.2315, longitude: 6.2055, address: 'Route de Thonon 85, 1222 Vésenaz' }, description: 'Alerte SOS déclenchée par un visiteur dans le parc', createdBy: 'user-001', createdAt: now - 45 * 60000, status: 'resolved', respondingUsers: ['resp-001', 'resp-002'] },
-    { id: 'INC-006', type: 'medical', severity: 'medium', location: { latitude: 46.2300, longitude: 6.2040, address: 'Chemin de la Capite 12, 1222 Vésenaz' }, description: 'Personne âgée tombée dans les escaliers, consciente mais blessée', createdBy: 'resp-003', createdAt: now - 2 * hour, status: 'resolved', respondingUsers: ['resp-003'] },
-    { id: 'INC-007', type: 'accident', severity: 'low', location: { latitude: 46.1945, longitude: 6.1665, address: 'Avenue de Miremont 30, 1206 Genève' }, description: 'Collision mineure de véhicules sur le parking, aucun blessé', createdBy: 'disp-001', createdAt: now - 4 * hour, status: 'resolved', respondingUsers: ['resp-001'] },
-    { id: 'INC-008', type: 'fire', severity: 'critical', location: { latitude: 46.2030, longitude: 6.1600, address: 'Chemin du Velours 10, 1208 Genève' }, description: 'Feu de cuisine dans un restaurant, pompiers en route', createdBy: 'disp-002', createdAt: now - 5 * 60000, status: 'active', respondingUsers: ['resp-002', 'resp-003'] },
-  ];
-  demoAlerts.forEach(a => alerts.set(a.id, a));
-
   // Seed audit log
   const demoAudit: AuditEntry[] = [
     { id: uuidv4(), timestamp: now - 2 * 60000, category: 'incident', action: 'Incident Created', performedBy: 'Jean Moreau', details: 'Created INC-001: Urgence médicale à Avenue de Champel' },
