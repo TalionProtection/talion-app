@@ -2658,6 +2658,10 @@ function initBrowserNotifications() {
 }
 
 function toggleBrowserNotifications() {
+  // Unlock AudioContext on this user gesture
+  try { const ctx = getAudioContext(); if (ctx.state === "suspended") ctx.resume(); } catch(e) {}
+  // Also unlock HTML audio elements
+  try { ["sosAlertAudio","sirenAlertAudio"].forEach(id => { const el = document.getElementById(id); if (el) { el.play().then(() => el.pause()).catch(() => {}); }}); } catch(e) {}
   if (!('Notification' in window)) {
     showToast('❌ Your browser does not support notifications', 'error');
     return;
@@ -4765,6 +4769,8 @@ function stopTitleBlink() {
 }
 
 function dismissAlertBanner() {
+  try { const el = document.getElementById("sosAlertAudio"); if (el) { el.pause(); el.currentTime = 0; } } catch(e) {}
+  try { const el = document.getElementById("sirenAlertAudio"); if (el) { el.pause(); el.currentTime = 0; } } catch(e) {}
   const banner = document.getElementById('criticalAlertBanner');
   if (banner) banner.remove();
   if (alertBannerInterval) clearInterval(alertBannerInterval);
