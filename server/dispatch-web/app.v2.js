@@ -554,6 +554,18 @@ setInterval(() => {
 // ─── Init ────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   setupNavigation();
+  // Pre-unlock AudioContext with silent sound on page load
+  setTimeout(() => {
+    try {
+      const ctx = getAudioContext();
+      const buf = ctx.createBuffer(1, 1, 22050);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      src.start(0);
+      console.log("[Audio] AudioContext pre-unlocked");
+    } catch(e) {}
+  }, 500);
   connectWebSocket();
   refreshData();
   // Fallback polling every 30s (reduced from 10s since WS handles real-time)
