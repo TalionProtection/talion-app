@@ -2,6 +2,7 @@ import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import 'react-native-reanimated';
+import { View, Text, ActivityIndicator } from 'react-native';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { AuthProvider } from '@/lib/auth-context';
@@ -35,7 +36,13 @@ function RootLayoutContent() {
   }, [isSignedIn, isLoading, segments]);
 
   if (isLoading) {
-    return null;
+    // Show loading screen instead of blank screen
+    return (
+      <View style={{ flex: 1, backgroundColor: '#1e3a5f', alignItems: 'center', justifyContent: 'center' }}>
+        <ActivityIndicator size="large" color="#ffffff" />
+        <Text style={{ color: '#ffffff', marginTop: 16, fontSize: 16 }}>Connexion...</Text>
+      </View>
+    );
   }
 
   return (
