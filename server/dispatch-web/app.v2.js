@@ -673,7 +673,7 @@ function renderOverview() {
   const container = document.getElementById('overviewIncidents');
   const activeIncs = incidents
     .filter(i => i.status !== 'resolved')
-    .sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 3) - (SEVERITY_ORDER[b.severity] ?? 3));
+    .sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 3) - (SEVERITY_ORDER[b.severity] ?? 3) || b.timestamp - a.timestamp);
 
   if (activeIncs.length === 0) {
     container.innerHTML = '<div class="ov-empty"><div class="ov-empty-icon">\u2705</div><div class="ov-empty-text">Aucun incident actif</div></div>';
