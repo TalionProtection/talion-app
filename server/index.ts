@@ -869,9 +869,9 @@ function handleAuth(ws: any, userId: string | undefined, userRole: string | unde
 }
 
 // Create alert handler
-function handleCreateAlert(ws: any, userId: string, userRole: string, alertData: any) {
+async function handleCreateAlert(ws: any, userId: string, userRole: string, alertData: any) {
   const alert: Alert = {
-    id: uuidv4(),
+    id: await generateIncidentId(alertData.type || 'other', userId, alertData.location || {}),
     type: alertData.type || 'other',
     severity: alertData.severity || 'medium',
     location: alertData.location || { latitude: 0, longitude: 0, address: 'Unknown' },
@@ -1607,10 +1607,10 @@ app.get('/responders', (req, res) => {
   res.json(responders);
 });
 
-app.post('/alerts', requireAuth, (req, res) => {
+app.post('/alerts', requireAuth, async (req, res) => {
   const { type, severity, location, description, createdBy } = req.body;
   const alert: Alert = {
-    id: uuidv4(),
+    id: await generateIncidentId(type || 'other', createdBy || 'system', location || {}),
     type: type || 'other',
     severity: severity || 'medium',
     location: location || { latitude: 0, longitude: 0, address: 'Unknown' },
@@ -1845,12 +1845,12 @@ async function sendPushToAllUsers(alert: Alert, senderName: string) {
 // ─── SOS REST API (reliable fallback for mobile app) ────────────────
 // This endpoint is the PRIMARY way the mobile app sends SOS alerts.
 // It uses HTTP POST instead of WebSocket for maximum reliability on real devices.
-app.post('/api/sos', (req, res) => {
+app.post('/api/sos', async (req, res) => {
   const { type, severity, location, description, userId, userName, userRole } = req.body;
   console.log(`[SOS REST] Received SOS from ${userName || userId || 'unknown'}`);
   
   const alert: Alert = {
-    id: uuidv4(),
+    id: await generateIncidentId(type || 'sos', userName || userId || 'mobile-user', location || {}),
     type: type || 'sos',
     severity: severity || 'critical',
     location: location || { latitude: 0, longitude: 0, address: 'Unknown' },
@@ -2756,13 +2756,13 @@ app.put('/alerts/:id/respond', (req, res) => {
 });
 
 // Dispatch: send broadcast — creates a real alert so mobile apps receive it via polling + WS
-app.post('/dispatch/broadcast', (req, res) => {
+app.post('/dispatch/broadcast', async (req, res) => {
   const { message, severity, radiusKm, by, latitude, longitude } = req.body;
   if (!message) return res.status(400).json({ error: 'Message required' });
 
   const sev = (severity || 'medium') as Alert['severity'];
   const alert: Alert = {
-    id: `BC-${uuidv4().slice(0, 8)}`,
+    id: await generateIncidentId('broadcast', by || 'Dispatch Console', { address: `Zone broadcast (${radiusKm || 5}km radius)` }),
     type: 'broadcast',
     severity: sev,
     location: {
@@ -4229,4 +4229,63 @@ async function deletePushTokenFromSupabase(token: string): Promise<void> {
     const { error } = await supabaseAdmin.from('push_tokens').delete().eq('token', token);
     if (error) console.error('[Supabase] deletePushTokenFromSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] deletePushTokenFromSupabase error:', e); }
+}
+
+// ─── Incident Counter (sequential, persistent in Supabase) ───────────────
+async function getNextIncidentNumber(): Promise<number> {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('incident_counter')
+      .update({ last_number: supabaseAdmin.rpc('increment', { row_id: 1 }) })
+      .eq('id', 1)
+      .select('last_number')
+      .single();
+    if (error || !data) {
+      // Fallback: use timestamp-based number
+      return Date.now() % 100000;
+    }
+    return data.last_number;
+  } catch (e) {
+    return Date.now() % 100000;
+  }
+}
+
+async function generateIncidentId(type: string, createdBy: string, location: { address?: string }): Promise<string> {
+  try {
+    // Increment counter atomically
+    const { data, error } = await supabaseAdmin.rpc('increment_incident_counter');
+    const num = (!error && data) ? data : Date.now() % 10000;
+
+    // Get creator name
+    const creator = adminUsers.get(createdBy);
+    const creatorName = creator?.name || createdBy;
+
+    // Extract city from address
+    const address = location?.address || '';
+    let city = '';
+    if (address) {
+      const parts = address.split(',').map((p: string) => p.trim());
+      // Try to find city — usually 2nd or 3rd part
+      city = parts[1] || parts[0] || '';
+      // Limit city length
+      if (city.length > 20) city = city.substring(0, 20);
+    }
+
+    // Type label
+    const TYPE_LABELS: Record<string, string> = {
+      sos: 'SOS', medical: 'MÉDICAL', fire: 'INCENDIE', security: 'SÉCURITÉ',
+      accident: 'ACCIDENT', broadcast: 'BROADCAST', home_jacking: 'HOME-JACKING',
+      cambriolage: 'CAMBRIOLAGE', other: 'INCIDENT',
+    };
+    const typeLabel = TYPE_LABELS[type] || type.toUpperCase();
+
+    const parts = [typeLabel];
+    if (creatorName && creatorName !== 'system' && creatorName !== 'mobile-user') parts.push(creatorName);
+    if (city) parts.push(city);
+    parts.push(`#${String(num).padStart(4, '0')}`);
+
+    return parts.join(' — ');
+  } catch (e) {
+    return `INC-${uuidv4().slice(0, 8).toUpperCase()}`;
+  }
 }
