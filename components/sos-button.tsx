@@ -33,6 +33,8 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
   const [pulseAnim] = useState(new Animated.Value(1));
   const cancelledRef = useRef(false);
   const locationRef = useRef<{ latitude: number; longitude: number; address: string } | null>(null);
+  const alertIdRef = useRef<string | null>(null);
+  const liveTrackingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     if (isActive) {
@@ -44,6 +46,11 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
       ).start();
     } else {
       pulseAnim.setValue(1);
+      // Stop live tracking when deactivated
+      if (liveTrackingRef.current) {
+        clearInterval(liveTrackingRef.current);
+        liveTrackingRef.current = null;
+      }
     }
   }, [isActive, pulseAnim]);
 
@@ -51,7 +58,6 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
   useEffect(() => {
     if (!showCountdown) return;
     if (countdown <= 0) {
-      // Time's up — send SOS if not cancelled
       setShowCountdown(false);
       if (!cancelledRef.current) {
         executeSOS();
@@ -77,7 +83,7 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
     severity: string;
     location: { latitude: number; longitude: number; address: string };
     description: string;
-  }): Promise<boolean> => {
+  }): Promise<{ success: boolean; alertId?: string }> => {
     try {
       const baseUrl = getApiBaseUrl();
       const response = await fetch(`${baseUrl}/api/sos`, {
@@ -90,16 +96,33 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
           userRole,
         }),
       });
-      return response.ok;
+      if (response.ok) {
+        const result = await response.json();
+        return { success: true, alertId: result.alertId };
+      }
+      return { success: false };
     } catch (error) {
       console.error('[SOSButton] REST SOS failed:', error);
-      return false;
+      return { success: false };
+    }
+  };
+
+  const updateAlertLocation = async (alertId: string, location: { latitude: number; longitude: number; address: string }) => {
+    try {
+      const baseUrl = getApiBaseUrl();
+      await fetch(`${baseUrl}/alerts/${encodeURIComponent(alertId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ location }),
+      });
+      console.log(`[SOSButton] Location updated for ${alertId}: ${location.address}`);
+    } catch (e) {
+      console.error('[SOSButton] Failed to update location:', e);
     }
   };
 
   const executeSOS = async () => {
-    // Use GPS location acquired during countdown, or fallback
-    const location = locationRef.current || { latitude: 0, longitude: 0, address: 'Position inconnue' };
+    const location = locationRef.current || { latitude: 0, longitude: 0, address: '⚠️ Position en cours d\'acquisition...' };
 
     setIsActive(true);
     onActivate?.(location);
@@ -112,9 +135,10 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
       description: `SOS Alert from ${userName} — ${location.address}. Assistance immédiate requise.`,
     };
 
-    const sent = await sendSOSViaREST(alertData);
+    const { success, alertId } = await sendSOSViaREST(alertData);
+    if (alertId) alertIdRef.current = alertId;
 
-    if (!sent) {
+    if (!success) {
       await offlineCache.enqueueAction('sos', {
         ...alertData,
         userId: userId || `user-${Date.now()}`,
@@ -123,8 +147,9 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
       });
     }
 
+    // Send local notification
     const sosPayload: SOSNotificationPayload = {
-      alertId: `sos-${Date.now()}`,
+      alertId: alertId || `sos-${Date.now()}`,
       senderName: userName,
       senderRole: userRole,
       alertType: 'sos',
@@ -135,7 +160,23 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
     };
     await notificationService.sendSOSAlert(sosPayload);
 
-    if (sent) {
+    // Start live GPS tracking — update every 30s
+    if (alertId) {
+      liveTrackingRef.current = setInterval(async () => {
+        try {
+          const pos = await locationService.getCurrentPosition();
+          const addr = await locationService.reverseGeocode(pos.latitude, pos.longitude);
+          const preciseLocation = {
+            latitude: pos.latitude,
+            longitude: pos.longitude,
+            address: `✅ GPS: ${addr || `${pos.latitude.toFixed(5)}, ${pos.longitude.toFixed(5)}`}`,
+          };
+          await updateAlertLocation(alertId, preciseLocation);
+        } catch {}
+      }, 30000);
+    }
+
+    if (success) {
       Alert.alert(
         'SOS Activé',
         'Votre alerte SOS a été envoyée au centre de dispatch.\nTous les intervenants ont été notifiés.',
@@ -148,6 +189,7 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
     setShowConfirmation(false);
     cancelledRef.current = false;
     locationRef.current = null;
+    alertIdRef.current = null;
 
     // Haptic feedback
     if (Platform.OS !== 'web') {
@@ -161,24 +203,39 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
     setCountdown(CANCEL_WINDOW);
     setShowCountdown(true);
 
-    // Acquire GPS during countdown (in background)
+    // ─── Step 1: Use last known location immediately (with address) ───
+    try {
+      const fallback = locationService.getCurrentLocation();
+      if (fallback.latitude !== 0) {
+        // Reverse geocode the approximate position
+        try {
+          const addr = await locationService.reverseGeocode(fallback.latitude, fallback.longitude);
+          if (addr) {
+            locationRef.current = {
+              latitude: fallback.latitude,
+              longitude: fallback.longitude,
+              address: `⚠️ Approx: ${addr}`,
+            };
+            console.log(`[SOSButton] Approximate location: ${addr}`);
+          }
+        } catch {}
+      }
+    } catch {}
+
+    // ─── Step 2: Try to get precise GPS in parallel ───────────────────
     try {
       const pos = await locationService.getCurrentPosition();
-      let address = 'Position GPS';
-      try {
-        const addr = await locationService.reverseGeocode(pos.latitude, pos.longitude);
-        if (addr) address = addr;
-      } catch {}
-      locationRef.current = { latitude: pos.latitude, longitude: pos.longitude, address };
-      console.log(`[SOSButton] GPS acquired: ${address}`);
+      const addr = await locationService.reverseGeocode(pos.latitude, pos.longitude);
+      if (addr) {
+        locationRef.current = {
+          latitude: pos.latitude,
+          longitude: pos.longitude,
+          address: `✅ GPS: ${addr}`,
+        };
+        console.log(`[SOSButton] Precise GPS: ${addr}`);
+      }
     } catch (e) {
-      // Fallback to last known location
-      try {
-        const fallback = locationService.getCurrentLocation();
-        if (fallback.latitude !== 0) {
-          locationRef.current = { latitude: fallback.latitude, longitude: fallback.longitude, address: 'Position approximative' };
-        }
-      } catch {}
+      console.warn('[SOSButton] GPS not available in time:', e);
     }
   };
 
@@ -187,6 +244,7 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
     setShowCountdown(false);
     setCountdown(CANCEL_WINDOW);
     locationRef.current = null;
+    alertIdRef.current = null;
     Alert.alert('SOS Annulé', "L'alerte SOS a été annulée.");
   };
 
@@ -224,16 +282,18 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
         </View>
       </Modal>
 
-      {/* Countdown Modal — GPS acquired during this time, SOS sent after */}
+      {/* Countdown Modal */}
       <Modal visible={showCountdown} transparent animationType="fade" onRequestClose={handleCancelSOS}>
         <View style={styles.modalOverlay}>
           <View style={[styles.modalContent, styles.countdownContent]}>
             <Text style={styles.countdownTitle}>🆘 SOS en cours d'envoi</Text>
-            <Text style={styles.countdownSubtitle}>Acquisition de votre position...</Text>
+            <Text style={styles.countdownSubtitle}>Acquisition de votre position GPS...</Text>
             <View style={styles.countdownCircle}>
               <Text style={styles.countdownNumber}>{countdown}</Text>
             </View>
-            <Text style={styles.countdownHint}>L'alerte sera envoyée dans {countdown} seconde{countdown > 1 ? 's' : ''}</Text>
+            <Text style={styles.countdownHint}>
+              L'alerte sera envoyée dans {countdown} seconde{countdown > 1 ? 's' : ''}
+            </Text>
             <TouchableOpacity style={styles.cancelWindowButton} onPress={handleCancelSOS}>
               <Text style={styles.cancelWindowButtonText}>ANNULER</Text>
             </TouchableOpacity>

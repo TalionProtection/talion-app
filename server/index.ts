@@ -1580,6 +1580,19 @@ app.get('/alerts/:id', (req, res) => {
 });
 
 // Mobile app: acknowledge alert
+// Update alert (location, etc.)
+app.put('/alerts/:id', (req, res) => {
+  const alert = alerts.get(req.params.id);
+  if (!alert) return res.status(404).json({ error: 'Alert not found' });
+  const { location, description } = req.body;
+  if (location) alert.location = location;
+  if (description) alert.description = description;
+  alerts.set(alert.id, alert);
+  persistAlerts();
+  broadcastMessage({ type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
+  res.json({ success: true });
+});
+
 app.put('/alerts/:id/acknowledge', (req, res) => {
   const alert = alerts.get(req.params.id);
   if (!alert) return res.status(404).json({ error: 'Alert not found' });
