@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   StyleSheet,
   View,
@@ -23,70 +23,59 @@ interface SOSButtonProps {
   userId?: string;
 }
 
+const CANCEL_WINDOW = 5; // seconds to cancel after confirmation
+
 export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', userRole = 'user', userId = '' }: SOSButtonProps) {
   const [isActive, setIsActive] = useState(false);
   const [showConfirmation, setShowConfirmation] = useState(false);
+  const [showCancelWindow, setShowCancelWindow] = useState(false);
+  const [countdown, setCountdown] = useState(CANCEL_WINDOW);
   const [pulseAnim] = useState(new Animated.Value(1));
-  const [countdown, setCountdown] = useState(0);
+  const cancelledRef = useRef(false);
+  const alertIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (isActive) {
       Animated.loop(
         Animated.sequence([
-          Animated.timing(pulseAnim, {
-            toValue: 1.1,
-            duration: 600,
-            useNativeDriver: true,
-          }),
-          Animated.timing(pulseAnim, {
-            toValue: 1,
-            duration: 600,
-            useNativeDriver: true,
-          }),
+          Animated.timing(pulseAnim, { toValue: 1.1, duration: 600, useNativeDriver: true }),
+          Animated.timing(pulseAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
         ])
       ).start();
+    } else {
+      pulseAnim.setValue(1);
     }
   }, [isActive, pulseAnim]);
 
   useEffect(() => {
-    if (countdown > 0) {
-      const timer = setTimeout(() => setCountdown(countdown - 1), 1000);
+    if (showCancelWindow && countdown > 0) {
+      const timer = setTimeout(() => setCountdown(c => c - 1), 1000);
       return () => clearTimeout(timer);
     }
-  }, [countdown]);
+    if (showCancelWindow && countdown === 0) {
+      setShowCancelWindow(false);
+    }
+  }, [showCancelWindow, countdown]);
 
   const handlePress = () => {
     if (isActive) {
       setIsActive(false);
       onDeactivate?.();
-
-      notificationService.sendStatusUpdate(
-        'SOS Deactivated',
-        `${userName} has deactivated their SOS alert.`,
-      );
-
-      Alert.alert('SOS Deactivated', 'Live location sharing has been stopped.');
+      Alert.alert('SOS Désactivé', 'Le partage de position a été arrêté.');
     } else {
       setShowConfirmation(true);
     }
   };
 
-  /**
-   * Send SOS alert to server via HTTP POST (most reliable method).
-   * This bypasses WebSocket entirely — HTTP works on all devices/networks.
-   */
   const sendSOSViaREST = async (alertData: {
     type: string;
     severity: string;
     location: { latitude: number; longitude: number; address: string };
     description: string;
-  }): Promise<boolean> => {
+  }): Promise<{ success: boolean; alertId?: string }> => {
     try {
       const baseUrl = getApiBaseUrl();
-      const url = `${baseUrl}/api/sos`;
-      console.log(`[SOSButton] Sending SOS via REST to: ${url}`);
-
-      const response = await fetch(url, {
+      const response = await fetch(`${baseUrl}/api/sos`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -96,25 +85,40 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
           userRole,
         }),
       });
-
       if (response.ok) {
         const result = await response.json();
-        console.log(`[SOSButton] SOS sent successfully via REST. Alert ID: ${result.alertId}, broadcast: ${result.broadcast}`);
-        return true;
-      } else {
-        console.error(`[SOSButton] REST SOS failed with status: ${response.status}`);
-        return false;
+        return { success: true, alertId: result.alertId };
       }
+      return { success: false };
     } catch (error) {
-      console.error('[SOSButton] REST SOS request failed:', error);
-      return false;
+      console.error('[SOSButton] REST SOS failed:', error);
+      return { success: false };
+    }
+  };
+
+  const cancelSOSOnServer = async (alertId: string) => {
+    try {
+      const baseUrl = getApiBaseUrl();
+      await fetch(`${baseUrl}/alerts/${alertId}/resolve`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, reason: 'cancelled_by_user' }),
+      });
+      console.log(`[SOSButton] SOS ${alertId} cancelled`);
+    } catch (e) {
+      console.error('[SOSButton] Failed to cancel SOS:', e);
     }
   };
 
   const handleConfirmSOS = async () => {
     setShowConfirmation(false);
+    cancelledRef.current = false;
+    alertIdRef.current = null;
+
+    // ─── 1. Show cancel window immediately ───────────────────────────
+    setCountdown(CANCEL_WINDOW);
+    setShowCancelWindow(true);
     setIsActive(true);
-    setCountdown(5);
 
     // Haptic feedback
     if (Platform.OS !== 'web') {
@@ -124,79 +128,88 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
       } catch {}
     }
 
-    // Get real GPS location
-    let realLocation = { latitude: 0, longitude: 0, address: 'Unknown location' };
-    try {
-      const pos = await locationService.getCurrentPosition();
-      realLocation = {
-        latitude: pos.latitude,
-        longitude: pos.longitude,
-        address: 'Current Location',
-      };
-      const addr = await locationService.reverseGeocode(pos.latitude, pos.longitude);
-      if (addr) realLocation.address = addr;
-    } catch (e) {
-      console.warn('[SOSButton] Failed to get GPS location, using fallback:', e);
-      const fallback = locationService.getCurrentLocation();
-      realLocation = {
-        latitude: fallback.latitude,
-        longitude: fallback.longitude,
-        address: 'Approximate location',
-      };
-    }
-
-    onActivate?.(realLocation);
-
-    // Play SOS alert sound
+    // Play SOS sound immediately
     alertSoundService.playSOSAlert();
 
-    // Send local notification
-    const sosPayload: SOSNotificationPayload = {
-      alertId: `sos-${Date.now()}`,
-      senderName: userName,
-      senderRole: userRole,
-      alertType: 'sos',
-      severity: 'critical',
-      location: realLocation,
-      description: `${userName} has triggered an SOS alert at ${realLocation.address}. Immediate assistance required.`,
-      timestamp: Date.now(),
-    };
-    await notificationService.sendSOSAlert(sosPayload);
+    // ─── 2. Get quick location (don't wait for precise GPS) ───────────
+    let quickLocation = { latitude: 0, longitude: 0, address: 'Localisation en cours...' };
+    try {
+      const fallback = locationService.getCurrentLocation();
+      if (fallback.latitude !== 0) {
+        quickLocation = { latitude: fallback.latitude, longitude: fallback.longitude, address: 'Position approximative' };
+      }
+    } catch {}
 
-    // ─── Send SOS to server via HTTP POST (RELIABLE) ──────────────────
+    onActivate?.(quickLocation);
+
+    // ─── 3. Send SOS immediately with quick location ──────────────────
     const alertData = {
       type: 'sos',
       severity: 'critical',
-      location: {
-        latitude: realLocation.latitude,
-        longitude: realLocation.longitude,
-        address: realLocation.address || 'Unknown',
-      },
-      description: `SOS Alert from ${userName}: ${realLocation.address || 'Unknown location'}. Immediate assistance required.`,
+      location: quickLocation,
+      description: `SOS Alert from ${userName}. Assistance immédiate requise.`,
     };
 
-    const sent = await sendSOSViaREST(alertData);
+    const { success, alertId } = await sendSOSViaREST(alertData);
+    if (alertId) alertIdRef.current = alertId;
 
-    if (sent) {
-      Alert.alert(
-        'SOS Activated',
-        'Your SOS alert has been sent to the dispatch center.\nAll responders and dispatchers have been notified.\n\nPress the SOS button to stop sharing.',
-        [{ text: 'OK' }]
-      );
-    } else {
-      // Queue for later sending when back online
+    if (!success) {
       await offlineCache.enqueueAction('sos', {
         ...alertData,
         userId: userId || `user-${Date.now()}`,
         userName,
         userRole,
       });
-      Alert.alert(
-        'SOS Activated (Offline)',
-        'Your SOS alert was saved and will be sent automatically when connection is restored.\n\nPress the SOS button to stop sharing.',
-        [{ text: 'OK' }]
-      );
     }
+
+    // ─── 4. Update location with precise GPS in background ───────────
+    try {
+      const pos = await locationService.getCurrentPosition();
+      const addr = await locationService.reverseGeocode(pos.latitude, pos.longitude);
+      const preciseLocation = {
+        latitude: pos.latitude,
+        longitude: pos.longitude,
+        address: addr || 'Position GPS',
+      };
+      // Update alert on server with precise location if not cancelled
+      if (!cancelledRef.current && alertIdRef.current) {
+        const baseUrl = getApiBaseUrl();
+        await fetch(`${baseUrl}/alerts/${alertIdRef.current}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ location: preciseLocation }),
+        }).catch(() => {});
+      }
+    } catch {}
+
+    // Send local notification
+    const sosPayload: SOSNotificationPayload = {
+      alertId: alertIdRef.current || `sos-${Date.now()}`,
+      senderName: userName,
+      senderRole: userRole,
+      alertType: 'sos',
+      severity: 'critical',
+      location: quickLocation,
+      description: `${userName} a déclenché une alerte SOS. Assistance immédiate requise.`,
+      timestamp: Date.now(),
+    };
+    await notificationService.sendSOSAlert(sosPayload);
+  };
+
+  const handleCancelSOS = async () => {
+    cancelledRef.current = true;
+    setShowCancelWindow(false);
+    setIsActive(false);
+    setCountdown(CANCEL_WINDOW);
+
+    // Cancel on server if we have an alertId
+    if (alertIdRef.current) {
+      await cancelSOSOnServer(alertIdRef.current);
+      alertIdRef.current = null;
+    }
+
+    onDeactivate?.();
+    Alert.alert('SOS Annulé', 'Votre alerte SOS a été annulée.');
   };
 
   return (
@@ -213,33 +226,39 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
       </Animated.View>
 
       {/* Confirmation Modal */}
-      <Modal
-        visible={showConfirmation}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowConfirmation(false)}
-      >
+      <Modal visible={showConfirmation} transparent animationType="fade" onRequestClose={() => setShowConfirmation(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Confirm SOS Alert</Text>
+            <Text style={styles.modalTitle}>Confirmer l'alerte SOS</Text>
             <Text style={styles.modalText}>
-              This will immediately alert all dispatchers and nearby responders.
-              {'\n\n'}Your live location will be shared until you deactivate.
+              Ceci alertera immédiatement tous les dispatchers et intervenants.{'\n\n'}
+              Votre position sera partagée jusqu'à désactivation.
             </Text>
             <View style={styles.modalButtons}>
-              <TouchableOpacity
-                style={styles.cancelButton}
-                onPress={() => setShowConfirmation(false)}
-              >
-                <Text style={styles.cancelButtonText}>Cancel</Text>
+              <TouchableOpacity style={styles.cancelButton} onPress={() => setShowConfirmation(false)}>
+                <Text style={styles.cancelButtonText}>Annuler</Text>
               </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.confirmButton}
-                onPress={handleConfirmSOS}
-              >
-                <Text style={styles.confirmButtonText}>SEND SOS</Text>
+              <TouchableOpacity style={styles.confirmButton} onPress={handleConfirmSOS}>
+                <Text style={styles.confirmButtonText}>ENVOYER SOS</Text>
               </TouchableOpacity>
             </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Cancel Window Modal — shown after confirmation, before SOS is processed */}
+      <Modal visible={showCancelWindow} transparent animationType="fade" onRequestClose={handleCancelSOS}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, styles.cancelWindowContent]}>
+            <Text style={styles.cancelWindowTitle}>🆘 SOS Envoyé</Text>
+            <Text style={styles.cancelWindowSubtitle}>Les secours ont été alertés</Text>
+            <View style={styles.countdownCircle}>
+              <Text style={styles.countdownNumber}>{countdown}</Text>
+            </View>
+            <Text style={styles.cancelWindowHint}>Appuyez pour annuler</Text>
+            <TouchableOpacity style={styles.cancelWindowButton} onPress={handleCancelSOS}>
+              <Text style={styles.cancelWindowButtonText}>ANNULER L'ALERTE</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -253,40 +272,40 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   button: {
-    width: 90,
-    height: 90,
-    borderRadius: 45,
-    backgroundColor: '#EF4444',
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: '#ef4444',
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#EF4444',
+    shadowColor: '#ef4444',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.4,
-    shadowRadius: 12,
+    shadowRadius: 8,
     elevation: 8,
   },
   buttonActive: {
-    backgroundColor: '#DC2626',
-    shadowOpacity: 0.6,
+    backgroundColor: '#991b1b',
+    shadowColor: '#991b1b',
   },
   buttonIcon: {
     fontSize: 28,
   },
   buttonText: {
-    color: '#fff',
+    color: '#ffffff',
     fontWeight: '800',
-    fontSize: 14,
-    marginTop: 2,
+    fontSize: 13,
+    letterSpacing: 1,
   },
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'center',
     alignItems: 'center',
+    justifyContent: 'center',
     padding: 20,
   },
   modalContent: {
-    backgroundColor: '#fff',
+    backgroundColor: '#ffffff',
     borderRadius: 16,
     padding: 24,
     width: '100%',
@@ -294,16 +313,16 @@ const styles = StyleSheet.create({
   },
   modalTitle: {
     fontSize: 20,
-    fontWeight: '700',
-    color: '#EF4444',
-    textAlign: 'center',
+    fontWeight: '800',
+    color: '#1f2937',
     marginBottom: 12,
+    textAlign: 'center',
   },
   modalText: {
-    fontSize: 15,
-    color: '#374151',
+    fontSize: 14,
+    color: '#6b7280',
     textAlign: 'center',
-    lineHeight: 22,
+    lineHeight: 20,
     marginBottom: 24,
   },
   modalButtons: {
@@ -312,26 +331,73 @@ const styles = StyleSheet.create({
   },
   cancelButton: {
     flex: 1,
-    paddingVertical: 14,
+    paddingVertical: 12,
     borderRadius: 10,
-    backgroundColor: '#F3F4F6',
+    backgroundColor: '#f3f4f6',
     alignItems: 'center',
   },
   cancelButtonText: {
-    fontSize: 16,
+    color: '#374151',
     fontWeight: '600',
-    color: '#6B7280',
+    fontSize: 15,
   },
   confirmButton: {
     flex: 1,
-    paddingVertical: 14,
+    paddingVertical: 12,
     borderRadius: 10,
-    backgroundColor: '#EF4444',
+    backgroundColor: '#ef4444',
     alignItems: 'center',
   },
   confirmButtonText: {
-    fontSize: 16,
+    color: '#ffffff',
+    fontWeight: '800',
+    fontSize: 15,
+  },
+  // Cancel window styles
+  cancelWindowContent: {
+    alignItems: 'center',
+    backgroundColor: '#1a1a2e',
+  },
+  cancelWindowTitle: {
+    fontSize: 28,
+    fontWeight: '800',
+    color: '#ef4444',
+    marginBottom: 4,
+  },
+  cancelWindowSubtitle: {
+    fontSize: 14,
+    color: '#9ca3af',
+    marginBottom: 24,
+  },
+  countdownCircle: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: '#ef4444',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  countdownNumber: {
+    fontSize: 36,
+    fontWeight: '800',
+    color: '#ffffff',
+  },
+  cancelWindowHint: {
+    fontSize: 12,
+    color: '#6b7280',
+    marginBottom: 20,
+  },
+  cancelWindowButton: {
+    width: '100%',
+    paddingVertical: 14,
+    borderRadius: 10,
+    backgroundColor: '#374151',
+    alignItems: 'center',
+  },
+  cancelWindowButtonText: {
+    color: '#ffffff',
     fontWeight: '700',
-    color: '#fff',
+    fontSize: 15,
   },
 });
