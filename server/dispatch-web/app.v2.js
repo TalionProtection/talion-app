@@ -146,6 +146,7 @@ function handleWsMessage(msg) {
         `incident-${alert.id}`
       );
       // Play alert sound based on type and severity
+      showCriticalAlertBanner({ ...formatted, createdBy: alert.createdBy });
       playNewAlertSound(alert.type, alert.severity);
       updateAll();
       break;
@@ -4649,3 +4650,116 @@ document.addEventListener('click', function initAudioOnClick() {
     }
   }
 }, { once: false });
+
+// ─── Critical Alert Banner ────────────────────────────────────────────────
+let alertBannerInterval = null;
+let alertBannerQueue = [];
+let titleBlinkInterval = null;
+let originalTitle = document.title;
+
+function showCriticalAlertBanner(alert) {
+  // Add to queue
+  alertBannerQueue.push(alert);
+
+  // Create or update banner
+  let banner = document.getElementById('criticalAlertBanner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'criticalAlertBanner';
+    banner.style.cssText = `
+      position: fixed; top: 0; left: 0; right: 0; z-index: 99999;
+      background: linear-gradient(135deg, #dc2626, #991b1b);
+      color: white; padding: 12px 20px;
+      display: flex; align-items: center; justify-content: space-between;
+      box-shadow: 0 4px 20px rgba(220,38,38,0.6);
+      animation: bannerPulse 1s ease-in-out infinite;
+      font-family: system-ui, sans-serif;
+    `;
+    document.body.appendChild(banner);
+
+    // Add CSS animation
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes bannerPulse {
+        0%, 100% { background: linear-gradient(135deg, #dc2626, #991b1b); }
+        50% { background: linear-gradient(135deg, #ef4444, #b91c1c); }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  const latestAlert = alertBannerQueue[alertBannerQueue.length - 1];
+  const count = alertBannerQueue.length;
+  banner.innerHTML = `
+    <div style="display:flex; align-items:center; gap:12px; flex:1;">
+      <span style="font-size:24px;">🚨</span>
+      <div>
+        <div style="font-size:16px; font-weight:800; letter-spacing:0.5px;">
+          ${count > 1 ? count + ' ALERTES ACTIVES' : latestAlert.id || 'NOUVELLE ALERTE'}
+        </div>
+        <div style="font-size:13px; opacity:0.9;">
+          ${latestAlert.location?.address || latestAlert.address || 'Position en cours...'} 
+          · Signalé par: ${latestAlert.createdBy || latestAlert.reportedBy || 'Inconnu'}
+        </div>
+      </div>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <button onclick="acknowledgeBannerAlert()" style="
+        background:white; color:#dc2626; border:none; border-radius:6px;
+        padding:8px 16px; font-weight:700; cursor:pointer; font-size:13px;
+      ">✓ ACQUITTER</button>
+      <button onclick="dismissAlertBanner()" style="
+        background:rgba(255,255,255,0.2); color:white; border:none; border-radius:6px;
+        padding:8px 12px; font-weight:700; cursor:pointer; font-size:13px;
+      ">✕</button>
+    </div>
+  `;
+
+  // Blink page title
+  startTitleBlink(latestAlert);
+
+  // Repeat siren every 10s until dismissed
+  if (alertBannerInterval) clearInterval(alertBannerInterval);
+  alertBannerInterval = setInterval(() => {
+    if (document.getElementById('criticalAlertBanner')) {
+      playNewAlertSound(latestAlert.type, latestAlert.severity);
+    } else {
+      clearInterval(alertBannerInterval);
+    }
+  }, 10000);
+}
+
+function startTitleBlink(alert) {
+  if (titleBlinkInterval) clearInterval(titleBlinkInterval);
+  originalTitle = 'TALION Dispatch';
+  let blink = true;
+  titleBlinkInterval = setInterval(() => {
+    document.title = blink ? `🚨 ${alert.createdBy || 'SOS'} — ALERTE` : originalTitle;
+    blink = !blink;
+  }, 800);
+}
+
+function stopTitleBlink() {
+  if (titleBlinkInterval) clearInterval(titleBlinkInterval);
+  document.title = originalTitle;
+}
+
+function dismissAlertBanner() {
+  const banner = document.getElementById('criticalAlertBanner');
+  if (banner) banner.remove();
+  if (alertBannerInterval) clearInterval(alertBannerInterval);
+  alertBannerQueue = [];
+  stopTitleBlink();
+}
+
+function acknowledgeBannerAlert() {
+  // Acknowledge the latest alert
+  if (alertBannerQueue.length > 0) {
+    const latest = alertBannerQueue[alertBannerQueue.length - 1];
+    if (latest.id) {
+      fetch(`${API_BASE}/dispatch/incidents/${latest.id}/acknowledge`, { method: 'PUT' })
+        .catch(() => {});
+    }
+  }
+  dismissAlertBanner();
+}
