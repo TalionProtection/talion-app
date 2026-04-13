@@ -2866,7 +2866,7 @@ async function openDetailModal(incidentId) {
   // Try to get full details from server
   let inc = null;
   try {
-    const res = await fetch(`${API_BASE}/alerts/${incidentId}`);
+    const res = await fetch(`${API_BASE}/alerts/${encodeURIComponent(incidentId)}`);
     if (res.ok) {
       inc = await res.json();
       // Cache for ETA calculation
