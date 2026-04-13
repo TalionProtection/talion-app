@@ -1116,7 +1116,7 @@ async function submitCreateIncident() {
 // ─── Incident Actions ────────────────────────────────────────────────────────
 async function acknowledgeIncident(id) {
   try {
-    const res = await fetch(`${API_BASE}/dispatch/incidents/${id}/acknowledge`, { method: 'PUT' });
+    const res = await fetch(`${API_BASE}/dispatch/incidents/${encodeURIComponent(id)}/acknowledge`, { method: 'PUT' });
     const data = await res.json();
     if (data.success) refreshData();
   } catch (err) {
@@ -1138,7 +1138,7 @@ async function openAssignModal(incidentId) {
   // Fetch responders with distance from the new endpoint
   let nearbyData = null;
   try {
-    const res = await fetch(`${API_BASE}/dispatch/incidents/${incidentId}/responders-nearby`);
+    const res = await fetch(`${API_BASE}/dispatch/incidents/${encodeURIComponent(incidentId)}/responders-nearby`);
     if (res.ok) nearbyData = await res.json();
   } catch (e) {
     console.warn('[Assign] Failed to fetch responders-nearby:', e);
@@ -1248,7 +1248,7 @@ function closeAssignModal() {
 
 async function assignResponder(incidentId, responderId) {
   try {
-    const res = await fetch(`${API_BASE}/dispatch/incidents/${incidentId}/assign`, {
+    const res = await fetch(`${API_BASE}/dispatch/incidents/${encodeURIComponent(incidentId)}/assign`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ responderId }),
@@ -1268,7 +1268,7 @@ async function assignResponder(incidentId, responderId) {
 async function unassignResponder(incidentId, responderId) {
   if (!confirm('D\u00e9sassigner ce responder de l\'incident ?')) return;
   try {
-    const res = await fetch(`${API_BASE}/dispatch/incidents/${incidentId}/unassign`, {
+    const res = await fetch(`${API_BASE}/dispatch/incidents/${encodeURIComponent(incidentId)}/unassign`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ responderId }),
@@ -1303,7 +1303,7 @@ function closeResolveModal() {
 async function confirmResolve() {
   if (!resolveTargetId) return;
   try {
-    const res = await fetch(`${API_BASE}/dispatch/incidents/${resolveTargetId}/resolve`, { method: 'PUT' });
+    const res = await fetch(`${API_BASE}/dispatch/incidents/${encodeURIComponent(resolveTargetId)}/resolve`, { method: 'PUT' });
     const data = await res.json();
     if (data.success) {
       closeResolveModal();
@@ -4783,7 +4783,7 @@ function acknowledgeBannerAlert() {
   if (alertBannerQueue.length > 0) {
     const latest = alertBannerQueue[alertBannerQueue.length - 1];
     if (latest.id) {
-      fetch(`${API_BASE}/dispatch/incidents/${latest.id}/acknowledge`, { method: 'PUT' })
+      fetch(`${API_BASE}/dispatch/incidents/${encodeURIComponent(latest.id)}/acknowledge`, { method: 'PUT' })
         .catch(() => {});
     }
   }
