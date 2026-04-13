@@ -1652,6 +1652,7 @@ app.post('/api/push-token', (req, res) => {
     userRole: userRole || 'user',
     registeredAt: Date.now(),
   });
+  savePushTokenToSupabase({ token, userId, userRole: userRole || 'user', registeredAt: Date.now() });
   
   console.log(`[Push] Token registered for ${userId} (${userRole}). Total tokens: ${pushTokens.size}`);
   res.json({ success: true });
@@ -1661,6 +1662,7 @@ app.delete('/api/push-token', (req, res) => {
   const { token } = req.body;
   if (token) {
     pushTokens.delete(token);
+    deletePushTokenFromSupabase(token);
   }
   res.json({ success: true });
 });
@@ -3976,6 +3978,7 @@ server.listen(Number(PORT), '0.0.0.0', () => {
   loadPatrolReportsFromSupabase();
   loadPTTChannelsFromSupabase();
   loadFamilyPerimetersFromSupabase();
+  loadPushTokensFromSupabase();
   console.log(`Talion Crisis Comm Server running on port ${PORT}`);
   console.log(`WebSocket endpoint: ws://localhost:${PORT}`);
   console.log(`Admin Console: http://localhost:${PORT}/admin-console/`);
@@ -4187,4 +4190,43 @@ async function deleteFamilyPerimeterFromSupabase(perimeterId: string): Promise<v
     const { error } = await supabaseAdmin.from('family_perimeters').delete().eq('id', perimeterId);
     if (error) console.error('[Supabase] deleteFamilyPerimeterFromSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] deleteFamilyPerimeterFromSupabase error:', e); }
+}
+
+// ─── Sync push_tokens from Supabase on startup ───────────────────────────
+async function loadPushTokensFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('push_tokens').select('*');
+    if (error) { console.error('[Supabase] Failed to load push_tokens:', error.message); return; }
+    if (data && data.length > 0) {
+      pushTokens.clear();
+      data.forEach((t: any) => {
+        pushTokens.set(t.token, {
+          token: t.token,
+          userId: t.user_id,
+          userRole: t.user_role,
+          registeredAt: t.registered_at,
+        });
+      });
+      console.log(`[Supabase] Loaded ${data.length} push tokens`);
+    }
+  } catch (e) { console.error('[Supabase] loadPushTokensFromSupabase error:', e); }
+}
+
+async function savePushTokenToSupabase(entry: PushTokenEntry): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('push_tokens').upsert({
+      token: entry.token,
+      user_id: entry.userId,
+      user_role: entry.userRole,
+      registered_at: entry.registeredAt,
+    });
+    if (error) console.error('[Supabase] savePushTokenToSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] savePushTokenToSupabase error:', e); }
+}
+
+async function deletePushTokenFromSupabase(token: string): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('push_tokens').delete().eq('token', token);
+    if (error) console.error('[Supabase] deletePushTokenFromSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] deletePushTokenFromSupabase error:', e); }
 }
