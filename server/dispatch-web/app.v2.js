@@ -2542,6 +2542,14 @@ function toggleGeofenceSounds() {
  * Medium/Low: single notification tone
  */
 function playNewAlertSound(type, severity) {
+  // Try HTML Audio element first (fewer browser restrictions)
+  try {
+    const audioEl = document.getElementById("sosAlertAudio");
+    if (audioEl && type === "sos") {
+      audioEl.currentTime = 0;
+      audioEl.play().catch(() => {});
+    }
+  } catch(e) {}
   if (!geofenceSoundsEnabled) return;
 
   if (type === 'sos') {

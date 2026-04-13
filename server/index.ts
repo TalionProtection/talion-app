@@ -154,6 +154,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage, limits: { fileSize: 5 * 1024 * 1024 } });
 const uploadMedia = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB for patrol media (photos + videos)
 app.use('/uploads', express.static(uploadsDir));
+app.use('/assets', express.static(path.join(PROJECT_ROOT, 'assets')));
 
 // Dynamic file serving for console static files to bypass CDN/proxy cache
 // Reads files from disk on every request so changes are always reflected
