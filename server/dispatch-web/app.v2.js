@@ -554,6 +554,12 @@ setInterval(() => {
 // ─── Init ────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   setupNavigation();
+  // Show audio unlock reminder
+  setTimeout(() => {
+    if (!browserNotificationsEnabled) {
+      showToast("🔔 Cliquez sur Notifications ON pour activer les sons d'alerte", "warning");
+    }
+  }, 1000);
   // Pre-unlock AudioContext with silent sound on page load
   setTimeout(() => {
     try {
