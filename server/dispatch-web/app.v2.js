@@ -147,7 +147,7 @@ function handleWsMessage(msg) {
       );
       // Play alert sound based on type and severity
       showCriticalAlertBanner({ ...formatted, createdBy: alert.createdBy });
-      playNewAlertSound(alert.type, alert.severity);
+        if (typeof getAudioContext === 'function') { const ctx = getAudioContext(); if (ctx && ctx.state === 'suspended') ctx.resume().then(() => playNewAlertSound(alert.type, alert.severity)); else playNewAlertSound(alert.type, alert.severity); } else { playNewAlertSound(alert.type, alert.severity); }
       updateAll();
       break;
     }
