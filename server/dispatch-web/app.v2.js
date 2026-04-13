@@ -26,11 +26,14 @@ const SEVERITY_ORDER= { critical: 0, high: 1, medium: 2, low: 3 };
 const SEVERITY_LABELS = { critical: 'Critique', high: 'Élevé', medium: 'Moyen', low: 'Faible' };
 const STATUS_LABELS = { active: 'Actif', acknowledged: 'Acquitté', dispatched: 'Dispatché', resolved: 'Résolu' };
 function formatIncidentId(id) {
-  if (!id) return 'INC-????';
-  let cleaned = id.replace(/^alert-/i, '').replace(/^incident-/i, '').replace(/^inc-/i, '');
-  const alphanumeric = cleaned.replace(/[^a-zA-Z0-9]/g, '');
+  if (!id) return "INC-?????";
+  // New format: "SOS — Billy Spielmann — Marbella — #0001"
+  if (id.includes(" — ")) return id;
+  // Legacy format: truncate UUID
+  let cleaned = id.replace(/^alert-/i, "").replace(/^incident-/i, "").replace(/^inc-/i, "");
+  const alphanumeric = cleaned.replace(/[^a-zA-Z0-9]/g, "");
   const short = alphanumeric.substring(0, 4).toUpperCase();
-  return `INC-${short || '????'}`;
+  return "INC-" + (short || "????");
 }
 function sevLabel(s) { return SEVERITY_LABELS[s] || (s ? s.charAt(0).toUpperCase() + s.slice(1) : ''); }
 function statusLabel(s) { return STATUS_LABELS[s] || (s ? s.charAt(0).toUpperCase() + s.slice(1) : ''); }
@@ -764,7 +767,7 @@ function renderIncidents() {
           <div class="inc-header-left">
             <span class="inc-type-icon">${TYPE_ICONS[inc.type] || '🚨'}</span>
             <div class="inc-info">
-  <h4>${formatIncidentId(inc.id)} \u2014 ${typeLabel(inc.type)}</h4>
+        <h4>${inc.id.includes(' \u2014 ') ? inc.id : formatIncidentId(inc.id) + ' \u2014 ' + typeLabel(inc.type)}</h4>
               <span class="inc-address">\ud83d\udccd ${inc.address}</span>         </div>
           </div>
           <div class="inc-badges">
