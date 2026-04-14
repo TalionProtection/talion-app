@@ -4575,7 +4575,13 @@ app.get('/api/alerts/:id/context', async (req, res) => {
 
   // Get family members
   const family = (user.relationships || []).map(rel => {
-    const member = adminUsers.get(rel.userId);
+    // Try direct lookup first, then scan all users for matching id
+    let member = adminUsers.get(rel.userId);
+    if (!member) {
+      for (const [, u] of adminUsers) {
+        if (u.id === rel.userId) { member = u; break; }
+      }
+    }
     if (!member) return null;
     return { id: member.id, name: member.name, role: rel.type, phone: member.phoneMobile, photoUrl: member.photoUrl };
   }).filter(Boolean);
