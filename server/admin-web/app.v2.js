@@ -452,7 +452,13 @@ function openUserDrawer(userId) {
 
   renderTagsInDrawer();
   currentAddresses = [];
-  if (editingUserId) loadUserAddresses(editingUserId);
+  if (editingUserId) loadUserAddresses(editingUserId).then(() => {
+    // After loading addresses, check if there's a legacy address to migrate
+    const legacyAddress = document.getElementById('fieldAddress')?.value?.trim();
+    if (legacyAddress && currentAddresses.length === 0) {
+      showMigrateAddressPrompt(legacyAddress);
+    }
+  });
   renderRelationshipsInDrawer();
   updatePhotoPreview();
   populateRelUserSelect();
@@ -1396,4 +1402,42 @@ async function editAddress(addressId) {
   // Store editing ID
   modal._editingAddressId = addressId;
   modal.style.display = 'flex';
+}
+
+// ─── Legacy Address Migration ─────────────────────────────────────────────
+function showMigrateAddressPrompt(address) {
+  const container = document.getElementById('addressesContainer');
+  if (!container) return;
+  const banner = document.createElement('div');
+  banner.id = 'migrateAddressBanner';
+  banner.style.cssText = 'background:#fffbeb;border:1px solid #f59e0b;border-radius:8px;padding:10px 14px;margin-bottom:8px;font-size:12px;color:#92400e;';
+  banner.innerHTML = `
+    <div style="font-weight:600;margin-bottom:4px;">⚠️ Adresse existante détectée</div>
+    <div style="margin-bottom:8px;color:#78350f;">${address}</div>
+    <button onclick="migrateAddress('${address.replace(/'/g, "\\'")}')" style="background:#f59e0b;color:white;border:none;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px;font-weight:600;">📥 Importer comme résidence principale</button>
+    <button onclick="document.getElementById('migrateAddressBanner')?.remove()" style="background:none;border:none;cursor:pointer;font-size:12px;color:#92400e;margin-left:8px;">Ignorer</button>
+  `;
+  container.insertBefore(banner, container.firstChild);
+}
+
+async function migrateAddress(address) {
+  if (!editingUserId) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/users/${editingUserId}/addresses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        label: 'Résidence principale', 
+        address, 
+        isPrimary: true,
+      }),
+    });
+    if (res.ok) {
+      showToast('✅ Adresse importée', 'success');
+      document.getElementById('migrateAddressBanner')?.remove();
+      await loadUserAddresses(editingUserId);
+    }
+  } catch (e) {
+    showToast('❌ Erreur', 'error');
+  }
 }
