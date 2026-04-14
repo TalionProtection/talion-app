@@ -398,6 +398,48 @@
           <span>+</span> Ajouter une adresse
         </button>
 
+        <!-- Comments -->
+        <div class="form-section"><span class="form-section-icon">&#x1F4DD;</span> Commentaires</div>
+        <div class="form-group full-width">
+          <textarea class="form-textarea" id="fieldComments" placeholder="Notes, commentaires libres..."></textarea>
+        </div>
+
+        <!-- Relationships -->
+        <div class="form-section"><span class="form-section-icon">&#x1F46A;</span> Relations (parenté, cohabitation...)</div>
+        <div class="relationships-list" id="relationshipsList"></div>
+        <div class="add-relationship-row" style="margin-top:10px">
+          <select class="form-select" id="relUserSelect" style="flex:2">
+            <option value="">-- Sélectionner un utilisateur --</option>
+          </select>
+          <select class="form-select" id="relTypeSelect" style="flex:1">
+            <option value="spouse">Conjoint(e)</option>
+            <option value="parent">Parent</option>
+            <option value="child">Enfant</option>
+            <option value="sibling">Frère/Sœur</option>
+            <option value="cohabitant">Cohabitant</option>
+            <option value="other">Autre</option>
+          </select>
+          <button class="btn btn-sm btn-primary" onclick="addRelationship()">Ajouter</button>
+        </div>
+
+        <!-- Same address info -->
+        <div id="sameAddressInfo" style="margin-top:16px;display:none"></div>
+
+        <!-- Delete zone -->
+        <div id="deleteZone" style="display:none">
+          <div class="delete-confirm-box">
+            <p>&#x26A0;&#xFE0F; Supprimer définitivement cet utilisateur ? Cette action est irréversible.</p>
+            <button class="btn btn-danger" onclick="deleteCurrentUser()">&#x1F5D1;&#xFE0F; Supprimer l'utilisateur</button>
+          </div>
+        </div>
+      </div>
+      <!-- Drawer footer -->
+      <div class="drawer-footer">
+        <button class="btn btn-secondary" onclick="closeUserDrawer()">Annuler</button>
+        <button class="btn btn-primary" id="btnSaveUser" onclick="saveUser()">&#x1F4BE; Enregistrer</button>
+      </div>
+    </div>
+  </div>
 
 
 <!-- Add Address Modal (outside drawer for proper z-index) -->
