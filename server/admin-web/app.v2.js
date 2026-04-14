@@ -1214,7 +1214,10 @@ function renderAddressesInDrawer() {
           ${addr.alarmCode ? `<div style="font-size:11px;color:var(--text-faint);margin-top:3px;margin-left:26px;">🔑 Code alarme: <strong>${addr.alarmCode}</strong></div>` : ''}
           ${addr.notes ? `<div style="font-size:11px;color:var(--text-faint);margin-top:2px;margin-left:26px;">📝 ${addr.notes}</div>` : ''}
         </div>
-        <button onclick="deleteAddress('${addr.id}')" style="background:none;border:1px solid #fecaca;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#dc2626;margin-left:8px;">🗑️</button>
+        <div style="display:flex;gap:4px;margin-left:8px;">
+          <button onclick="editAddress('${addr.id}')" style="background:none;border:1px solid #e5e7eb;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;">✏️</button>
+          <button onclick="deleteAddress('${addr.id}')" style="background:none;border:1px solid #fecaca;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#dc2626;">🗑️</button>
+        </div>
       </div>
     </div>`;
   }).join('');
@@ -1325,14 +1328,23 @@ async function saveAddress() {
   if (!label || !address) { showToast('Type et adresse obligatoires', 'error'); return; }
   if (!editingUserId) { showToast('Sauvegardez d\'abord l\'utilisateur', 'error'); return; }
 
+  const modal = document.getElementById('addAddressModal');
+  const editingAddressId = modal?._editingAddressId;
+  if (modal) modal._editingAddressId = null;
+
+  const method = editingAddressId ? 'PUT' : 'POST';
+  const url = editingAddressId 
+    ? `${API_BASE}/api/users/${editingUserId}/addresses/${editingAddressId}`
+    : `${API_BASE}/api/users/${editingUserId}/addresses`;
+
   try {
-    const res = await fetch(`${API_BASE}/api/users/${editingUserId}/addresses`, {
-      method: 'POST',
+    const res = await fetch(url, {
+      method,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ label, address, latitude, longitude, isPrimary, alarmCode: alarmCode || null, notes: notes || null, country: country || null }),
     });
     if (res.ok) {
-      showToast('✅ Adresse ajoutée', 'success');
+      showToast(editingAddressId ? '✅ Adresse mise à jour' : '✅ Adresse ajoutée', 'success');
       closeAddAddressModal();
       await loadUserAddresses(editingUserId);
     } else {
@@ -1352,4 +1364,36 @@ async function deleteAddress(addressId) {
   } catch (e) {
     showToast('❌ Erreur', 'error');
   }
+}
+
+async function editAddress(addressId) {
+  const addr = currentAddresses.find(a => a.id === addressId);
+  if (!addr) return;
+  
+  const modal = document.getElementById('addAddressModal');
+  if (!modal) return;
+
+  // Pre-fill form
+  selectAddrType(addr.label, getAddrIcon(addr.label));
+  
+  const parts = addr.address.split(',').map(p => p.trim());
+  const streetEl = document.getElementById('addrStreet');
+  const cityEl = document.getElementById('addrCity');
+  const countryEl = document.getElementById('addrCountry');
+  const searchEl = document.getElementById('addrSearch');
+  const addrEl = document.getElementById('addrAddress');
+  
+  if (searchEl) searchEl.value = addr.address;
+  if (addrEl) { addrEl.value = addr.address; addrEl.dataset.lat = addr.latitude || ''; addrEl.dataset.lon = addr.longitude || ''; }
+  if (streetEl) streetEl.value = parts[0] || '';
+  if (cityEl) cityEl.value = parts[1] || '';
+  if (countryEl) countryEl.value = addr.country || parts[parts.length - 1] || '';
+  
+  document.getElementById('addrAlarmCode').value = addr.alarmCode || '';
+  document.getElementById('addrNotes').value = addr.notes || '';
+  document.getElementById('addrIsPrimary').checked = addr.isPrimary;
+  
+  // Store editing ID
+  modal._editingAddressId = addressId;
+  modal.style.display = 'flex';
 }
