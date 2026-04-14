@@ -4333,6 +4333,27 @@ async function generateIncidentId(type: string, createdBy: string, location: { a
   }
 }
 
+
+// ─── Mapbox Geocoding Helper ──────────────────────────────────────────────
+async function geocodeAddress(addressText: string): Promise<{ latitude: number; longitude: number } | null> {
+  try {
+    const token = process.env.MAPBOX_TOKEN;
+    if (!token) { console.warn('[Geocode] MAPBOX_TOKEN not set'); return null; }
+    const encoded = encodeURIComponent(addressText);
+    const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encoded}.json?access_token=${token}&limit=1`;
+    const resp = await fetch(url);
+    if (!resp.ok) { console.warn('[Geocode] Mapbox error', resp.status); return null; }
+    const data = await resp.json() as any;
+    const feature = data.features?.[0];
+    if (!feature) { console.warn('[Geocode] No results for:', addressText); return null; }
+    const [longitude, latitude] = feature.center;
+    return { latitude, longitude };
+  } catch (e) {
+    console.error('[Geocode] geocodeAddress error:', e);
+    return null;
+  }
+}
+
 // ─── User Addresses ───────────────────────────────────────────────────────
 interface UserAddress {
   id: string;
@@ -4386,11 +4407,21 @@ app.post('/api/users/:id/addresses', async (req, res) => {
   if (!label || !address) return res.status(400).json({ error: 'label and address are required' });
   const userId = req.params.id;
   const now = Date.now();
+
+  // Géocoder si pas de coordonnées fournies
+  let lat = latitude || null;
+  let lng = longitude || null;
+  if (!lat || !lng) {
+    const coords = await geocodeAddress(address);
+    if (coords) { lat = coords.latitude; lng = coords.longitude; }
+    else console.warn('[Addresses] Could not geocode: ' + address);
+  }
+
   const newAddr: UserAddress = {
     id: require('crypto').randomUUID(),
     userId, label, address,
-    latitude: latitude || null,
-    longitude: longitude || null,
+    latitude: lat,
+    longitude: lng,
     placeId: placeId || null,
     isPrimary: isPrimary || false,
     alarmCode: alarmCode || null,
@@ -4423,9 +4454,19 @@ app.put('/api/users/:id/addresses/:addressId', async (req, res) => {
   const idx = addresses.findIndex(a => a.id === req.params.addressId);
   if (idx === -1) return res.status(404).json({ error: 'Address not found' });
   if (isPrimary) addresses.forEach(a => { a.isPrimary = false; });
+
+  // Géocoder si l'adresse a changé et pas de nouvelles coords fournies
+  let finalLat = latitude ?? addresses[idx].latitude;
+  let finalLng = longitude ?? addresses[idx].longitude;
+  const addressChanged = address && address !== addresses[idx].address;
+  if (addressChanged && !latitude && !longitude) {
+    const coords = await geocodeAddress(address ?? addresses[idx].address);
+    if (coords) { finalLat = coords.latitude; finalLng = coords.longitude; }
+  }
+
   const updated = { ...addresses[idx], label: label ?? addresses[idx].label,
-    address: address ?? addresses[idx].address, latitude: latitude ?? addresses[idx].latitude,
-    longitude: longitude ?? addresses[idx].longitude, isPrimary: isPrimary ?? addresses[idx].isPrimary,
+    address: address ?? addresses[idx].address, latitude: finalLat,
+    longitude: finalLng, isPrimary: isPrimary ?? addresses[idx].isPrimary,
     alarmCode: alarmCode ?? addresses[idx].alarmCode, notes: notes ?? addresses[idx].notes,
     updatedAt: Date.now() };
   addresses[idx] = updated;
@@ -4446,6 +4487,31 @@ app.delete('/api/users/:id/addresses/:addressId', async (req, res) => {
   addresses.splice(idx, 1);
   await supabaseAdmin.from('user_addresses').delete().eq('id', req.params.addressId);
   res.json({ success: true });
+});
+
+
+// POST /api/admin/geocode-addresses — géocode rétroactivement toutes les adresses sans coords
+app.post('/api/admin/geocode-addresses', async (req, res) => {
+  let processed = 0, updated = 0, failed = 0;
+  for (const [userId, addrs] of userAddresses) {
+    for (const addr of addrs) {
+      if (addr.latitude && addr.longitude) continue;
+      processed++;
+      const coords = await geocodeAddress(addr.address);
+      if (!coords) { failed++; console.warn('[BatchGeocode] Failed: ' + addr.address); continue; }
+      addr.latitude = coords.latitude;
+      addr.longitude = coords.longitude;
+      addr.updatedAt = Date.now();
+      await supabaseAdmin.from('user_addresses').update({
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+        updated_at: addr.updatedAt,
+      }).eq('id', addr.id);
+      updated++;
+      await new Promise(r => setTimeout(r, 150));
+    }
+  }
+  res.json({ processed, updated, failed });
 });
 
 // GET /api/alerts/:id/context - get full client context for an alert
