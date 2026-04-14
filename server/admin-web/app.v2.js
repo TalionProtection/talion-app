@@ -1240,24 +1240,50 @@ function searchAddrAddress(query) {
       const res = await fetch(`${API_BASE}/api/geocode?q=${encodeURIComponent(query)}`);
       const results = await res.json();
       if (!results.length) { suggestions.style.display = 'none'; return; }
-      suggestions.innerHTML = results.map(r => `
-        <div onclick="selectAddrSuggestion('${r.display_name.replace(/'/g, "\\'")}', ${r.lat}, ${r.lon})"
-             style="padding:10px 12px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--border);"
-             onmouseover="this.style.background='var(--bg-secondary)'" onmouseout="this.style.background=''">
-          📍 ${r.display_name}
-        </div>`).join('');
+      suggestions._results = results;
+      suggestions.innerHTML = results.map((r, i) => {
+        const a = r.address || {};
+        const street = [a.house_number, a.road].filter(Boolean).join(' ') || r.display_name.split(',')[0];
+        const city = a.city || a.town || a.village || a.municipality || '';
+        const country = a.country || '';
+        const subText = [city, country].filter(Boolean).join(', ');
+        return `<div onclick="selectAddrSuggestion(${i})"
+             style="padding:10px 14px;cursor:pointer;border-bottom:1px solid #f3f4f6;background:#fff;"
+             onmouseover="this.style.background='#f9fafb'" onmouseout="this.style.background='#fff'">
+          <div style="font-size:13px;font-weight:600;color:#1f2937;">📍 ${street}</div>
+          <div style="font-size:11px;color:#6b7280;margin-top:2px;">${subText}</div>
+        </div>`;
+      }).join('');
       suggestions.style.display = 'block';
-    } catch {}
+    } catch(e) { console.error('Geocode error:', e); }
   }, 800);
 }
 
-function selectAddrSuggestion(address, lat, lon) {
-  const el = document.getElementById('addrAddress');
-  el.value = address;
-  el.dataset.lat = lat;
-  el.dataset.lon = lon;
-  document.getElementById('addrAddressSuggestions').style.display = 'none';
+function selectAddrSuggestion(idx) {
+  const suggestions = document.getElementById('addrAddressSuggestions');
+  if (!suggestions._results || !suggestions._results[idx]) return;
+  const r = suggestions._results[idx];
+  const a = r.address || {};
+  const street = [a.house_number, a.road].filter(Boolean).join(' ') || r.display_name.split(',')[0];
+  const city = a.city || a.town || a.village || a.municipality || '';
+  const country = a.country || '';
+  const fullAddress = [street, city, country].filter(Boolean).join(', ');
+
+  const addrEl = document.getElementById('addrAddress');
+  if (addrEl) { addrEl.value = fullAddress; addrEl.dataset.lat = r.lat; addrEl.dataset.lon = r.lon; }
+
+  const searchEl = document.getElementById('addrSearch');
+  if (searchEl) searchEl.value = fullAddress;
+  const streetEl = document.getElementById('addrStreet');
+  if (streetEl) streetEl.value = street;
+  const cityEl = document.getElementById('addrCity');
+  if (cityEl) cityEl.value = city;
+  const countryEl = document.getElementById('addrCountry');
+  if (countryEl) countryEl.value = country;
+
+  suggestions.style.display = 'none';
 }
+
 
 function showAddAddressForm() {
   const modal = document.getElementById('addAddressModal');
