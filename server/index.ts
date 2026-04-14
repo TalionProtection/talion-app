@@ -2754,7 +2754,18 @@ app.put('/dispatch/incidents/:id/resolve', (req, res) => {
 
 // Responder: update their response status on an incident (accept, en_route, on_scene)
 app.put('/alerts/:id/respond', (req, res) => {
-  const alert = alerts.get(req.params.id);
+  // Try direct lookup first, then try decoded variants
+  let alert = alerts.get(req.params.id);
+  if (!alert) {
+    // Try decoding the ID (handles em dash and special chars)
+    try { alert = alerts.get(decodeURIComponent(req.params.id)); } catch(e) {}
+  }
+  if (!alert) {
+    // Try finding by partial match (last resort)
+    for (const [key, val] of alerts) {
+      if (key.includes(req.params.id) || req.params.id.includes(key)) { alert = val; break; }
+    }
+  }
   if (!alert) return res.status(404).json({ error: 'Incident not found' });
   const { responderId, status } = req.body;
   if (!responderId) return res.status(400).json({ error: 'responderId required' });
