@@ -1248,7 +1248,7 @@ function searchAddrAddress(query) {
         </div>`).join('');
       suggestions.style.display = 'block';
     } catch {}
-  }, 400);
+  }, 800);
 }
 
 function selectAddrSuggestion(address, lat, lon) {

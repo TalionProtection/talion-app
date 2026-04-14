@@ -1521,9 +1521,14 @@ app.get('/health', (req, res) => {
 });
 
 // Geocode proxy for Nominatim (avoids CORS/403 issues from browser)
+const geocodeCache = new Map<string, {data: any, ts: number}>();
+
 app.get('/api/geocode', async (req, res) => {
   const q = req.query.q as string;
   if (!q || q.length < 2) return res.json([]);
+  // Check cache (5 min TTL)
+  const cached = geocodeCache.get(q);
+  if (cached && Date.now() - cached.ts < 300000) return res.json(cached.data);
   try {
     const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&addressdetails=1&limit=5`;
     const response = await fetch(url, {
@@ -1533,6 +1538,7 @@ app.get('/api/geocode', async (req, res) => {
       return res.status(response.status).json({ error: 'Nominatim error' });
     }
     const data = await response.json();
+    geocodeCache.set(q, { data, ts: Date.now() });
     res.json(data);
   } catch (err) {
     console.error('Geocode proxy error:', err);
