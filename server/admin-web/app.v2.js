@@ -1265,8 +1265,10 @@ function showAddAddressForm() {
     selectAddrType('Résidence principale', '🏠');
     const addrEl = document.getElementById('addrAddress');
     addrEl.value = '';
-    addrEl.dataset.lat = '';
-    addrEl.dataset.lon = '';
+    addrEl.removeAttribute('data-lat');
+    addrEl.removeAttribute('data-lon');
+    const countryEl = document.getElementById('addrCountry');
+    if (countryEl) countryEl.value = '';
     document.getElementById('addrAlarmCode').value = '';
     document.getElementById('addrNotes').value = '';
     document.getElementById('addrIsPrimary').checked = currentAddresses.length === 0;
@@ -1289,6 +1291,7 @@ async function saveAddress() {
   const isPrimary = document.getElementById('addrIsPrimary').checked;
   const latitude = parseFloat(addrEl.dataset.lat) || null;
   const longitude = parseFloat(addrEl.dataset.lon) || null;
+  const country = document.getElementById('addrCountry')?.value.trim() || null;
 
   if (!label || !address) { showToast('Type et adresse obligatoires', 'error'); return; }
   if (!editingUserId) { showToast('Sauvegardez d\'abord l\'utilisateur', 'error'); return; }
@@ -1297,7 +1300,7 @@ async function saveAddress() {
     const res = await fetch(`${API_BASE}/api/users/${editingUserId}/addresses`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ label, address, latitude, longitude, isPrimary, alarmCode: alarmCode || null, notes: notes || null }),
+      body: JSON.stringify({ label, address, latitude, longitude, isPrimary, alarmCode: alarmCode || null, notes: notes || null, country: country || null }),
     });
     if (res.ok) {
       showToast('✅ Adresse ajoutée', 'success');

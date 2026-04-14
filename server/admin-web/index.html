@@ -392,33 +392,6 @@
         </div>
 
         <!-- Comments -->
-        <div class="form-section"><span class="form-section-icon">&#x1F4DD;</span> Commentaires</div>
-        <div class="form-group full-width">
-          <textarea class="form-textarea" id="fieldComments" placeholder="Notes, commentaires libres..."></textarea>
-        </div>
-
-        <!-- Relationships -->
-        <div class="form-section"><span class="form-section-icon">&#x1F46A;</span> Relations (parenté, cohabitation...)</div>
-        <div class="relationships-list" id="relationshipsList"></div>
-        <div class="add-relationship-row" style="margin-top:10px">
-          <select class="form-select" id="relUserSelect" style="flex:2">
-            <option value="">-- Sélectionner un utilisateur --</option>
-          </select>
-          <select class="form-select" id="relTypeSelect" style="flex:1">
-            <option value="spouse">Conjoint(e)</option>
-            <option value="parent">Parent</option>
-            <option value="child">Enfant</option>
-            <option value="sibling">Frère/Sœur</option>
-            <option value="cohabitant">Cohabitant</option>
-            <option value="other">Autre</option>
-          </select>
-          <button class="btn btn-sm btn-primary" onclick="addRelationship()">Ajouter</button>
-        </div>
-
-        <!-- Same address info -->
-        <div id="sameAddressInfo" style="margin-top:16px;display:none"></div>
-
-        <!-- Delete zone (only for edit mode) -->
         <div class="form-section"><span class="form-section-icon">🏠</span> Adresses & Résidences</div>
         <div id="addressesContainer" style="margin-bottom:8px;"></div>
         <button type="button" onclick="showAddAddressForm()" style="width:100%;padding:10px;border:2px dashed var(--border);border-radius:8px;background:none;cursor:pointer;color:var(--text-secondary);font-size:13px;margin-bottom:16px;display:flex;align-items:center;justify-content:center;gap:6px;">
@@ -463,6 +436,10 @@
               </div>
             </div>
             <div class="form-group">
+              <label class="form-label">🌍 Pays</label>
+              <input id="addrCountry" class="form-input" placeholder="Ex: Espagne, Suisse, France...">
+            </div>
+            <div class="form-group">
               <label class="form-label">📝 Notes</label>
               <input id="addrNotes" class="form-input" placeholder="Digicode, étage, instructions...">
             </div>
@@ -473,6 +450,34 @@
           </div>
         </div>
 
+
+        <div class="form-section"><span class="form-section-icon">&#x1F4DD;</span> Commentaires</div>
+        <div class="form-group full-width">
+          <textarea class="form-textarea" id="fieldComments" placeholder="Notes, commentaires libres..."></textarea>
+        </div>
+
+        <!-- Relationships -->
+        <div class="form-section"><span class="form-section-icon">&#x1F46A;</span> Relations (parenté, cohabitation...)</div>
+        <div class="relationships-list" id="relationshipsList"></div>
+        <div class="add-relationship-row" style="margin-top:10px">
+          <select class="form-select" id="relUserSelect" style="flex:2">
+            <option value="">-- Sélectionner un utilisateur --</option>
+          </select>
+          <select class="form-select" id="relTypeSelect" style="flex:1">
+            <option value="spouse">Conjoint(e)</option>
+            <option value="parent">Parent</option>
+            <option value="child">Enfant</option>
+            <option value="sibling">Frère/Sœur</option>
+            <option value="cohabitant">Cohabitant</option>
+            <option value="other">Autre</option>
+          </select>
+          <button class="btn btn-sm btn-primary" onclick="addRelationship()">Ajouter</button>
+        </div>
+
+        <!-- Same address info -->
+        <div id="sameAddressInfo" style="margin-top:16px;display:none"></div>
+
+        <!-- Delete zone (only for edit mode) -->
         <div id="deleteZone" style="display:none">
           <div class="delete-confirm-box">
             <p>&#x26A0;&#xFE0F; Supprimer définitivement cet utilisateur ? Cette action est irréversible.</p>
