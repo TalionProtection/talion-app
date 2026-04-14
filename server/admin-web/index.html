@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Talion Crisis Comm - Admin Console</title>
   <link rel="stylesheet" href="styles.v2.css">
-<style>#addAddressModal input, #addAddressModal select, #addAddressModal textarea { background:#ffffff !important; color:#1f2937 !important; border:1px solid #e5e7eb !important; border-radius:6px; padding:8px 12px; width:100%; box-sizing:border-box; font-size:14px; } #addAddressModal label { color:#374151 !important; font-size:13px; font-weight:500; display:block; margin-bottom:4px; } #addAddressModal .form-label { color:#374151 !important; } #addAddressModal h3 { color:#1f2937 !important; }</style>
+<style>#addAddressModal input, #addAddressModal select, #addAddressModal textarea { background:#ffffff !important; color:#1f2937 !important; border:1px solid #e5e7eb !important; border-radius:6px; padding:8px 12px; width:100%; box-sizing:border-box; font-size:14px; } #addAddressModal label { color:#374151 !important; font-size:13px; font-weight:500; display:block; margin-bottom:4px; } #addAddressModal .form-label { color:#374151 !important; } #addAddressModal h3 { color:#1f2937 !important; } #addrAddressSuggestions { background:#ffffff !important; color:#1f2937 !important; border:1px solid #e5e7eb !important; z-index:999999 !important; }</style>
 </head>
 <body>
   <!-- Sidebar -->
@@ -466,7 +466,7 @@
     <div class="form-group" style="position:relative;">
       <label class="form-label">Adresse complète *</label>
       <input id="addrAddress" class="form-input" placeholder="Rechercher une adresse..." oninput="searchAddrAddress(this.value)" autocomplete="off">
-      <div id="addrAddressSuggestions" style="position:absolute;top:100%;left:0;right:0;background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;z-index:100000;display:none;max-height:200px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,0.15);"></div>
+      <div id="addrAddressSuggestions" style="position:absolute;top:100%;left:0;right:0;background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;z-index:999999;display:none;max-height:200px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,0.15);"></div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
       <div class="form-group">
