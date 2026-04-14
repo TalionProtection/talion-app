@@ -2491,3 +2491,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 
 /* ─── Responder Incident Badge (Overview) ─────────────────── */
 .resp-inc-badge { font-size: 10px; padding: 1px 6px; border-radius: 10px; background: rgba(245,158,11,0.15); color: #f59e0b; font-weight: 600; margin-left: 6px; }
+
+/* ── Detail Modal scroll fix ── */
+#detailModal .modal-content {
+  max-height: 85vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+#detailModal .modal-body {
+  overflow-y: auto;
+  flex: 1;
+}

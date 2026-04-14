@@ -4547,14 +4547,14 @@ app.get('/api/alerts/:id/context', async (req, res) => {
       const dist = haversineDistance(alert.location.latitude, alert.location.longitude, addr.latitude, addr.longitude);
       if (dist < minDist) { minDist = dist; closest = addr; }
     }
-    if (closest && minDist < 200) {
+    if (closest && minDist < 500) {
       locationContext = {
         type: 'known_address',
         label: closest.label,
         address: closest.address,
         distanceMeters: Math.round(minDist),
         alarmCode: closest.alarmCode,
-        isHomeJacking: minDist < 100 && (closest.isPrimary || closest.label.toLowerCase().includes('principal')),
+        isHomeJacking: minDist < 100,
       };
     }
   }
