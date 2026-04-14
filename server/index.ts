@@ -1530,13 +1530,35 @@ app.get('/api/geocode', async (req, res) => {
   const cached = geocodeCache.get(q);
   if (cached && Date.now() - cached.ts < 300000) return res.json(cached.data);
   try {
-    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&addressdetails=1&limit=5`;
-    const response = await fetch(url, {
-      headers: { 'User-Agent': 'TalionCrisisComm-DispatchConsole/1.0' },
-    });
-    if (!response.ok) {
-      return res.status(response.status).json({ error: 'Nominatim error' });
+    const mapboxToken = process.env.MAPBOX_TOKEN;
+    if (mapboxToken) {
+      const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(q)}.json?access_token=${mapboxToken}&limit=5&types=address&language=fr`;
+      const response = await fetch(url);
+      if (!response.ok) throw new Error('Mapbox error');
+      const data = await response.json();
+      const results = (data.features || []).map((f: any) => {
+        const ctx = f.context || [];
+        const city = ctx.find((c: any) => c.id?.startsWith('place'))?.text || '';
+        const country = ctx.find((c: any) => c.id?.startsWith('country'))?.text || '';
+        const postcode = ctx.find((c: any) => c.id?.startsWith('postcode'))?.text || '';
+        return {
+          display_name: f.place_name,
+          lat: f.center[1].toString(),
+          lon: f.center[0].toString(),
+          address: {
+            house_number: f.address || '',
+            road: f.text || '',
+            city, town: city, postcode, country,
+          }
+        };
+      });
+      geocodeCache.set(q, { data: results, ts: Date.now() });
+      return res.json(results);
     }
+    // Fallback Nominatim
+    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&addressdetails=1&limit=5`;
+    const response = await fetch(url, { headers: { 'User-Agent': 'TalionCrisisComm/1.0' } });
+    if (!response.ok) return res.status(response.status).json({ error: 'Geocode error' });
     const data = await response.json();
     geocodeCache.set(q, { data, ts: Date.now() });
     res.json(data);
