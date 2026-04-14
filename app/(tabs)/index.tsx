@@ -253,7 +253,7 @@ export default function HomeScreen() {
     if (!user?.id) return;
     try {
       const apiBase = getApiBaseUrl();
-      const res = await fetchWithTimeout(`${apiBase}/alerts/${incidentId}/respond`, {
+      const res = await fetchWithTimeout(`${apiBase}/alerts/${encodeURIComponent(incidentId)}/respond`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ responderId: user.id, status: newStatus }),
