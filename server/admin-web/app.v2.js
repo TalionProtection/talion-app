@@ -1165,12 +1165,29 @@ function exportLoginHistoryCSV() {
 // ─── User Addresses Management ────────────────────────────────────────────
 let currentAddresses = [];
 
+const ADDR_TYPE_ICONS = {
+  'Résidence principale': '🏠',
+  'Résidence secondaire': '🏡',
+  'Bureau': '🏢',
+  'École': '🏫',
+  'Hôtel': '🏨',
+  'Autre': '📍',
+};
+
+function getAddrIcon(label) {
+  for (const [key, icon] of Object.entries(ADDR_TYPE_ICONS)) {
+    if (label && label.includes(key)) return icon;
+  }
+  return '📍';
+}
+
 async function loadUserAddresses(userId) {
   try {
     const res = await fetch(`${API_BASE}/api/users/${userId}/addresses`);
     currentAddresses = await res.json();
     renderAddressesInDrawer();
   } catch (e) {
+    currentAddresses = [];
     renderAddressesInDrawer();
   }
 }
@@ -1182,35 +1199,78 @@ function renderAddressesInDrawer() {
     container.innerHTML = '<p style="color:var(--text-faint);font-size:12px;padding:4px 0">Aucune adresse enregistrée</p>';
     return;
   }
-  container.innerHTML = currentAddresses.map((addr, i) => `
-    <div style="background:var(--bg-secondary);border-radius:8px;padding:10px 12px;margin-bottom:8px;border:1px solid var(--border);">
+  container.innerHTML = currentAddresses.map((addr) => {
+    const icon = getAddrIcon(addr.label);
+    return `
+    <div style="background:var(--bg-secondary);border-radius:10px;padding:12px 14px;margin-bottom:8px;border:1px solid var(--border);${addr.isPrimary ? 'border-left:3px solid #1e3a5f;' : ''}">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;">
         <div style="flex:1;">
-          <div style="font-weight:700;font-size:13px;color:var(--text-primary);">
-            ${addr.isPrimary ? '🏠' : '🏡'} ${addr.label}
-            ${addr.isPrimary ? '<span style="background:#1e3a5f;color:white;font-size:10px;padding:2px 6px;border-radius:4px;margin-left:6px;">PRINCIPAL</span>' : ''}
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+            <span style="font-size:18px;">${icon}</span>
+            <span style="font-weight:700;font-size:13px;color:var(--text-primary);">${addr.label}</span>
+            ${addr.isPrimary ? '<span style="background:#1e3a5f;color:white;font-size:10px;padding:2px 8px;border-radius:12px;font-weight:600;">PRINCIPAL</span>' : ''}
           </div>
-          <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">${addr.address}</div>
-          ${addr.alarmCode ? `<div style="font-size:11px;color:var(--text-faint);margin-top:2px;">🔑 Code alarme: ${addr.alarmCode}</div>` : ''}
-          ${addr.notes ? `<div style="font-size:11px;color:var(--text-faint);margin-top:2px;">📝 ${addr.notes}</div>` : ''}
+          <div style="font-size:12px;color:var(--text-secondary);margin-left:26px;">${addr.address}</div>
+          ${addr.alarmCode ? `<div style="font-size:11px;color:var(--text-faint);margin-top:3px;margin-left:26px;">🔑 Code alarme: <strong>${addr.alarmCode}</strong></div>` : ''}
+          ${addr.notes ? `<div style="font-size:11px;color:var(--text-faint);margin-top:2px;margin-left:26px;">📝 ${addr.notes}</div>` : ''}
         </div>
-        <div style="display:flex;gap:6px;margin-left:8px;">
-          <button onclick="editAddress(${i})" style="background:none;border:1px solid var(--border);border-radius:4px;padding:3px 8px;cursor:pointer;font-size:11px;">✏️</button>
-          <button onclick="deleteAddress('${addr.id}')" style="background:none;border:1px solid #fecaca;border-radius:4px;padding:3px 8px;cursor:pointer;font-size:11px;color:#dc2626;">🗑️</button>
-        </div>
+        <button onclick="deleteAddress('${addr.id}')" style="background:none;border:1px solid #fecaca;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#dc2626;margin-left:8px;">🗑️</button>
       </div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
+}
+
+function selectAddrType(label, icon) {
+  document.getElementById('addrLabel').value = label;
+  document.getElementById('addrTypeIcon').value = icon;
+  document.querySelectorAll('.addr-type-btn').forEach(btn => {
+    const isSelected = btn.dataset.type === label;
+    btn.style.border = isSelected ? '2px solid #1e3a5f' : '2px solid var(--border)';
+    btn.style.background = isSelected ? '#e8f0fe' : 'none';
+  });
+}
+
+let addrSearchTimer = null;
+function searchAddrAddress(query) {
+  clearTimeout(addrSearchTimer);
+  const suggestions = document.getElementById('addrAddressSuggestions');
+  if (!query || query.length < 3) { suggestions.style.display = 'none'; return; }
+  addrSearchTimer = setTimeout(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/geocode?q=${encodeURIComponent(query)}`);
+      const results = await res.json();
+      if (!results.length) { suggestions.style.display = 'none'; return; }
+      suggestions.innerHTML = results.map(r => `
+        <div onclick="selectAddrSuggestion('${r.display_name.replace(/'/g, "\\'")}', ${r.lat}, ${r.lon})"
+             style="padding:10px 12px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--border);"
+             onmouseover="this.style.background='var(--bg-secondary)'" onmouseout="this.style.background=''">
+          📍 ${r.display_name}
+        </div>`).join('');
+      suggestions.style.display = 'block';
+    } catch {}
+  }, 400);
+}
+
+function selectAddrSuggestion(address, lat, lon) {
+  const el = document.getElementById('addrAddress');
+  el.value = address;
+  el.dataset.lat = lat;
+  el.dataset.lon = lon;
+  document.getElementById('addrAddressSuggestions').style.display = 'none';
 }
 
 function showAddAddressForm() {
   const modal = document.getElementById('addAddressModal');
   if (modal) {
-    document.getElementById('addrLabel').value = '';
-    document.getElementById('addrAddress').value = '';
+    selectAddrType('Résidence principale', '🏠');
+    const addrEl = document.getElementById('addrAddress');
+    addrEl.value = '';
+    addrEl.dataset.lat = '';
+    addrEl.dataset.lon = '';
     document.getElementById('addrAlarmCode').value = '';
     document.getElementById('addrNotes').value = '';
     document.getElementById('addrIsPrimary').checked = currentAddresses.length === 0;
+    document.getElementById('addrAddressSuggestions').style.display = 'none';
     modal.style.display = 'flex';
   }
 }
@@ -1222,19 +1282,22 @@ function closeAddAddressModal() {
 
 async function saveAddress() {
   const label = document.getElementById('addrLabel').value.trim();
-  const address = document.getElementById('addrAddress').value.trim();
+  const addrEl = document.getElementById('addrAddress');
+  const address = addrEl.value.trim();
   const alarmCode = document.getElementById('addrAlarmCode').value.trim();
   const notes = document.getElementById('addrNotes').value.trim();
   const isPrimary = document.getElementById('addrIsPrimary').checked;
+  const latitude = parseFloat(addrEl.dataset.lat) || null;
+  const longitude = parseFloat(addrEl.dataset.lon) || null;
 
-  if (!label || !address) { showToast('Label et adresse obligatoires', 'error'); return; }
+  if (!label || !address) { showToast('Type et adresse obligatoires', 'error'); return; }
   if (!editingUserId) { showToast('Sauvegardez d\'abord l\'utilisateur', 'error'); return; }
 
   try {
     const res = await fetch(`${API_BASE}/api/users/${editingUserId}/addresses`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ label, address, isPrimary, alarmCode: alarmCode || null, notes: notes || null }),
+      body: JSON.stringify({ label, address, latitude, longitude, isPrimary, alarmCode: alarmCode || null, notes: notes || null }),
     });
     if (res.ok) {
       showToast('✅ Adresse ajoutée', 'success');
