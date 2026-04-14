@@ -2957,7 +2957,7 @@ async function openDetailModal(incidentId) {
               locBadge = `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 12px;margin-bottom:12px;display:flex;align-items:center;gap:8px;">
                 <span style="font-size:18px;">🏠</span>
                 <div>
-                  <div style="font-weight:700;color:#dc2626;font-size:13px;">⚠️ ALERTE DOMICILE DÉTECTÉE</div>
+                  <div style="font-weight:700;color:#dc2626;font-size:13px;">⚠️ ALERTE POSSIBLE HOME-JACKING</div>
                   <div style="font-size:11px;color:#991b1b;">${loc.label} · ${loc.distanceMeters}m · Possible home-jacking</div>
                   ${loc.alarmCode ? `<div style="font-size:11px;color:#991b1b;margin-top:2px;">🔑 Code alarme: <strong>${loc.alarmCode}</strong></div>` : ''}
                 </div>
