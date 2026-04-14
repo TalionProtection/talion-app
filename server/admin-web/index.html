@@ -347,7 +347,7 @@
         </div>
 
         <!-- Contact -->
-        <div class="form-section"><span class="form-section-icon">&#x1F4DE;</span> Contact</div>
+        <div class="form-section"><span class="form-section-icon"><div class="form-section"><span class="form-section-icon">&#x1F4DE;</span> Contact</div>#x1F4DE;</span> Contact</div>
         <div class="form-grid">
           <div class="form-group">
             <label class="form-label">Téléphone mobile</label>
@@ -357,9 +357,9 @@
             <label class="form-label">Téléphone fixe</label>
             <input type="tel" class="form-input" id="fieldPhoneLandline" placeholder="+33 1 ...">
           </div>
-          <div class="form-group full-width address-autocomplete-wrapper">
-            <label class="form-label">Adresse complète</label>
-            <input type="text" class="form-input" id="fieldAddress" placeholder="Commencez à taper une adresse..." autocomplete="off">
+          <div class="form-group full-width address-autocomplete-wrapper" style="display:none;">
+            
+            <input type="hidden" id="fieldAddress">
             <div class="address-suggestions" id="addressSuggestions"></div>
           </div>
         </div>
