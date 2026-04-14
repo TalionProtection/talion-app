@@ -2934,6 +2934,88 @@ async function openDetailModal(incidentId) {
   
   // Info grid
   document.getElementById('detailReportedBy').textContent = inc.createdBy || inc.reportedBy || 'Unknown';
+
+  // Load client context (profile, addresses, family, location detection)
+  const clientSection = document.getElementById('detailClientSection');
+  const clientProfile = document.getElementById('detailClientProfile');
+  if (clientSection && clientProfile) {
+    clientSection.style.display = 'none';
+    clientProfile.innerHTML = '<div style="color:#6b7280;font-size:13px;">Chargement du profil...</div>';
+    try {
+      const ctxRes = await fetch(`${API_BASE}/api/alerts/${encodeURIComponent(incidentId)}/context`);
+      if (ctxRes.ok) {
+        const ctx = await ctxRes.json();
+        if (ctx.user) {
+          clientSection.style.display = 'block';
+          const u = ctx.user;
+          const loc = ctx.locationContext;
+          
+          // Location context badge
+          let locBadge = '';
+          if (loc) {
+            if (loc.isHomeJacking) {
+              locBadge = `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 12px;margin-bottom:12px;display:flex;align-items:center;gap:8px;">
+                <span style="font-size:18px;">🏠</span>
+                <div>
+                  <div style="font-weight:700;color:#dc2626;font-size:13px;">⚠️ ALERTE DOMICILE DÉTECTÉE</div>
+                  <div style="font-size:11px;color:#991b1b;">${loc.label} · ${loc.distanceMeters}m · Possible home-jacking</div>
+                  ${loc.alarmCode ? `<div style="font-size:11px;color:#991b1b;margin-top:2px;">🔑 Code alarme: <strong>${loc.alarmCode}</strong></div>` : ''}
+                </div>
+              </div>`;
+            } else {
+              locBadge = `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:8px 12px;margin-bottom:12px;display:flex;align-items:center;gap:8px;">
+                <span style="font-size:18px;">📍</span>
+                <div>
+                  <div style="font-weight:700;color:#16a34a;font-size:13px;">HORS DOMICILE</div>
+                  <div style="font-size:11px;color:#15803d;">${loc.label} · ${loc.distanceMeters}m du domicile connu</div>
+                </div>
+              </div>`;
+            }
+          }
+
+          // Client info
+          const phone = u.phoneMobile || u.phone || '';
+          const photoHtml = u.photoUrl 
+            ? `<img src="${u.photoUrl}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;border:2px solid #e5e7eb;">` 
+            : `<div style="width:48px;height:48px;border-radius:50%;background:#1e3a5f;display:flex;align-items:center;justify-content:center;color:white;font-weight:700;font-size:18px;">${(u.firstName||u.name||'?')[0]}</div>`;
+
+          // Addresses
+          const addrsHtml = (ctx.addresses || []).map(a => `
+            <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:#374151;margin-top:4px;">
+              <span>${a.isPrimary ? '🏠' : '🏡'}</span>
+              <span>${a.label}: ${a.address}</span>
+              ${a.alarmCode ? `<span style="color:#6b7280;">· 🔑 ${a.alarmCode}</span>` : ''}
+            </div>`).join('');
+
+          // Family
+          const familyHtml = (ctx.family || []).filter(Boolean).map(f => `
+            <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f3f4f6;">
+              <div style="width:32px;height:32px;border-radius:50%;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:14px;">
+                ${f.photoUrl ? `<img src="${f.photoUrl}" style="width:32px;height:32px;border-radius:50%;object-fit:cover;">` : '👤'}
+              </div>
+              <div style="flex:1;">
+                <div style="font-size:13px;font-weight:600;color:#1f2937;">${f.name}</div>
+                <div style="font-size:11px;color:#6b7280;">${f.role}</div>
+              </div>
+              ${f.phone ? `<a href="tel:${f.phone}" style="font-size:12px;color:#1e3a5f;font-weight:600;text-decoration:none;">📞 ${f.phone}</a>` : ''}
+            </div>`).join('');
+
+          clientProfile.innerHTML = `
+            ${locBadge}
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+              ${photoHtml}
+              <div style="flex:1;">
+                <div style="font-weight:700;font-size:15px;color:#1f2937;">${u.firstName || ''} ${u.lastName || u.name || ''}</div>
+                ${phone ? `<a href="tel:${phone}" style="font-size:13px;color:#1e3a5f;font-weight:600;text-decoration:none;">📞 ${phone}</a>` : ''}
+              </div>
+            </div>
+            ${addrsHtml ? `<div style="margin-bottom:10px;">${addrsHtml}</div>` : ''}
+            ${familyHtml ? `<div><div style="font-size:12px;font-weight:600;color:#6b7280;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Famille</div>${familyHtml}</div>` : ''}
+          `;
+        }
+      }
+    } catch(e) { console.error('Failed to load client context:', e); }
+  }
   document.getElementById('detailCreatedAt').textContent = formatDateTime(inc.createdAt || inc.timestamp || Date.now());
   document.getElementById('detailStatus').innerHTML = `<span class="badge badge-${status}">${status.toUpperCase()}</span>`;
   document.getElementById('detailSeverity').innerHTML = `<span class="badge badge-${severity}">${severity.toUpperCase()}</span>`;
