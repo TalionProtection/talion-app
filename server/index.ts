@@ -1617,6 +1617,7 @@ app.put('/alerts/:id', (req, res) => {
   if (description) alert.description = description;
   alerts.set(alert.id, alert);
   persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[Unassign] Supabase save error:', e));
   broadcastMessage({ type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
   res.json({ success: true });
 });
@@ -2631,6 +2632,7 @@ app.put('/dispatch/incidents/:id/assign', (req, res) => {
   });
   alerts.set(alert.id, alert);
   persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[Assign] Supabase save error:', e));
   addAuditEntry('incident', 'Responder Assigned', 'Dispatch Console', `Assigned ${responderName} to ${alert.id}`, responderId);
   const enrichedAlert = {
     ...alert,
@@ -2779,6 +2781,7 @@ app.put('/alerts/:id/respond', (req, res) => {
   });
   alerts.set(alert.id, alert);
   persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[Respond] Supabase save error:', e));
   const STATUS_LABELS: Record<string, string> = { accepted: 'Accept\u00e9', en_route: 'En route', on_scene: 'Sur place' };
   const statusLabel = STATUS_LABELS[status] || status;
   addAuditEntry('incident', `Responder ${statusLabel}`, responderName, `${responderName} — ${statusLabel} pour ${alert.id}`, responderId);
