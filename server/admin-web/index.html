@@ -464,19 +464,30 @@
       <input type="hidden" id="addrTypeIcon" value="🏠">
     </div>
     <div class="form-group" style="position:relative;">
-      <label class="form-label">Adresse complète *</label>
-      <input id="addrAddress" class="form-input" placeholder="Rechercher une adresse..." oninput="searchAddrAddress(this.value)" autocomplete="off">
-      <div id="addrAddressSuggestions" style="position:absolute;top:100%;left:0;right:0;background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;z-index:999999;display:none;max-height:200px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,0.15);"></div>
+    <div class="form-group" style="position:relative;">
+      <label class="form-label">🔍 Rechercher une adresse</label>
+      <input id="addrSearch" style="background:#fff;color:#1f2937;border:1px solid #e5e7eb;border-radius:6px;padding:8px 12px;width:100%;box-sizing:border-box;font-size:14px;" placeholder="Tapez pour rechercher..." oninput="searchAddrAddress(this.value)" autocomplete="off">
+      <div id="addrAddressSuggestions" style="position:absolute;top:100%;left:0;right:0;background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;z-index:999999;display:none;max-height:220px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,0.15);"></div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">🏠 Rue et numéro *</label>
+      <input id="addrStreet" style="background:#fff;color:#1f2937;border:1px solid #e5e7eb;border-radius:6px;padding:8px 12px;width:100%;box-sizing:border-box;font-size:14px;" placeholder="Ex: 26b Calle Pléyades">
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
       <div class="form-group">
-        <label class="form-label">🔑 Code alarme</label>
-        <input id="addrAlarmCode" class="form-input" placeholder="Ex: 1234">
+        <label class="form-label">🏙️ Ville</label>
+        <input id="addrCity" style="background:#fff;color:#1f2937;border:1px solid #e5e7eb;border-radius:6px;padding:8px 12px;width:100%;box-sizing:border-box;font-size:14px;" placeholder="Ex: Marbella">
       </div>
       <div class="form-group">
         <label class="form-label">🌍 Pays</label>
-        <input id="addrCountry" class="form-input" placeholder="Ex: Espagne, Suisse...">
+        <input id="addrCountry" style="background:#fff;color:#1f2937;border:1px solid #e5e7eb;border-radius:6px;padding:8px 12px;width:100%;box-sizing:border-box;font-size:14px;" placeholder="Ex: Espagne">
       </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">🔑 Code alarme</label>
+      <input id="addrAlarmCode" style="background:#fff;color:#1f2937;border:1px solid #e5e7eb;border-radius:6px;padding:8px 12px;width:100%;box-sizing:border-box;font-size:14px;" placeholder="Ex: 1234">
+    </div>
+    <input type="hidden" id="addrAddress">
     </div>
     <div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
       <input type="checkbox" id="addrIsPrimary" style="width:16px;height:16px;">
