@@ -4521,11 +4521,21 @@ app.get('/api/alerts/:id/context', async (req, res) => {
 
   // Find the user who triggered the alert
   const createdBy = alert.createdBy;
-  const user = adminUsers.get(createdBy);
+  // Try by UUID first, then fallback to name match
+  let user = adminUsers.get(createdBy);
+  let resolvedUserId = createdBy;
+  if (!user) {
+    for (const [uid, u] of adminUsers) {
+      const fullName = [u.firstName, u.lastName].filter(Boolean).join(' ').trim() || u.name || '';
+      if (fullName === createdBy || u.name === createdBy || u.email === createdBy) {
+        user = u; resolvedUserId = uid; break;
+      }
+    }
+  }
   if (!user) return res.json({ alert, user: null, addresses: [], family: [], locationContext: null });
 
   // Get user addresses
-  const addresses = userAddresses.get(createdBy) || [];
+  const addresses = userAddresses.get(resolvedUserId) || [];
 
   // Detect proximity to known addresses
   let locationContext = null;
