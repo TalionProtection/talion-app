@@ -1205,7 +1205,8 @@ function renderAddressesInDrawer() {
     container.innerHTML = '<p style="color:var(--text-faint);font-size:12px;padding:4px 0">Aucune adresse enregistrée</p>';
     return;
   }
-  container.innerHTML = currentAddresses.map((addr) => {
+  const sortedAddresses = [...currentAddresses].sort((a, b) => (b.isPrimary ? 1 : 0) - (a.isPrimary ? 1 : 0));
+  container.innerHTML = sortedAddresses.map((addr) => {
     const icon = getAddrIcon(addr.label);
     return `
     <div style="background:var(--bg-secondary);border-radius:10px;padding:12px 14px;margin-bottom:8px;border:1px solid var(--border);${addr.isPrimary ? 'border-left:3px solid #1e3a5f;' : ''}">
