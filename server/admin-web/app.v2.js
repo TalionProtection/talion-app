@@ -1285,7 +1285,10 @@ function closeAddAddressModal() {
 async function saveAddress() {
   const label = document.getElementById('addrLabel').value.trim();
   const addrEl = document.getElementById('addrAddress');
-  const address = addrEl.value.trim();
+  const street = document.getElementById('addrStreet')?.value.trim() || '';
+  const city = document.getElementById('addrCity')?.value.trim() || '';
+  const countryVal = document.getElementById('addrCountry')?.value.trim() || '';
+  const address = addrEl.value.trim() || [street, city, countryVal].filter(Boolean).join(', ');
   const alarmCode = document.getElementById('addrAlarmCode').value.trim();
   const notes = document.getElementById('addrNotes').value.trim();
   const isPrimary = document.getElementById('addrIsPrimary').checked;
