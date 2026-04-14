@@ -3993,6 +3993,7 @@ server.listen(Number(PORT), '0.0.0.0', () => {
   loadPTTChannelsFromSupabase();
   loadFamilyPerimetersFromSupabase();
   loadPushTokensFromSupabase();
+  loadUserAddressesFromSupabase();
   console.log(`Talion Crisis Comm Server running on port ${PORT}`);
   console.log(`WebSocket endpoint: ws://localhost:${PORT}`);
   console.log(`Admin Console: http://localhost:${PORT}/admin-console/`);
@@ -4303,3 +4304,164 @@ async function generateIncidentId(type: string, createdBy: string, location: { a
     return `INC-${uuidv4().slice(0, 8).toUpperCase()}`;
   }
 }
+
+// ─── User Addresses ───────────────────────────────────────────────────────
+interface UserAddress {
+  id: string;
+  userId: string;
+  label: string;
+  address: string;
+  latitude?: number;
+  longitude?: number;
+  placeId?: string;
+  isPrimary: boolean;
+  alarmCode?: string;
+  notes?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+const userAddresses = new Map<string, UserAddress[]>(); // userId -> addresses
+
+async function loadUserAddressesFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('user_addresses').select('*');
+    if (error) { console.error('[Supabase] Failed to load user_addresses:', error.message); return; }
+    if (data && data.length > 0) {
+      userAddresses.clear();
+      data.forEach((a: any) => {
+        const addr: UserAddress = {
+          id: a.id, userId: a.user_id, label: a.label, address: a.address,
+          latitude: a.latitude, longitude: a.longitude, placeId: a.place_id,
+          isPrimary: a.is_primary, alarmCode: a.alarm_code, notes: a.notes,
+          createdAt: a.created_at, updatedAt: a.updated_at,
+        };
+        if (!userAddresses.has(addr.userId)) userAddresses.set(addr.userId, []);
+        userAddresses.get(addr.userId)!.push(addr);
+      });
+      console.log(`[Supabase] Loaded ${data.length} user addresses`);
+    }
+  } catch (e) { console.error('[Supabase] loadUserAddressesFromSupabase error:', e); }
+}
+
+// ─── User Addresses REST API ──────────────────────────────────────────────
+
+// GET /api/users/:id/addresses
+app.get('/api/users/:id/addresses', (req, res) => {
+  const addresses = userAddresses.get(req.params.id) || [];
+  res.json(addresses);
+});
+
+// POST /api/users/:id/addresses
+app.post('/api/users/:id/addresses', async (req, res) => {
+  const { label, address, latitude, longitude, placeId, isPrimary, alarmCode, notes } = req.body;
+  if (!label || !address) return res.status(400).json({ error: 'label and address are required' });
+  const userId = req.params.id;
+  const now = Date.now();
+  const newAddr: UserAddress = {
+    id: require('crypto').randomUUID(),
+    userId, label, address,
+    latitude: latitude || null,
+    longitude: longitude || null,
+    placeId: placeId || null,
+    isPrimary: isPrimary || false,
+    alarmCode: alarmCode || null,
+    notes: notes || null,
+    createdAt: now, updatedAt: now,
+  };
+  // If primary, unset other primary addresses
+  if (isPrimary) {
+    const existing = userAddresses.get(userId) || [];
+    existing.forEach(a => { if (a.isPrimary) a.isPrimary = false; });
+  }
+  if (!userAddresses.has(userId)) userAddresses.set(userId, []);
+  userAddresses.get(userId)!.push(newAddr);
+  // Save to Supabase
+  await supabaseAdmin.from('user_addresses').insert({
+    id: newAddr.id, user_id: userId, label, address,
+    latitude: newAddr.latitude, longitude: newAddr.longitude,
+    place_id: newAddr.placeId, is_primary: newAddr.isPrimary,
+    alarm_code: newAddr.alarmCode, notes: newAddr.notes,
+    created_at: now, updated_at: now,
+  });
+  res.status(201).json(newAddr);
+});
+
+// PUT /api/users/:id/addresses/:addressId
+app.put('/api/users/:id/addresses/:addressId', async (req, res) => {
+  const { label, address, latitude, longitude, placeId, isPrimary, alarmCode, notes } = req.body;
+  const userId = req.params.id;
+  const addresses = userAddresses.get(userId) || [];
+  const idx = addresses.findIndex(a => a.id === req.params.addressId);
+  if (idx === -1) return res.status(404).json({ error: 'Address not found' });
+  if (isPrimary) addresses.forEach(a => { a.isPrimary = false; });
+  const updated = { ...addresses[idx], label: label ?? addresses[idx].label,
+    address: address ?? addresses[idx].address, latitude: latitude ?? addresses[idx].latitude,
+    longitude: longitude ?? addresses[idx].longitude, isPrimary: isPrimary ?? addresses[idx].isPrimary,
+    alarmCode: alarmCode ?? addresses[idx].alarmCode, notes: notes ?? addresses[idx].notes,
+    updatedAt: Date.now() };
+  addresses[idx] = updated;
+  await supabaseAdmin.from('user_addresses').update({
+    label: updated.label, address: updated.address, latitude: updated.latitude,
+    longitude: updated.longitude, is_primary: updated.isPrimary,
+    alarm_code: updated.alarmCode, notes: updated.notes, updated_at: updated.updatedAt,
+  }).eq('id', updated.id);
+  res.json(updated);
+});
+
+// DELETE /api/users/:id/addresses/:addressId
+app.delete('/api/users/:id/addresses/:addressId', async (req, res) => {
+  const userId = req.params.id;
+  const addresses = userAddresses.get(userId) || [];
+  const idx = addresses.findIndex(a => a.id === req.params.addressId);
+  if (idx === -1) return res.status(404).json({ error: 'Address not found' });
+  addresses.splice(idx, 1);
+  await supabaseAdmin.from('user_addresses').delete().eq('id', req.params.addressId);
+  res.json({ success: true });
+});
+
+// GET /api/alerts/:id/context - get full client context for an alert
+app.get('/api/alerts/:id/context', async (req, res) => {
+  const alert = alerts.get(req.params.id);
+  if (!alert) return res.status(404).json({ error: 'Alert not found' });
+
+  // Find the user who triggered the alert
+  const createdBy = alert.createdBy;
+  const user = adminUsers.get(createdBy);
+  if (!user) return res.json({ alert, user: null, addresses: [], family: [], locationContext: null });
+
+  // Get user addresses
+  const addresses = userAddresses.get(createdBy) || [];
+
+  // Detect proximity to known addresses
+  let locationContext = null;
+  if (alert.location?.latitude && alert.location?.longitude && addresses.length > 0) {
+    let closest = null;
+    let minDist = Infinity;
+    for (const addr of addresses) {
+      if (!addr.latitude || !addr.longitude) continue;
+      const dist = haversineDistance(alert.location.latitude, alert.location.longitude, addr.latitude, addr.longitude);
+      if (dist < minDist) { minDist = dist; closest = addr; }
+    }
+    if (closest && minDist < 200) {
+      locationContext = {
+        type: 'known_address',
+        label: closest.label,
+        address: closest.address,
+        distanceMeters: Math.round(minDist),
+        alarmCode: closest.alarmCode,
+        isHomeJacking: minDist < 100 && (closest.isPrimary || closest.label.toLowerCase().includes('principal')),
+      };
+    }
+  }
+
+  // Get family members
+  const family = (user.relationships || []).map(rel => {
+    const member = adminUsers.get(rel.userId);
+    if (!member) return null;
+    return { id: member.id, name: member.name, role: rel.type, phone: member.phoneMobile, photoUrl: member.photoUrl };
+  }).filter(Boolean);
+
+  const { passwordHash, ...safeUser } = user;
+  res.json({ user: { ...safeUser, hasPassword: !!user.passwordHash }, addresses, family, locationContext });
+});
