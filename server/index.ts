@@ -1739,6 +1739,17 @@ app.post('/api/push-token', (req, res) => {
   res.json({ success: true });
 });
 
+// Debug: list all push tokens
+app.get('/api/debug/push-tokens', (_req, res) => {
+  const tokens = Array.from(pushTokens.values()).map(e => ({
+    userId: e.userId,
+    userRole: e.userRole,
+    token: e.token.substring(0, 20) + '...',
+    registeredAt: e.registeredAt,
+  }));
+  res.json(tokens);
+});
+
 app.delete('/api/push-token', (req, res) => {
   const { token } = req.body;
   if (token) {
