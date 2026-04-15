@@ -3264,7 +3264,7 @@ function closeDetailModal() {
 // MESSAGING SYSTEM
 // ═══════════════════════════════════════════════════════════
 
-const DISPATCH_USER_ID = 'dispatch-001';
+const DISPATCH_USER_ID = '750f6715-9980-421c-971f-d1f1b428263a'; // Jean Moreau — dispatcher
 const DISPATCH_USER_NAME = 'Dispatch Console';
 let msgConversations = [];
 let msgCurrentConvId = null;
@@ -3455,12 +3455,29 @@ function renderMessages() {
       </div>`;
     }
 
+    // Contenu selon le type de message
+    let msgContent = '';
+    const apiBase = window.location.origin;
+    if (m.type === 'image' && m.mediaUrl) {
+      const imgUrl = m.mediaUrl.startsWith('http') ? m.mediaUrl : apiBase + m.mediaUrl;
+      msgContent = `<a href="${imgUrl}" target="_blank"><img src="${imgUrl}" style="max-width:220px;max-height:180px;border-radius:8px;display:block;cursor:pointer;" /></a>`;
+    } else if (m.type === 'audio' && m.mediaUrl) {
+      const audioUrl = m.mediaUrl.startsWith('http') ? m.mediaUrl : apiBase + m.mediaUrl;
+      msgContent = `<audio controls style="max-width:200px;"><source src="${audioUrl}" /></audio>`;
+    } else if (m.type === 'location' && m.location) {
+      const { latitude, longitude, address } = m.location;
+      const mapsUrl = `https://maps.google.com/?q=${latitude},${longitude}`;
+      msgContent = `<a href="${mapsUrl}" target="_blank" style="color:inherit;text-decoration:none;">📍 ${escapeHtml(address || m.content || '')}<br><span style="font-size:10px;opacity:0.7;">${latitude?.toFixed(5)}, ${longitude?.toFixed(5)}</span></a>`;
+    } else {
+      msgContent = escapeHtml(m.content || m.text || '');
+    }
+
     return `
       <div class="msg-bubble-row ${isMine ? 'mine' : 'theirs'}">
         ${!isMine ? `<div class="msg-bubble-avatar" style="background:${avatarColor}">${senderInitial}</div>` : ''}
         <div class="msg-bubble ${isMine ? 'mine' : 'theirs'}">
           ${!isMine ? `<div class="msg-sender-name" style="color:${avatarColor}">${escapeHtml(senderName)}</div>` : ''}
-          ${escapeHtml(m.content)}
+          ${msgContent}
           <div class="msg-bubble-time">${time}</div>
         </div>
       </div>
