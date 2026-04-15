@@ -111,13 +111,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    // Get initial session
+    // Get initial session with 5s timeout to avoid infinite splash
+    const sessionTimeout = setTimeout(() => {
+      console.warn('[Auth] getSession timeout — proceeding without session');
+      setIsLoading(false);
+    }, 5000);
+
     supabase.auth.getSession().then(async ({ data: { session } }) => {
+      clearTimeout(sessionTimeout);
       setSession(session);
       if (session?.user) {
         const profile = await fetchUserProfile(session.user.id);
         setUser(profile);
       }
+      setIsLoading(false);
+    }).catch(() => {
+      clearTimeout(sessionTimeout);
       setIsLoading(false);
     });
 
