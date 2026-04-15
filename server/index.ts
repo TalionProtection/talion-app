@@ -1573,7 +1573,13 @@ app.get('/alerts', (req, res) => {
   const userId = req.query.userId as string;
   const visibleAlerts = Array.from(alerts.values()).filter(a => {
     if (a.status === 'resolved') return false;
-    if (userRole === 'user') return a.createdBy === userId;
+    if (userRole === 'user') {
+      // User voit ses propres incidents + incidents créés par Dispatch le concernant
+      const userName = adminUsers.get(userId)?.name || userId;
+      return a.createdBy === userId || a.createdBy === userName ||
+        (a.respondingUsers || []).includes(userId) ||
+        a.status === 'active'; // tous les incidents actifs sont visibles pour les users
+    }
     return true;
   }).map(a => {
     const respondingNames = (a.respondingUsers || []).map(uid => {
@@ -1669,6 +1675,16 @@ app.post('/dispatch/incidents', async (req, res) => {
   saveAlertToSupabase(alert).catch(() => {});
   broadcastMessage({ type: 'newAlert', data: alert });
   sendPushToDispatchersAndResponders(alert, alert.createdBy).catch(() => {});
+  // Push aussi aux users
+  for (const [token, entry] of pushTokens) {
+    if (entry.userRole === 'user') {
+      sendPushToUser(entry.userId,
+        `🚨 Nouvel incident — ${alert.type.toUpperCase()}`,
+        alert.description || alert.location?.address || 'Incident signalé',
+        { type: alert.type, alertId: alert.id }
+      ).catch(() => {});
+    }
+  }
   res.json({ success: true, id: alert.id, alert });
 });
 
