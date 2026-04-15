@@ -1650,6 +1650,28 @@ app.get('/responders', (req, res) => {
   res.json(responders);
 });
 
+// Dispatch console: create incident without auth (internal use)
+app.post('/dispatch/incidents', async (req, res) => {
+  const { type, severity, location, description, createdBy } = req.body;
+  const alert: Alert = {
+    id: await generateIncidentId(type || 'other', createdBy || 'Dispatch Console', location || {}),
+    type: type || 'other',
+    severity: severity || 'medium',
+    location: location || { latitude: 0, longitude: 0, address: 'Unknown' },
+    description: description || '',
+    createdBy: createdBy || 'Dispatch Console',
+    createdAt: Date.now(),
+    status: 'active',
+    respondingUsers: [],
+  };
+  alerts.set(alert.id, alert);
+  persistAlerts();
+  saveAlertToSupabase(alert).catch(() => {});
+  broadcastMessage({ type: 'newAlert', data: alert });
+  sendPushToDispatchersAndResponders(alert, alert.createdBy).catch(() => {});
+  res.json({ success: true, id: alert.id, alert });
+});
+
 app.post('/alerts', requireAuth, async (req, res) => {
   const { type, severity, location, description, createdBy } = req.body;
   const alert: Alert = {

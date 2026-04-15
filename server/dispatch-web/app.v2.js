@@ -1094,7 +1094,7 @@ async function submitCreateIncident() {
   const lng = parseFloat(document.getElementById('incidentLng').value) || 6.1580;
 
   try {
-    const res = await fetch(`${API_BASE}/alerts`, {
+    const res = await fetch(`${API_BASE}/dispatch/incidents`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
