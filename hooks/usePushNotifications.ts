@@ -32,12 +32,8 @@ export function usePushNotifications() {
     // All users need broadcast notifications; dispatchers/responders also get SOS notifications
     registerPushToken(user.id, user.role);
 
-    return () => {
-      if (tokenRef.current) {
-        deregisterToken(tokenRef.current);
-        tokenRef.current = null;
-      }
-    };
+    // Ne pas déregistrer à la navigation — seulement à la déconnexion explicite (user === null)
+    return () => {};
   }, [user?.id, user?.role]);
 
   async function registerPushToken(userId: string, userRole: string) {
