@@ -1506,6 +1506,8 @@ app.post('/admin/users/:id/photo', upload.single('photo'), (req: any, res) => {
   if (!user) return res.status(404).json({ error: 'User not found' });
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   user.photoUrl = `/uploads/${req.file.filename}`;
+  adminUsers.set(user.id, user);
+  saveAdminUserToSupabase(user);
   addAuditEntry('user_updated', `Profile photo updated for ${user.firstName} ${user.lastName}`, 'admin');
   const { passwordHash, ...safe } = user;
   res.json({ success: true, user: safe });
@@ -2274,6 +2276,7 @@ app.put('/admin/users/:id/role', (req, res) => {
   const oldRole = user.role;
   user.role = role;
   adminUsers.set(user.id, user);
+  saveAdminUserToSupabase(user);
   addAuditEntry('user', 'Role Changed', 'Admin', `Role changed from ${oldRole} to ${role}`, user.name);
   res.json({ success: true });
 });
@@ -2289,6 +2292,7 @@ app.put('/admin/users/:id/status', (req, res) => {
   const oldStatus = user.status;
   user.status = status;
   adminUsers.set(user.id, user);
+  saveAdminUserToSupabase(user);
   const actionName = status === 'suspended' ? 'User Suspended' : status === 'deactivated' ? 'User Deactivated' : 'User Reactivated';
   addAuditEntry('user', actionName, 'Admin', `Status changed from ${oldStatus} to ${status}`, user.name);
   res.json({ success: true });
@@ -2442,6 +2446,7 @@ app.put('/admin/users/:id', (req, res) => {
         if (!relUser.relationships.find((r: any) => r.userId === user.id)) {
           relUser.relationships.push({ userId: user.id, type: reciprocal });
           adminUsers.set(relUser.id, relUser);
+          saveAdminUserToSupabase(relUser);
         }
       }
     });
