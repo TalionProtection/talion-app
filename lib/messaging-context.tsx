@@ -99,6 +99,7 @@ interface MessagingContextType {
 }
 
 const MessagingContext = createContext<MessagingContextType | null>(null);
+const CACHE_VERSION = '2'; // Incrémenter pour vider le cache
 
 // ─── Provider ───────────────────────────────────────────────────────────────
 
@@ -118,12 +119,16 @@ export function MessagingProvider({ children }: { children: React.ReactNode }) {
         const storedConvos = await AsyncStorage.getItem(`${CONVERSATIONS_KEY}_${user.id}`);
         const storedMsgs = await AsyncStorage.getItem(`${MESSAGES_KEY}_${user.id}`);
 
-        if (storedConvos) {
+        const cacheVersion = await AsyncStorage.getItem(`messaging_cache_version_${user.id}`);
+        if (storedConvos && cacheVersion === CACHE_VERSION) {
           setConversations(JSON.parse(storedConvos));
         } else {
-          // Initialize with default conversations based on role
-          const defaultConvos = createDefaultConversations(user.id, user.name, user.role);
-          setConversations(defaultConvos);
+          // Cache vide ou version obsolète — repartir de zéro
+          await AsyncStorage.removeItem(`${CONVERSATIONS_KEY}_${user.id}`);
+          await AsyncStorage.removeItem(`${MESSAGES_KEY}_${user.id}`);
+          await AsyncStorage.setItem(`messaging_cache_version_${user.id}`, CACHE_VERSION);
+          setConversations([]);
+          setAllMessages(new Map());
         }
 
         if (storedMsgs) {
