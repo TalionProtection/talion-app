@@ -288,8 +288,11 @@ interface ChatMessage {
   senderName: string;
   senderRole: string;
   text: string;
-  type: 'text' | 'location' | 'alert' | 'image' | 'system';
+  type: 'text' | 'location' | 'alert' | 'image' | 'audio' | 'system';
   timestamp: number;
+  mediaUrl?: string;
+  mediaType?: string;
+  location?: { latitude: number; longitude: number; address?: string };
 }
 
 interface Conversation {
@@ -3230,9 +3233,11 @@ app.post('/api/conversations/:id/media', uploadMedia.single('file'), async (req:
 
   if (!messages.has(conv.id)) messages.set(conv.id, []);
   messages.get(conv.id)!.push(msg);
+  saveMessageToSupabase(msg).catch(() => {});
   conv.lastMessage = text;
   conv.lastMessageTime = msg.timestamp;
   conversations.set(conv.id, conv);
+  saveConversationToSupabase(conv).catch(() => {});
 
   const allParticipants = resolveGroupParticipants(conv);
   const wsPayload = JSON.stringify({ type: 'newMessage', data: { ...msg, conversationName: conv.name, conversationType: conv.type } });
@@ -3284,11 +3289,13 @@ app.post('/api/conversations/:id/messages', (req, res) => {
 
   if (!messages.has(conv.id)) messages.set(conv.id, []);
   messages.get(conv.id)!.push(msg);
+  saveMessageToSupabase(msg).catch(() => {});
 
   // Update conversation metadata
   conv.lastMessage = text;
   conv.lastMessageTime = msg.timestamp;
   conversations.set(conv.id, conv);
+  saveConversationToSupabase(conv).catch(() => {});
 
   // Broadcast to all participants via WebSocket
   const allParticipants = resolveGroupParticipants(conv);
@@ -3435,6 +3442,7 @@ app.post('/api/messaging/conversations', (req, res) => {
     messages.get(convId)!.push(sysMsg);
   }
 
+  saveConversationToSupabase(conv).catch(() => {});
   console.log(`[MSG] Conversation created: ${conv.name || conv.type} (${conv.id}) by ${createdBy}`);
   // Return with 'participants' alias for dispatch console compatibility
   res.json({ conversation: { ...conv, participants: conv.participantIds } });
@@ -3480,10 +3488,12 @@ app.post('/api/messaging/conversations/:id/messages', (req, res) => {
 
   if (!messages.has(conv.id)) messages.set(conv.id, []);
   messages.get(conv.id)!.push(msg);
+  saveMessageToSupabase(msg).catch(() => {});
 
   conv.lastMessage = content;
   conv.lastMessageTime = msg.timestamp;
   conversations.set(conv.id, conv);
+  saveConversationToSupabase(conv).catch(() => {});
 
   // Broadcast to all participants via WebSocket
   const allParticipants = resolveGroupParticipants(conv);
@@ -4162,6 +4172,8 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
     loadFamilyPerimetersFromSupabase(),
     loadPushTokensFromSupabase(),
     loadUserAddressesFromSupabase(),
+    loadConversationsFromSupabase(),
+    loadMessagesFromSupabase(),
   ]);
   console.log('[Startup] All Supabase data loaded — ready to serve requests');
   console.log(`WebSocket endpoint: ws://localhost:${PORT}`);
@@ -4498,6 +4510,77 @@ async function geocodeAddress(addressText: string): Promise<{ latitude: number; 
     console.error('[Geocode] geocodeAddress error:', e);
     return null;
   }
+}
+
+
+// ─── Messaging Persistence (Supabase) ────────────────────────────────────────
+
+async function saveConversationToSupabase(conv: Conversation): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('conversations').upsert({
+      id: conv.id, type: conv.type, name: conv.name,
+      participant_ids: conv.participantIds, filter_role: conv.filterRole || null,
+      filter_tags: conv.filterTags || null, created_by: conv.createdBy,
+      created_at: conv.createdAt, last_message: conv.lastMessage || '',
+      last_message_time: conv.lastMessageTime || 0,
+    });
+    if (error) console.error('[Supabase] saveConversation error:', error.message);
+  } catch (e) { console.error('[Supabase] saveConversation error:', e); }
+}
+
+async function saveMessageToSupabase(msg: ChatMessage): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('messages').upsert({
+      id: msg.id, conversation_id: msg.conversationId, sender_id: msg.senderId,
+      sender_name: msg.senderName, sender_role: msg.senderRole,
+      text: msg.text, type: msg.type, timestamp: msg.timestamp,
+      media_url: msg.mediaUrl || null, media_type: msg.mediaType || null,
+      location: msg.location || null,
+    });
+    if (error) console.error('[Supabase] saveMessage error:', error.message);
+  } catch (e) { console.error('[Supabase] saveMessage error:', e); }
+}
+
+async function loadConversationsFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('conversations').select('*');
+    if (error) { console.error('[Supabase] loadConversations error:', error.message); return; }
+    if (data && data.length > 0) {
+      conversations.clear();
+      data.forEach((c: any) => {
+        conversations.set(c.id, {
+          id: c.id, type: c.type, name: c.name,
+          participantIds: c.participant_ids || [], filterRole: c.filter_role,
+          filterTags: c.filter_tags, createdBy: c.created_by,
+          createdAt: c.created_at, lastMessage: c.last_message || '',
+          lastMessageTime: c.last_message_time || 0,
+        });
+      });
+      console.log(`[Supabase] Loaded ${data.length} conversations`);
+    }
+  } catch (e) { console.error('[Supabase] loadConversations error:', e); }
+}
+
+async function loadMessagesFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('messages').select('*').order('timestamp', { ascending: true });
+    if (error) { console.error('[Supabase] loadMessages error:', error.message); return; }
+    if (data && data.length > 0) {
+      messages.clear();
+      data.forEach((m: any) => {
+        const msg: ChatMessage = {
+          id: m.id, conversationId: m.conversation_id, senderId: m.sender_id,
+          senderName: m.sender_name, senderRole: m.sender_role,
+          text: m.text, type: m.type, timestamp: m.timestamp,
+          mediaUrl: m.media_url || undefined, mediaType: m.media_type || undefined,
+          location: m.location || undefined,
+        };
+        if (!messages.has(msg.conversationId)) messages.set(msg.conversationId, []);
+        messages.get(msg.conversationId)!.push(msg);
+      });
+      console.log(`[Supabase] Loaded ${data.length} messages`);
+    }
+  } catch (e) { console.error('[Supabase] loadMessages error:', e); }
 }
 
 // ─── User Addresses ───────────────────────────────────────────────────────
