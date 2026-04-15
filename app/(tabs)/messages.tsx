@@ -132,11 +132,17 @@ async function uploadMedia(uri: string, convId: string, senderId: string, sender
   formData.append('senderId', senderId);
   formData.append('senderName', senderName);
   formData.append('mediaType', mediaType);
-  const res = await fetch(`${getApiBaseUrl()}/api/conversations/${encodeURIComponent(convId)}/media`, {
+  const baseUrl = getApiBaseUrl();
+  const url = `${baseUrl}/api/conversations/${encodeURIComponent(convId)}/media`;
+  console.log('[Upload] Sending to:', url);
+  const res = await fetch(url, {
     method: 'POST',
+    headers: { 'Accept': 'application/json' },
     body: formData,
   });
-  if (!res.ok) throw new Error('Upload failed');
+  const responseText = await res.text();
+  console.log('[Upload] Response:', res.status, responseText);
+  if (!res.ok) throw new Error(`Upload failed: ${res.status} ${responseText}`);
 }
 
 // ─── Audio Recording Hook ────────────────────────────────────────────────────
