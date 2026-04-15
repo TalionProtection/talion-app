@@ -3017,14 +3017,15 @@ app.get('/dispatch/map/all', (req, res) => {
 // Helper: resolve group participants dynamically
 function resolveGroupParticipants(conv: Conversation): string[] {
   const ids = new Set(conv.participantIds);
+  const activeStatuses = ['active', 'available', 'on_duty'];
   if (conv.filterRole) {
     adminUsers.forEach((u) => {
-      if (u.role === conv.filterRole && u.status === 'active') ids.add(u.id);
+      if (u.role === conv.filterRole && activeStatuses.includes(u.status)) ids.add(u.id);
     });
   }
   if (conv.filterTags && conv.filterTags.length > 0) {
     adminUsers.forEach((u) => {
-      if (u.status === 'active' && u.tags && conv.filterTags!.some(t => u.tags!.includes(t))) ids.add(u.id);
+      if (activeStatuses.includes(u.status) && u.tags && conv.filterTags!.some(t => u.tags!.includes(t))) ids.add(u.id);
     });
   }
   return Array.from(ids);
@@ -3208,6 +3209,17 @@ app.post('/api/conversations/:id/messages', (req, res) => {
     }
   });
 
+  // Push notifications pour participants hors ligne
+  const offlinePids = allParticipants.filter(pid => {
+    if (pid === senderId) return false;
+    const conns = userConnections.get(pid);
+    return !conns || conns.size === 0;
+  });
+  for (const pid of offlinePids) {
+    sendPushToUser(pid, `💬 ${msg.senderName}`, text.substring(0, 100),
+      { type: 'message', conversationId: conv.id, senderId, senderName: msg.senderName }
+    ).catch(() => {});
+  }
   console.log(`[MSG] ${msg.senderName} -> ${conv.name} (${conv.id}): ${text.substring(0, 50)}`);
   res.json(msg);
 });
