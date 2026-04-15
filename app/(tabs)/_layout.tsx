@@ -6,6 +6,7 @@ import { IconSymbol } from '@/components/ui/icon-symbol';
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useAuth } from '@/hooks/useAuth';
+import { useMessaging } from '@/lib/messaging-context';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Platform } from 'react-native';
 
@@ -17,6 +18,7 @@ export default function TabLayout() {
   const tabBarHeight = 56 + bottomPadding;
 
   const role = user?.role;
+  const { totalUnread } = useMessaging();
 
   // Role-based visibility:
   // - user: Home, Messages, PTT, Map, Famille, Profil
@@ -54,6 +56,8 @@ export default function TabLayout() {
         options={{
           title: 'Messages',
           tabBarIcon: ({ color }) => <IconSymbol size={28} name="message.fill" color={color} />,
+          tabBarBadge: totalUnread > 0 ? totalUnread : undefined,
+          tabBarBadgeStyle: { backgroundColor: '#ef4444', color: '#ffffff', fontSize: 10 },
         }}
       />
       <Tabs.Screen
