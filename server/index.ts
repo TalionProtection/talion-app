@@ -4100,15 +4100,19 @@ const PORT = process.env.PORT || 3000;
 server.keepAliveTimeout = 65000; // 65 seconds
 server.headersTimeout = 66000;   // slightly > keepAliveTimeout
 
-server.listen(Number(PORT), '0.0.0.0', () => {
-  loadAdminUsersFromSupabase();
-  loadAlertsFromSupabase();
-  loadPatrolReportsFromSupabase();
-  loadPTTChannelsFromSupabase();
-  loadFamilyPerimetersFromSupabase();
-  loadPushTokensFromSupabase();
-  loadUserAddressesFromSupabase();
+server.listen(Number(PORT), '0.0.0.0', async () => {
   console.log(`Talion Crisis Comm Server running on port ${PORT}`);
+  // Charger toutes les données depuis Supabase avant d'accepter les requêtes
+  await Promise.all([
+    loadAdminUsersFromSupabase(),
+    loadAlertsFromSupabase(),
+    loadPatrolReportsFromSupabase(),
+    loadPTTChannelsFromSupabase(),
+    loadFamilyPerimetersFromSupabase(),
+    loadPushTokensFromSupabase(),
+    loadUserAddressesFromSupabase(),
+  ]);
+  console.log('[Startup] All Supabase data loaded — ready to serve requests');
   console.log(`WebSocket endpoint: ws://localhost:${PORT}`);
   console.log(`Admin Console: http://localhost:${PORT}/admin-console/`);
   console.log(`Dispatch Console: http://localhost:${PORT}/dispatch-console/`);
