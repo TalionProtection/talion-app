@@ -1746,7 +1746,7 @@ app.get('/api/debug/push-tokens', (_req, res) => {
   const tokens = Array.from(pushTokens.values()).map(e => ({
     userId: e.userId,
     userRole: e.userRole,
-    token: e.token.substring(0, 20) + '...',
+    token: e.token,
     registeredAt: e.registeredAt,
   }));
   res.json(tokens);
