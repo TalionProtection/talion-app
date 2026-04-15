@@ -64,12 +64,6 @@
             "backgroundColor": "#000000"
           }
         }
-      ],
-      [
-        "expo-audio",
-        {
-          "microphonePermission": "Allow Talion Crisis Comm to access your microphone for push-to-talk communication."
-        }
       ]
     ],
     "experiments": {
