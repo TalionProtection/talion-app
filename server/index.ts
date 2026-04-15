@@ -3209,13 +3209,9 @@ app.post('/api/conversations/:id/messages', (req, res) => {
     }
   });
 
-  // Push notifications pour participants hors ligne
-  const offlinePids = allParticipants.filter(pid => {
-    if (pid === senderId) return false;
-    const conns = userConnections.get(pid);
-    return !conns || conns.size === 0;
-  });
-  for (const pid of offlinePids) {
+  // Push notifications à tous les participants (sauf l'expéditeur)
+  for (const pid of allParticipants) {
+    if (pid === senderId) continue;
     sendPushToUser(pid, `💬 ${msg.senderName}`, text.substring(0, 100),
       { type: 'message', conversationId: conv.id, senderId, senderName: msg.senderName }
     ).catch(() => {});
@@ -3408,36 +3404,15 @@ app.post('/api/messaging/conversations/:id/messages', (req, res) => {
     }
   });
 
-  // Push notifications pour les participants hors ligne
-  const offlineParticipants = allParticipants.filter(pid => {
-    if (pid === senderId) return false; // pas de notif à soi-même
-    const conns = userConnections.get(pid);
-    return !conns || conns.size === 0; // hors ligne = pas de WS actif
-  });
-  for (const pid of offlineParticipants) {
-    sendPushToUser(
-      pid,
-      `💬 ${msg.senderName}`,
-      content.substring(0, 100),
+  // Push notifications à tous les participants (sauf l'expéditeur)
+  const notifiedPids = new Set<string>([senderId]);
+  for (const pid of allParticipants) {
+    if (notifiedPids.has(pid)) continue;
+    notifiedPids.add(pid);
+    sendPushToUser(pid, `💬 ${msg.senderName}`, content.substring(0, 100),
       { type: 'message', conversationId: conv.id, senderId, senderName: msg.senderName }
     ).catch(() => {});
   }
-  // Push aussi aux dispatchers/admins hors ligne non participants
-  const notifiedPids = new Set([...allParticipants, senderId]);
-  adminUsers.forEach((u, uid) => {
-    if ((u.role === 'dispatcher' || u.role === 'admin') && !notifiedPids.has(uid)) {
-      const conns = userConnections.get(uid);
-      if (!conns || conns.size === 0) {
-        sendPushToUser(
-          uid,
-          `💬 ${msg.senderName}`,
-          content.substring(0, 100),
-          { type: 'message', conversationId: conv.id, senderId, senderName: msg.senderName }
-        ).catch(() => {});
-        notifiedPids.add(uid);
-      }
-    }
-  });
 
   console.log(`[MSG] ${msg.senderName} -> ${conv.name || conv.type} (${conv.id}): ${content.substring(0, 50)}`);
   res.json({ message: { ...msg, content: msg.text } });
