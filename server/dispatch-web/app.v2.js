@@ -3264,7 +3264,7 @@ function closeDetailModal() {
 // MESSAGING SYSTEM
 // ═══════════════════════════════════════════════════════════
 
-const DISPATCH_USER_ID = '750f6715-9980-421c-971f-d1f1b428263a'; // Jean Moreau — dispatcher
+const DISPATCH_USER_ID = 'b8044334-a903-4661-9f77-59fe469d67b3'; // Talion HQ // Jean Moreau — dispatcher
 const DISPATCH_USER_NAME = 'Dispatch Console';
 let msgConversations = [];
 let msgCurrentConvId = null;
