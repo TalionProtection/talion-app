@@ -1578,7 +1578,7 @@ app.get('/alerts', (req, res) => {
       const userName = adminUsers.get(userId)?.name || userId;
       return a.createdBy === userId || a.createdBy === userName ||
         (a.respondingUsers || []).includes(userId) ||
-        a.status === 'active'; // tous les incidents actifs sont visibles pour les users
+        (a.status === 'active' || a.status === 'acknowledged' || a.status === 'dispatched'); // incidents en cours visibles pour les users
     }
     return true;
   }).map(a => {
