@@ -4343,13 +4343,18 @@ async function loadPushTokensFromSupabase(): Promise<void> {
 
 async function savePushTokenToSupabase(entry: PushTokenEntry): Promise<void> {
   try {
+    console.log('[Supabase] Saving push token for', entry.userId, entry.userRole);
     const { error } = await supabaseAdmin.from('push_tokens').upsert({
       token: entry.token,
       user_id: entry.userId,
       user_role: entry.userRole,
       registered_at: entry.registeredAt,
     });
-    if (error) console.error('[Supabase] savePushTokenToSupabase error:', error.message);
+    if (error) {
+      console.error('[Supabase] savePushTokenToSupabase error:', error.message, 'code:', error.code);
+    } else {
+      console.log('[Supabase] Push token saved OK for', entry.userId);
+    }
   } catch (e) { console.error('[Supabase] savePushTokenToSupabase error:', e); }
 }
 
