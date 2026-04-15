@@ -3461,8 +3461,12 @@ app.get('/api/messaging/conversations/:id/messages', (req, res) => {
     senderName: m.senderName,
     senderRole: m.senderRole,
     content: m.text,
+    text: m.text,
     type: m.type,
     timestamp: new Date(m.timestamp).toISOString(),
+    mediaUrl: m.mediaUrl || undefined,
+    mediaType: m.mediaType || undefined,
+    location: m.location || undefined,
   }));
   res.json({ messages: mapped });
 });
