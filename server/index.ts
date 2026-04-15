@@ -3202,6 +3202,57 @@ app.post('/api/conversations', (req, res) => {
   res.json(conv);
 });
 
+// POST /api/conversations/:id/media - upload image or audio
+app.post('/api/conversations/:id/media', uploadMedia.single('file'), async (req: any, res) => {
+  const conv = conversations.get(req.params.id);
+  if (!conv) return res.status(404).json({ error: 'Conversation not found' });
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  const { senderId, senderName, mediaType } = req.body;
+  if (!senderId) return res.status(400).json({ error: 'senderId required' });
+
+  const senderUser = adminUsers.get(senderId);
+  const mediaUrl = `/uploads/${req.file.filename}`;
+  const msgType = mediaType === 'audio' ? 'audio' : 'image';
+  const text = mediaType === 'audio' ? '🎤 Message vocal' : '📷 Photo';
+
+  const msg: ChatMessage = {
+    id: uuidv4(),
+    conversationId: conv.id,
+    senderId,
+    senderName: senderName || senderUser?.name || senderId,
+    senderRole: senderUser?.role || 'user',
+    text,
+    type: msgType,
+    mediaUrl,
+    mediaType: msgType,
+    timestamp: Date.now(),
+  };
+
+  if (!messages.has(conv.id)) messages.set(conv.id, []);
+  messages.get(conv.id)!.push(msg);
+  conv.lastMessage = text;
+  conv.lastMessageTime = msg.timestamp;
+  conversations.set(conv.id, conv);
+
+  const allParticipants = resolveGroupParticipants(conv);
+  const wsPayload = JSON.stringify({ type: 'newMessage', data: { ...msg, conversationName: conv.name, conversationType: conv.type } });
+  allParticipants.forEach(pid => {
+    const conns = userConnections.get(pid);
+    if (conns) conns.forEach(ws => { try { ws.send(wsPayload); } catch {} });
+  });
+
+  for (const pid of allParticipants) {
+    if (pid === senderId) continue;
+    sendPushToUser(pid, `${msgType === 'audio' ? '🎤' : '📷'} ${msg.senderName}`,
+      msgType === 'audio' ? 'Message vocal' : 'Photo',
+      { type: 'message', conversationId: conv.id, senderId }
+    ).catch(() => {});
+  }
+
+  console.log(`[MSG Media] ${msg.senderName} -> ${conv.name} (${conv.id}): ${msgType}`);
+  res.json({ message: { ...msg, content: msg.text } });
+});
+
 // GET /api/conversations/:id/messages - get messages for a conversation
 app.get('/api/conversations/:id/messages', (req, res) => {
   const conv = conversations.get(req.params.id);
