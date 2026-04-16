@@ -3275,9 +3275,25 @@ app.put('/api/conversations/:id/read', async (req, res) => {
 });
 
 // GET /api/conversations/:id/messages - get messages for a conversation
-app.get('/api/conversations/:id/messages', (req, res) => {
+app.get('/api/conversations/:id/messages', async (req, res) => {
   const conv = conversations.get(req.params.id);
   if (!conv) return res.status(404).json({ error: 'Conversation not found' });
+  if (!messages.has(conv.id)) {
+    try {
+      const { data } = await supabaseAdmin.from('messages')
+        .select('*').eq('conversation_id', conv.id).order('timestamp', { ascending: true });
+      if (data && data.length > 0) {
+        const loaded = data.map((m: any) => ({
+          id: m.id, conversationId: m.conversation_id, senderId: m.sender_id,
+          senderName: m.sender_name, senderRole: m.sender_role,
+          text: m.text, type: m.type, timestamp: m.timestamp,
+          mediaUrl: m.media_url || undefined, mediaType: m.media_type || undefined,
+          location: m.location || undefined,
+        }));
+        messages.set(conv.id, loaded);
+      }
+    } catch (e) { console.error('[Messages] Supabase load error:', e); }
+  }
   const convMessages = messages.get(conv.id) || [];
   const since = req.query.since ? parseInt(req.query.since as string) : 0;
   const filtered = since > 0 ? convMessages.filter(m => m.timestamp > since) : convMessages;
@@ -3476,9 +3492,26 @@ app.post('/api/messaging/conversations', (req, res) => {
 });
 
 // GET /api/messaging/conversations/:id/messages - get messages
-app.get('/api/messaging/conversations/:id/messages', (req, res) => {
+app.get('/api/messaging/conversations/:id/messages', async (req, res) => {
   const conv = conversations.get(req.params.id);
   if (!conv) return res.status(404).json({ error: 'Conversation not found' });
+  // Si pas en mémoire, charger depuis Supabase
+  if (!messages.has(conv.id)) {
+    try {
+      const { data } = await supabaseAdmin.from('messages')
+        .select('*').eq('conversation_id', conv.id).order('timestamp', { ascending: true });
+      if (data && data.length > 0) {
+        const loaded = data.map((m: any) => ({
+          id: m.id, conversationId: m.conversation_id, senderId: m.sender_id,
+          senderName: m.sender_name, senderRole: m.sender_role,
+          text: m.text, type: m.type, timestamp: m.timestamp,
+          mediaUrl: m.media_url || undefined, mediaType: m.media_type || undefined,
+          location: m.location || undefined,
+        }));
+        messages.set(conv.id, loaded);
+      }
+    } catch (e) { console.error('[Messages] Supabase load error:', e); }
+  }
   const msgs = messages.get(conv.id) || [];
   // Map to use 'content' field for dispatch console compatibility
   const mapped = msgs.map(m => ({
@@ -3523,8 +3556,18 @@ app.post('/api/messaging/conversations/:id/messages', (req, res) => {
 
   conv.lastMessage = content;
   conv.lastMessageTime = msg.timestamp;
+  // Incrémenter unread pour tous les participants sauf l'expéditeur
+  const unreadCountsMsg: Record<string, number> = (conv as any).unreadCounts || {};
+  const allPartsMsg = resolveGroupParticipants(conv);
+  for (const pid of allPartsMsg) {
+    if (pid !== senderId) {
+      unreadCountsMsg[pid] = (unreadCountsMsg[pid] || 0) + 1;
+    }
+  }
+  (conv as any).unreadCounts = unreadCountsMsg;
   conversations.set(conv.id, conv);
   saveConversationToSupabase(conv).catch(() => {});
+  supabaseAdmin.from('conversations').update({ unread_counts: unreadCountsMsg }).eq('id', conv.id).then(() => {}).catch(() => {});
 
   // Broadcast to all participants via WebSocket
   const allParticipants = resolveGroupParticipants(conv);
