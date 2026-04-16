@@ -33,7 +33,7 @@ export default function TabLayout() {
       } catch {}
     };
     fetchUnread();
-    const interval = setInterval(fetchUnread, 5000);
+    const interval = setInterval(fetchUnread, 15000);
     return () => clearInterval(interval);
   }, [user?.id]);
 

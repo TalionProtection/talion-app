@@ -391,6 +391,8 @@ export default function MessagesScreen() {
       try {
         await apiPost(`/api/conversations/${encodeURIComponent(conv.id)}/read`, { userId: user.id });
         setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, unreadCount: 0 } : c));
+        // Forcer refresh des conversations pour mettre à jour la pastille tab
+        setTimeout(() => fetchConversations(), 500);
       } catch {}
     }
   }, [user?.id]);
