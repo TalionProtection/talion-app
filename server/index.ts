@@ -3216,7 +3216,26 @@ app.post('/api/conversations/:id/media', uploadMedia.single('file'), async (req:
   if (!senderId) return res.status(400).json({ error: 'senderId required' });
 
   const senderUser = adminUsers.get(senderId);
-  const mediaUrl = `/uploads/${req.file.filename}`;
+
+  // Upload vers Supabase Storage pour persistance
+  let mediaUrl = `/uploads/${req.file.filename}`; // fallback local
+  try {
+    const fileBuffer = fs.readFileSync(req.file.path);
+    const fileName = `${Date.now()}-${req.file.filename}`;
+    const mimeType = req.file.mimetype || (mediaType === 'audio' ? 'audio/m4a' : 'image/jpeg');
+    const { data: uploadData, error: uploadError } = await supabaseAdmin.storage
+      .from('media')
+      .upload(fileName, fileBuffer, { contentType: mimeType, upsert: false });
+    if (!uploadError && uploadData) {
+      const { data: { publicUrl } } = supabaseAdmin.storage.from('media').getPublicUrl(fileName);
+      mediaUrl = publicUrl;
+      console.log('[Media] Uploaded to Supabase Storage:', mediaUrl);
+    } else {
+      console.warn('[Media] Supabase Storage upload failed, using local:', uploadError?.message);
+    }
+  } catch (e) {
+    console.warn('[Media] Storage error, using local fallback:', e);
+  }
   const msgType = mediaType === 'audio' ? 'audio' : 'image';
   const text = mediaType === 'audio' ? '🎤 Message vocal' : '📷 Photo';
 
