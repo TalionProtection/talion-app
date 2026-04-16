@@ -49,6 +49,7 @@ interface ServerConversation {
   lastMessage: string;
   lastMessageTime: number;
   lastSenderName: string;
+  unreadCount?: number;
 }
 
 interface ServerMessage {
@@ -381,11 +382,18 @@ export default function MessagesScreen() {
 
   // ─── Actions ────────────────────────────────────────────────────────────
 
-  const openConversation = useCallback((conv: ServerConversation) => {
+  const openConversation = useCallback(async (conv: ServerConversation) => {
     setSelectedConversation(conv);
     setChatMessages([]);
     setView('chat');
-  }, []);
+    // Marquer comme lu
+    if (user?.id && (conv.unreadCount || 0) > 0) {
+      try {
+        await apiPost(`/api/conversations/${encodeURIComponent(conv.id)}/read`, { userId: user.id });
+        setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, unreadCount: 0 } : c));
+      } catch {}
+    }
+  }, [user?.id]);
 
   const handleSendMessage = useCallback(async () => {
     if (!messageText.trim() || !selectedConversation || !user?.id) return;
@@ -940,6 +948,11 @@ export default function MessagesScreen() {
                 <View style={styles.conversationHeaderRow}>
                   <Text style={styles.conversationName} numberOfLines={1}>{item.displayName || item.name}</Text>
                   <Text style={styles.conversationTime}>{item.lastMessageTime ? formatRelativeTime(item.lastMessageTime) : ''}</Text>
+                  {(item.unreadCount || 0) > 0 && (
+                    <View style={styles.unreadBadge}>
+                      <Text style={styles.unreadBadgeText}>{item.unreadCount! > 99 ? '99+' : item.unreadCount}</Text>
+                    </View>
+                  )}
                 </View>
                 <Text style={styles.conversationPreview} numberOfLines={1}>
                   {item.lastSenderName ? `${item.lastSenderName}: ${item.lastMessage}` : item.lastMessage || 'Aucun message'}
@@ -1146,6 +1159,20 @@ const styles = StyleSheet.create({
   createGroupButtonDisabled: { backgroundColor: '#9ca3af' },
   createGroupButtonText: { color: '#ffffff', fontSize: 16, fontWeight: '700' },
 
+  unreadBadge: {
+    backgroundColor: '#ef4444',
+    borderRadius: 10,
+    minWidth: 20,
+    height: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 4,
+  },
+  unreadBadgeText: {
+    color: '#ffffff',
+    fontSize: 11,
+    fontWeight: '700',
+  },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'center', alignItems: 'center' },
   menuCard: { backgroundColor: '#ffffff', borderRadius: 16, padding: 20, width: '80%', maxWidth: 320 },
   menuTitle: { fontSize: 18, fontWeight: '700', color: '#1f2937', marginBottom: 16 },

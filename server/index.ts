@@ -3129,6 +3129,7 @@ app.get('/api/conversations', (req, res) => {
         const otherUser = otherId ? adminUsers.get(otherId) : null;
         displayName = otherUser ? otherUser.name : conv.name;
       }
+      const unreadCounts = (conv as any).unreadCounts || {};
       userConvos.push({
         ...conv,
         displayName,
@@ -3136,6 +3137,7 @@ app.get('/api/conversations', (req, res) => {
         lastMessage: lastMsg ? lastMsg.text : conv.lastMessage,
         lastMessageTime: lastMsg ? lastMsg.timestamp : conv.lastMessageTime,
         lastSenderName: lastMsg ? lastMsg.senderName : '',
+        unreadCount: unreadCounts[userId] || 0,
       });
     }
   });
@@ -3258,6 +3260,20 @@ app.post('/api/conversations/:id/media', uploadMedia.single('file'), async (req:
   res.json({ message: { ...msg, content: msg.text } });
 });
 
+// PUT /api/conversations/:id/read - mark conversation as read for a user
+app.put('/api/conversations/:id/read', async (req, res) => {
+  const conv = conversations.get(req.params.id);
+  if (!conv) return res.status(404).json({ error: 'Conversation not found' });
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  const unreadCounts = (conv as any).unreadCounts || {};
+  unreadCounts[userId] = 0;
+  (conv as any).unreadCounts = unreadCounts;
+  conversations.set(conv.id, conv);
+  await supabaseAdmin.from('conversations').update({ unread_counts: unreadCounts }).eq('id', conv.id);
+  res.json({ success: true });
+});
+
 // GET /api/conversations/:id/messages - get messages for a conversation
 app.get('/api/conversations/:id/messages', (req, res) => {
   const conv = conversations.get(req.params.id);
@@ -3291,11 +3307,22 @@ app.post('/api/conversations/:id/messages', (req, res) => {
   messages.get(conv.id)!.push(msg);
   saveMessageToSupabase(msg).catch(() => {});
 
-  // Update conversation metadata
+  // Update conversation metadata + unread counts
   conv.lastMessage = text;
   conv.lastMessageTime = msg.timestamp;
+  // Incrémenter unread pour tous les participants sauf l'expéditeur
+  const allPartsForUnread = resolveGroupParticipants(conv);
+  const unreadCounts: Record<string, number> = (conv as any).unreadCounts || {};
+  for (const pid of allPartsForUnread) {
+    if (pid !== senderId) {
+      unreadCounts[pid] = (unreadCounts[pid] || 0) + 1;
+    }
+  }
+  (conv as any).unreadCounts = unreadCounts;
   conversations.set(conv.id, conv);
   saveConversationToSupabase(conv).catch(() => {});
+  // Sauvegarder unread_counts dans Supabase
+  supabaseAdmin.from('conversations').update({ unread_counts: unreadCounts }).eq('id', conv.id).then(() => {}).catch(() => {});
 
   // Broadcast to all participants via WebSocket
   const allParticipants = resolveGroupParticipants(conv);
@@ -4552,13 +4579,15 @@ async function loadConversationsFromSupabase(): Promise<void> {
     if (data && data.length > 0) {
       conversations.clear();
       data.forEach((c: any) => {
-        conversations.set(c.id, {
+        const conv: any = {
           id: c.id, type: c.type, name: c.name,
           participantIds: c.participant_ids || [], filterRole: c.filter_role,
           filterTags: c.filter_tags, createdBy: c.created_by,
           createdAt: c.created_at, lastMessage: c.last_message || '',
           lastMessageTime: c.last_message_time || 0,
-        });
+          unreadCounts: c.unread_counts || {},
+        };
+        conversations.set(c.id, conv);
       });
       console.log(`[Supabase] Loaded ${data.length} conversations`);
     }
