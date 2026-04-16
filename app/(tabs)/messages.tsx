@@ -386,13 +386,12 @@ export default function MessagesScreen() {
     setSelectedConversation(conv);
     setChatMessages([]);
     setView('chat');
-    // Marquer comme lu
-    if (user?.id && (conv.unreadCount || 0) > 0) {
+    // Marquer toujours comme lu à l'ouverture
+    if (user?.id) {
       try {
         await apiPost(`/api/conversations/${encodeURIComponent(conv.id)}/read`, { userId: user.id });
         setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, unreadCount: 0 } : c));
-        // Forcer refresh des conversations pour mettre à jour la pastille tab
-        setTimeout(() => fetchConversations(), 500);
+        setTimeout(() => fetchConversations(), 300);
       } catch {}
     }
   }, [user?.id]);
