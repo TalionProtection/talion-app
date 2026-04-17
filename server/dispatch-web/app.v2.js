@@ -3501,6 +3501,36 @@ function getRoleColor(role) {
   }
 }
 
+// ─── Send Media from Dispatch ───────────────────────────────
+async function sendDispatchMedia(input, mediaType) {
+  if (!msgCurrentConvId || !input.files?.[0]) return;
+  const file = input.files[0];
+  input.value = ''; // reset input
+  
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('senderId', DISPATCH_USER_ID);
+  formData.append('senderName', DISPATCH_USER_NAME);
+  formData.append('mediaType', mediaType);
+  if (mediaType === 'document') formData.append('fileName', file.name);
+
+  try {
+    const res = await fetch(`${API_BASE}/api/conversations/${msgCurrentConvId}/media`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (res.ok) {
+      await loadMessages(msgCurrentConvId);
+      await loadConversations();
+    } else {
+      alert('Erreur lors de l\'envoi du fichier');
+    }
+  } catch(e) {
+    console.error('Media send error:', e);
+    alert('Erreur lors de l\'envoi du fichier');
+  }
+}
+
 // ─── Send Message ───────────────────────────────────────────
 
 async function sendChatMessage() {
