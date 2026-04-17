@@ -67,7 +67,8 @@
             "backgroundColor": "#000000"
           }
         }
-      ]
+      ],
+      "@livekit/react-native"
     ],
     "experiments": {
       "typedRoutes": true,
