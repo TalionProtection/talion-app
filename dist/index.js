@@ -3959,7 +3959,10 @@ app.post("/api/livekit/token", async (req, res) => {
   if (!userId || !roomName) return res.status(400).json({ error: "userId and roomName required" });
   try {
     const { AccessToken } = await import("livekit-server-sdk");
-    const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
+    const apiKey = process.env.LIVEKIT_API_KEY || "talioncd15c681";
+    const apiSecret = process.env.LIVEKIT_API_SECRET || "759155227f75206216d399f37e676a010a92658ef655727358dddba0271c9f0f";
+    const livekitUrl = process.env.LIVEKIT_URL || "wss://talion-livekit.onrender.com";
+    const at = new AccessToken(apiKey, apiSecret, {
       identity: userId,
       name: userName || userId,
       ttl: "4h"
@@ -3972,7 +3975,7 @@ app.post("/api/livekit/token", async (req, res) => {
       canPublishSources: ["microphone"]
     });
     const token = await at.toJwt();
-    res.json({ token, url: LIVEKIT_URL, room: roomName });
+    res.json({ token, url: livekitUrl, room: roomName });
     console.log(`[LiveKit] Token g\xE9n\xE9r\xE9 pour ${userName} dans room ${roomName}`);
   } catch (e) {
     console.error("[LiveKit] Token error:", e);
@@ -3984,7 +3987,7 @@ app.get("/api/livekit/rooms", async (req, res) => {
     rooms: [
       { name: "dispatch", label: "Canal Dispatch", type: "group" }
     ],
-    livekitUrl: LIVEKIT_URL
+    livekitUrl: process.env.LIVEKIT_URL || "wss://talion-livekit.onrender.com"
   });
 });
 var userAddresses = /* @__PURE__ */ new Map();
