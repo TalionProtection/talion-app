@@ -800,6 +800,16 @@ function handleMessage(
       }
       break;
 
+    case 'pttStart':
+    case 'pttEnd':
+      // Diffuser PTT simple à tous les connectés
+      wss.clients.forEach((client: any) => {
+        if (client !== ws && client.readyState === 1) {
+          client.send(JSON.stringify({ type: msg.type, senderId: msg.senderId, senderName: msg.senderName, channel: msg.channel }));
+        }
+      });
+      break;
+
     case 'pttStartTalking':
       if (userId && userRole) {
         handlePTTTalkingState(ws, userId, userRole, data, true);
