@@ -803,9 +803,10 @@ function handleMessage(
     case 'pttStart':
     case 'pttEnd':
       // Diffuser PTT simple à tous les connectés
+      const pttPayload = JSON.stringify({ type: data.type, senderId: data.senderId, senderName: data.senderName, channel: data.channel });
       wss.clients.forEach((client: any) => {
         if (client !== ws && client.readyState === 1) {
-          client.send(JSON.stringify({ type: msg.type, senderId: msg.senderId, senderName: msg.senderName, channel: msg.channel }));
+          client.send(pttPayload);
         }
       });
       break;

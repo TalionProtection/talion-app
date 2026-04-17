@@ -521,9 +521,10 @@ function handleMessage(ws, message, setUserContext, connUserId, connUserRole) {
       break;
     case "pttStart":
     case "pttEnd":
+      const pttPayload = JSON.stringify({ type: data.type, senderId: data.senderId, senderName: data.senderName, channel: data.channel });
       wss.clients.forEach((client) => {
         if (client !== ws && client.readyState === 1) {
-          client.send(JSON.stringify({ type: msg.type, senderId: msg.senderId, senderName: msg.senderName, channel: msg.channel }));
+          client.send(pttPayload);
         }
       });
       break;
@@ -2596,7 +2597,7 @@ app.post("/api/conversations/:id/media", uploadMedia.single("file"), async (req,
   const msgType = mediaType === "audio" ? "audio" : mediaType === "document" ? "document" : "image";
   const fileName = req.body.fileName || req.file.originalname || "Document";
   const text = mediaType === "audio" ? "\u{1F3A4} Message vocal" : mediaType === "document" ? `\u{1F4CE} ${fileName}` : "\u{1F4F7} Photo";
-  const msg2 = {
+  const msg = {
     id: (0, import_uuid.v4)(),
     conversationId: conv.id,
     senderId,
@@ -2609,16 +2610,16 @@ app.post("/api/conversations/:id/media", uploadMedia.single("file"), async (req,
     timestamp: Date.now()
   };
   if (!messages.has(conv.id)) messages.set(conv.id, []);
-  messages.get(conv.id).push(msg2);
-  saveMessageToSupabase(msg2).catch(() => {
+  messages.get(conv.id).push(msg);
+  saveMessageToSupabase(msg).catch(() => {
   });
   conv.lastMessage = text;
-  conv.lastMessageTime = msg2.timestamp;
+  conv.lastMessageTime = msg.timestamp;
   conversations.set(conv.id, conv);
   saveConversationToSupabase(conv).catch(() => {
   });
   const allParticipants = resolveGroupParticipants(conv);
-  const wsPayload = JSON.stringify({ type: "newMessage", data: { ...msg2, conversationName: conv.name, conversationType: conv.type } });
+  const wsPayload = JSON.stringify({ type: "newMessage", data: { ...msg, conversationName: conv.name, conversationType: conv.type } });
   allParticipants.forEach((pid) => {
     const conns = userConnections.get(pid);
     if (conns) conns.forEach((ws) => {
@@ -2632,14 +2633,14 @@ app.post("/api/conversations/:id/media", uploadMedia.single("file"), async (req,
     if (pid === senderId) continue;
     sendPushToUser(
       pid,
-      `${msgType === "audio" ? "\u{1F3A4}" : "\u{1F4F7}"} ${msg2.senderName}`,
+      `${msgType === "audio" ? "\u{1F3A4}" : "\u{1F4F7}"} ${msg.senderName}`,
       msgType === "audio" ? "Message vocal" : msgType === "document" ? "Document partag\xE9" : "Photo",
       { type: "message", conversationId: conv.id, senderId }
     ).catch(() => {
     });
   }
-  console.log(`[MSG Media] ${msg2.senderName} -> ${conv.name} (${conv.id}): ${msgType}`);
-  res.json({ message: { ...msg2, content: msg2.text } });
+  console.log(`[MSG Media] ${msg.senderName} -> ${conv.name} (${conv.id}): ${msgType}`);
+  res.json({ message: { ...msg, content: msg.text } });
 });
 app.put("/api/conversations/:id/read", async (req, res) => {
   const conv = conversations.get(req.params.id);
@@ -2690,7 +2691,7 @@ app.post("/api/conversations/:id/messages", (req, res) => {
   const { senderId, text, type: msgType } = req.body;
   if (!senderId || !text) return res.status(400).json({ error: "senderId and text required" });
   const senderUser = adminUsers.get(senderId);
-  const msg2 = {
+  const msg = {
     id: (0, import_uuid.v4)(),
     conversationId: conv.id,
     senderId,
@@ -2701,11 +2702,11 @@ app.post("/api/conversations/:id/messages", (req, res) => {
     timestamp: Date.now()
   };
   if (!messages.has(conv.id)) messages.set(conv.id, []);
-  messages.get(conv.id).push(msg2);
-  saveMessageToSupabase(msg2).catch(() => {
+  messages.get(conv.id).push(msg);
+  saveMessageToSupabase(msg).catch(() => {
   });
   conv.lastMessage = text;
-  conv.lastMessageTime = msg2.timestamp;
+  conv.lastMessageTime = msg.timestamp;
   const allPartsForUnread = resolveGroupParticipants(conv);
   const unreadCounts = conv.unreadCounts || {};
   for (const pid of allPartsForUnread) {
@@ -2723,7 +2724,7 @@ app.post("/api/conversations/:id/messages", (req, res) => {
   const allParticipants = resolveGroupParticipants(conv);
   const wsPayload = JSON.stringify({
     type: "newMessage",
-    data: { ...msg2, conversationName: conv.name, conversationType: conv.type }
+    data: { ...msg, conversationName: conv.name, conversationType: conv.type }
   });
   allParticipants.forEach((pid) => {
     const conns = userConnections.get(pid);
@@ -2751,14 +2752,14 @@ app.post("/api/conversations/:id/messages", (req, res) => {
     if (pid === senderId) continue;
     sendPushToUser(
       pid,
-      `\u{1F4AC} ${msg2.senderName}`,
+      `\u{1F4AC} ${msg.senderName}`,
       text.substring(0, 100),
-      { type: "message", conversationId: conv.id, senderId, senderName: msg2.senderName }
+      { type: "message", conversationId: conv.id, senderId, senderName: msg.senderName }
     ).catch(() => {
     });
   }
-  console.log(`[MSG] ${msg2.senderName} -> ${conv.name} (${conv.id}): ${text.substring(0, 50)}`);
-  res.json(msg2);
+  console.log(`[MSG] ${msg.senderName} -> ${conv.name} (${conv.id}): ${text.substring(0, 50)}`);
+  res.json(msg);
 });
 app.get("/api/messaging/users", (_req, res) => {
   const users2 = Array.from(adminUsers.values()).map((u) => ({
@@ -2897,7 +2898,7 @@ app.post("/api/messaging/conversations/:id/messages", (req, res) => {
   const { senderId, senderName, content } = req.body;
   if (!senderId || !content) return res.status(400).json({ error: "senderId and content required" });
   const senderUser = adminUsers.get(senderId);
-  const msg2 = {
+  const msg = {
     id: (0, import_uuid.v4)(),
     conversationId: conv.id,
     senderId,
@@ -2908,11 +2909,11 @@ app.post("/api/messaging/conversations/:id/messages", (req, res) => {
     timestamp: Date.now()
   };
   if (!messages.has(conv.id)) messages.set(conv.id, []);
-  messages.get(conv.id).push(msg2);
-  saveMessageToSupabase(msg2).catch(() => {
+  messages.get(conv.id).push(msg);
+  saveMessageToSupabase(msg).catch(() => {
   });
   conv.lastMessage = content;
-  conv.lastMessageTime = msg2.timestamp;
+  conv.lastMessageTime = msg.timestamp;
   const unreadCountsMsg = conv.unreadCounts || {};
   const allPartsMsg = resolveGroupParticipants(conv);
   for (const pid of allPartsMsg) {
@@ -2930,7 +2931,7 @@ app.post("/api/messaging/conversations/:id/messages", (req, res) => {
   const allParticipants = resolveGroupParticipants(conv);
   const wsPayload = JSON.stringify({
     type: "newMessage",
-    data: { ...msg2, content: msg2.text, conversationName: conv.name, conversationType: conv.type }
+    data: { ...msg, content: msg.text, conversationName: conv.name, conversationType: conv.type }
   });
   allParticipants.forEach((pid) => {
     const conns = userConnections.get(pid);
@@ -2960,14 +2961,14 @@ app.post("/api/messaging/conversations/:id/messages", (req, res) => {
     notifiedPids.add(pid);
     sendPushToUser(
       pid,
-      `\u{1F4AC} ${msg2.senderName}`,
+      `\u{1F4AC} ${msg.senderName}`,
       content.substring(0, 100),
-      { type: "message", conversationId: conv.id, senderId, senderName: msg2.senderName }
+      { type: "message", conversationId: conv.id, senderId, senderName: msg.senderName }
     ).catch(() => {
     });
   }
-  console.log(`[MSG] ${msg2.senderName} -> ${conv.name || conv.type} (${conv.id}): ${content.substring(0, 50)}`);
-  res.json({ message: { ...msg2, content: msg2.text } });
+  console.log(`[MSG] ${msg.senderName} -> ${conv.name || conv.type} (${conv.id}): ${content.substring(0, 50)}`);
+  res.json({ message: { ...msg, content: msg.text } });
 });
 app.get("/api/messaging/tags", (_req, res) => {
   const tagSet = /* @__PURE__ */ new Set();
@@ -3879,20 +3880,20 @@ async function saveConversationToSupabase(conv) {
     console.error("[Supabase] saveConversation error:", e);
   }
 }
-async function saveMessageToSupabase(msg2) {
+async function saveMessageToSupabase(msg) {
   try {
     const { error } = await supabaseAdmin.from("messages").upsert({
-      id: msg2.id,
-      conversation_id: msg2.conversationId,
-      sender_id: msg2.senderId,
-      sender_name: msg2.senderName,
-      sender_role: msg2.senderRole,
-      text: msg2.text,
-      type: msg2.type,
-      timestamp: msg2.timestamp,
-      media_url: msg2.mediaUrl || null,
-      media_type: msg2.mediaType || null,
-      location: msg2.location || null
+      id: msg.id,
+      conversation_id: msg.conversationId,
+      sender_id: msg.senderId,
+      sender_name: msg.senderName,
+      sender_role: msg.senderRole,
+      text: msg.text,
+      type: msg.type,
+      timestamp: msg.timestamp,
+      media_url: msg.mediaUrl || null,
+      media_type: msg.mediaType || null,
+      location: msg.location || null
     });
     if (error) console.error("[Supabase] saveMessage error:", error.message);
   } catch (e) {
@@ -3940,7 +3941,7 @@ async function loadMessagesFromSupabase() {
     if (data && data.length > 0) {
       messages.clear();
       data.forEach((m) => {
-        const msg2 = {
+        const msg = {
           id: m.id,
           conversationId: m.conversation_id,
           senderId: m.sender_id,
@@ -3953,8 +3954,8 @@ async function loadMessagesFromSupabase() {
           mediaType: m.media_type || void 0,
           location: m.location || void 0
         };
-        if (!messages.has(msg2.conversationId)) messages.set(msg2.conversationId, []);
-        messages.get(msg2.conversationId).push(msg2);
+        if (!messages.has(msg.conversationId)) messages.set(msg.conversationId, []);
+        messages.get(msg.conversationId).push(msg);
       });
       console.log(`[Supabase] Loaded ${data.length} messages`);
     }
