@@ -6,7 +6,8 @@ import { IconSymbol } from '@/components/ui/icon-symbol';
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useAuth } from '@/hooks/useAuth';
-import { useState, useEffect } from 'react';
+import { useEffect } from 'react';
+import { useUnread } from '@/lib/unread-context';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Platform } from 'react-native';
@@ -19,7 +20,7 @@ export default function TabLayout() {
   const tabBarHeight = 56 + bottomPadding;
 
   const role = user?.role;
-  const [totalUnread, setTotalUnread] = useState(0);
+  const { totalUnread, setTotalUnread } = useUnread();
 
   useEffect(() => {
     if (!user?.id) return;
@@ -33,7 +34,7 @@ export default function TabLayout() {
       } catch {}
     };
     fetchUnread();
-    const interval = setInterval(fetchUnread, 15000);
+    const interval = setInterval(fetchUnread, 5000);
     return () => clearInterval(interval);
   }, [user?.id]);
 

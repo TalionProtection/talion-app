@@ -10,6 +10,7 @@ import { PTTProvider } from '@/lib/ptt-context';
 import { NotificationProvider } from '@/lib/notification-context';
 import { LocationProvider } from '@/lib/location-context';
 import { MessagingProvider } from '@/lib/messaging-context';
+import { UnreadProvider } from '@/lib/unread-context';
 import { WebSocketProvider } from '@/lib/websocket-provider';
 import { useAuth } from '@/hooks/useAuth';
 import { usePushNotifications } from '@/hooks/usePushNotifications';
@@ -92,10 +93,12 @@ function AuthAwareProviders({ children }: { children: React.ReactNode }) {
 
 export default function RootLayout() {
   return (
+    <UnreadProvider>
     <AuthProvider>
       <AuthAwareProviders>
         <RootLayoutContent />
       </AuthAwareProviders>
     </AuthProvider>
+    </UnreadProvider>
   );
 }
