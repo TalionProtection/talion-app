@@ -778,7 +778,8 @@ export default function MessagesScreen() {
 
         {/* Media Menu */}
         <Modal visible={showMediaMenu} transparent animationType="slide" onRequestClose={() => setShowMediaMenu(false)}>
-          <TouchableOpacity style={styles.mediaMenuOverlay} activeOpacity={1} onPress={() => setShowMediaMenu(false)}>
+          <View style={styles.mediaMenuOverlay}>
+            <TouchableOpacity style={styles.mediaMenuBackdrop} activeOpacity={1} onPress={() => setShowMediaMenu(false)} />
             <View style={styles.mediaMenuCard}>
               <Text style={styles.mediaMenuTitle}>Envoyer</Text>
               <View style={styles.mediaMenuGrid}>
@@ -800,7 +801,7 @@ export default function MessagesScreen() {
                 </TouchableOpacity>
               </View>
             </View>
-          </TouchableOpacity>
+          </View>
         </Modal>
       </SafeAreaView>
     );
@@ -1172,6 +1173,13 @@ const styles = StyleSheet.create({
   sendButtonDisabled: { backgroundColor: '#d1d5db' },
   sendIcon: { fontSize: 16, color: '#ffffff' },
 
+  mediaMenuBackdrop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
   mediaMenuOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
   mediaMenuCard: { backgroundColor: '#ffffff', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, paddingBottom: 40 },
   mediaMenuTitle: { fontSize: 16, fontWeight: '700', color: '#1f2937', marginBottom: 16, textAlign: 'center' },
