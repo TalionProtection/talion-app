@@ -478,12 +478,14 @@ export default function MessagesScreen() {
   const handleSendDocument = useCallback(async () => {
     if (!selectedConversation || !user?.id) return;
     setShowMediaMenu(false);
+    await new Promise(r => setTimeout(r, 600));
     try {
       const result = await DocumentPicker.getDocumentAsync({
         type: '*/*',
         copyToCacheDirectory: true,
         multiple: false,
       });
+      Alert.alert('Debug', 'Résultat: ' + JSON.stringify({canceled: result.canceled, assets: result.assets?.length}));
       if (result.canceled || !result.assets?.[0]) return;
       const asset = result.assets[0];
       setSendingMedia(true);
