@@ -4702,7 +4702,6 @@ app.post('/api/livekit/token', async (req, res) => {
       room: roomName,
       canPublish: true,
       canSubscribe: true,
-      canPublishSources: ['microphone'],
     });
     const token = await at.toJwt();
     res.json({ token, url: livekitUrl, room: roomName });
