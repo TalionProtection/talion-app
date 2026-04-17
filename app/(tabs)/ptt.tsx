@@ -48,7 +48,12 @@ export default function PTTScreen() {
         return;
       }
       await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-      const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      const { recording } = await Audio.Recording.createAsync({
+        ...Audio.RecordingOptionsPresets.HIGH_QUALITY,
+        android: { ...Audio.RecordingOptionsPresets.HIGH_QUALITY.android, maxFileSize: 50 * 1024 * 1024 },
+        ios: { ...Audio.RecordingOptionsPresets.HIGH_QUALITY.ios, linearPCMBitDepth: 16, linearPCMIsBigEndian: false, linearPCMIsFloat: false },
+        keepAudioActiveHint: true,
+      });
       recordingRef.current = recording;
       setTransmitting(true);
       
