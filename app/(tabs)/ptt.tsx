@@ -30,8 +30,7 @@ export default function PTTScreen() {
     };
     livekitPTT.onError = (e) => Alert.alert('Erreur PTT', e);
 
-    // Auto-connect au canal dispatch
-    if (user?.id) connectToRoom(DISPATCH_ROOM);
+    // Pas d'auto-connect - l'utilisateur appuie sur le bouton
 
     // Charger les users si dispatcher
     if (isDispatcher) fetchUsers();
@@ -54,7 +53,8 @@ export default function PTTScreen() {
       await livekitPTT.connect(user.id, user.name || 'Unknown', roomName);
       setCurrentRoom(roomName);
     } catch (e: any) {
-      Alert.alert('Erreur', 'Impossible de se connecter au canal PTT');
+      console.error('[PTT] Connect error:', e);
+      Alert.alert('Erreur PTT', e?.message || 'Impossible de se connecter au canal PTT');
     } finally {
       setConnecting(false);
     }
