@@ -663,11 +663,16 @@ export default function MessagesScreen() {
 
                     {/* Image message */}
                     {isImage && item.mediaUrl && (
-                      <Image
-                        source={{ uri: item.mediaUrl.startsWith('http') ? item.mediaUrl : `${baseUrl}${item.mediaUrl}` }}
-                        style={styles.messageImage}
-                        resizeMode="cover"
-                      />
+                      <TouchableOpacity activeOpacity={0.9} onPress={() => {
+                        const url = item.mediaUrl!.startsWith('http') ? item.mediaUrl! : `${baseUrl}${item.mediaUrl}`;
+                        Linking.openURL(url).catch(() => {});
+                      }}>
+                        <Image
+                          source={{ uri: item.mediaUrl.startsWith('http') ? item.mediaUrl : `${baseUrl}${item.mediaUrl}` }}
+                          style={styles.messageImage}
+                          resizeMode="cover"
+                        />
+                      </TouchableOpacity>
                     )}
 
                     {/* Audio message */}
