@@ -9,6 +9,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '@/hooks/useAuth';
 import { websocketService } from '@/services/websocket';
 import { alertSoundService } from '@/services/alert-sound-service';
+import { getApiBaseUrl } from '@/lib/server-url';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -116,35 +117,39 @@ export function MessagingProvider({ children }: { children: React.ReactNode }) {
 
     const load = async () => {
       try {
-        const storedConvos = await AsyncStorage.getItem(`${CONVERSATIONS_KEY}_${user.id}`);
-        const storedMsgs = await AsyncStorage.getItem(`${MESSAGES_KEY}_${user.id}`);
-
-        const cacheVersion = await AsyncStorage.getItem(`messaging_cache_version_${user.id}`);
-        if (storedConvos && cacheVersion === CACHE_VERSION) {
-          setConversations(JSON.parse(storedConvos));
+        // Charger les conversations depuis le serveur (source de vérité pour unreadCount)
+        const baseUrl = getApiBaseUrl();
+        const res = await fetch(`${baseUrl}/api/conversations?userId=${user.id}`);
+        if (res.ok) {
+          const serverConvos = await res.json();
+          // Convertir le format serveur en format Conversation local
+          const convos: Conversation[] = serverConvos.map((c: any) => ({
+            id: c.id,
+            participantIds: c.participantIds || [],
+            participantNames: c.participantNames || [],
+            participantRoles: c.participantRoles || [],
+            displayName: c.displayName || c.name || 'Conversation',
+            lastMessage: c.lastMessage || '',
+            lastMessageTime: c.lastMessageTime || 0,
+            unreadCount: c.unreadCount || 0,
+            isActive: true,
+            avatar: (c.displayName || c.name || '?').charAt(0).toUpperCase(),
+            type: c.type || 'direct',
+          }));
+          setConversations(convos);
         } else {
-          // Cache vide ou version obsolète — repartir de zéro
-          await AsyncStorage.removeItem(`${CONVERSATIONS_KEY}_${user.id}`);
-          await AsyncStorage.removeItem(`${MESSAGES_KEY}_${user.id}`);
-          await AsyncStorage.setItem(`messaging_cache_version_${user.id}`, CACHE_VERSION);
-          setConversations([]);
-          setAllMessages(new Map());
-        }
-
-        if (storedMsgs) {
-          const parsed: Record<string, ChatMessage[]> = JSON.parse(storedMsgs);
-          const map = new Map<string, ChatMessage[]>();
-          for (const [key, msgs] of Object.entries(parsed)) {
-            map.set(key, msgs);
+          // Fallback: AsyncStorage
+          const storedConvos = await AsyncStorage.getItem(`${CONVERSATIONS_KEY}_${user.id}`);
+          const cacheVersion = await AsyncStorage.getItem(`messaging_cache_version_${user.id}`);
+          if (storedConvos && cacheVersion === CACHE_VERSION) {
+            setConversations(JSON.parse(storedConvos));
+          } else {
+            setConversations([]);
           }
-          setAllMessages(map);
-        } else {
-          // Initialize with sample messages
-          const defaultMsgs = createDefaultMessages(user.role);
-          setAllMessages(defaultMsgs);
         }
       } catch (error) {
         console.warn('Failed to load messaging data:', error);
+        setConversations([]);
       }
     };
 
@@ -366,7 +371,16 @@ export function MessagingProvider({ children }: { children: React.ReactNode }) {
     setConversations((prev) =>
       prev.map((c) => (c.id === conversationId ? { ...c, unreadCount: 0 } : c))
     );
-  }, []);
+    // Sync avec le serveur
+    if (user?.id) {
+      const baseUrl = getApiBaseUrl();
+      fetch(`${baseUrl}/api/conversations/${encodeURIComponent(conversationId)}/read`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: user.id }),
+      }).catch(() => {});
+    }
+  }, [user?.id]);
 
   // Get contacts filtered by current user's role
   const getContactsForRole = useCallback(

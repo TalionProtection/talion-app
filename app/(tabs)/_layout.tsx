@@ -6,9 +6,7 @@ import { IconSymbol } from '@/components/ui/icon-symbol';
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useAuth } from '@/hooks/useAuth';
-import { useEffect } from 'react';
-import { useUnread } from '@/lib/unread-context';
-import { getApiBaseUrl } from '@/lib/server-url';
+import { useMessaging } from '@/lib/messaging-context';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Platform } from 'react-native';
 
@@ -20,23 +18,9 @@ export default function TabLayout() {
   const tabBarHeight = 56 + bottomPadding;
 
   const role = user?.role;
-  const { totalUnread, setTotalUnread } = useUnread();
+  const { totalUnread } = useMessaging();
 
-  useEffect(() => {
-    if (!user?.id) return;
-    const fetchUnread = async () => {
-      try {
-        const res = await fetch(`${getApiBaseUrl()}/api/conversations?userId=${user.id}`);
-        if (!res.ok) return;
-        const convs = await res.json();
-        const total = convs.reduce((sum: number, c: any) => sum + (c.unreadCount || 0), 0);
-        setTotalUnread(total);
-      } catch {}
-    };
-    fetchUnread();
-    const interval = setInterval(fetchUnread, 5000);
-    return () => clearInterval(interval);
-  }, [user?.id]);
+
 
   // Role-based visibility:
   // - user: Home, Messages, PTT, Map, Famille, Profil

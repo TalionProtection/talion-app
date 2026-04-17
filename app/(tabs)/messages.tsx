@@ -17,7 +17,7 @@ import {
 import { TalionScreen, TalionBanner } from '@/components/talion-banner';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '@/hooks/useAuth';
-import { useUnread } from '@/lib/unread-context';
+import { useMessaging } from '@/lib/messaging-context';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
 import { offlineCache } from '@/services/offline-cache';
@@ -282,7 +282,7 @@ type ViewState = 'list' | 'chat' | 'new-direct' | 'new-group';
 
 export default function MessagesScreen() {
   const { user } = useAuth();
-  const { setTotalUnread } = useUnread();
+  const { markConversationRead } = useMessaging();
 
   // Navigation state
   const [view, setView] = useState<ViewState>('list');
@@ -388,18 +388,9 @@ export default function MessagesScreen() {
     setSelectedConversation(conv);
     setChatMessages([]);
     setView('chat');
-    // Marquer toujours comme lu à l'ouverture
-    if (user?.id) {
-      try {
-        await apiPost(`/api/conversations/${encodeURIComponent(conv.id)}/read`, { userId: user.id });
-        setConversations(prev => {
-          const updated = prev.map(c => c.id === conv.id ? { ...c, unreadCount: 0 } : c);
-          const newTotal = updated.reduce((sum, c) => sum + (c.unreadCount || 0), 0);
-          setTotalUnread(newTotal);
-          return updated;
-        });
-      } catch {}
-    }
+    // Marquer comme lu via context (sync serveur automatique)
+    markConversationRead(conv.id);
+    setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, unreadCount: 0 } : c));
   }, [user?.id]);
 
   const handleSendMessage = useCallback(async () => {
