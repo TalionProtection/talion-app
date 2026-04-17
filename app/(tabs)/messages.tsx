@@ -296,6 +296,7 @@ export default function MessagesScreen() {
   const [allTags, setAllTags] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [sendingMedia, setSendingMedia] = useState(false);
+  const [fullscreenImage, setFullscreenImage] = useState<string | null>(null);
 
   // Chat input
   const [messageText, setMessageText] = useState('');
@@ -665,7 +666,7 @@ export default function MessagesScreen() {
                     {isImage && item.mediaUrl && (
                       <TouchableOpacity activeOpacity={0.9} onPress={() => {
                         const url = item.mediaUrl!.startsWith('http') ? item.mediaUrl! : `${baseUrl}${item.mediaUrl}`;
-                        Linking.openURL(url).catch(() => {});
+                        setFullscreenImage(url);
                       }}>
                         <Image
                           source={{ uri: item.mediaUrl.startsWith('http') ? item.mediaUrl : `${baseUrl}${item.mediaUrl}` }}
@@ -809,6 +810,15 @@ export default function MessagesScreen() {
             </View>
           </View>
         </Modal>
+      {/* Fullscreen image viewer */}
+      <Modal visible={!!fullscreenImage} transparent animationType="fade" onRequestClose={() => setFullscreenImage(null)}>
+        <TouchableOpacity style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.95)', justifyContent: 'center', alignItems: 'center' }} activeOpacity={1} onPress={() => setFullscreenImage(null)}>
+          {fullscreenImage && (
+            <Image source={{ uri: fullscreenImage }} style={{ width: '100%', height: '80%' }} resizeMode="contain" />
+          )}
+          <Text style={{ color: 'rgba(255,255,255,0.5)', marginTop: 16, fontSize: 13 }}>Appuyer pour fermer</Text>
+        </TouchableOpacity>
+      </Modal>
       </SafeAreaView>
     );
   }
