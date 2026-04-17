@@ -4679,6 +4679,46 @@ async function loadMessagesFromSupabase(): Promise<void> {
   } catch (e) { console.error('[Supabase] loadMessages error:', e); }
 }
 
+
+// ─── LiveKit PTT ──────────────────────────────────────────────────────────────
+
+// POST /api/livekit/token - générer un token pour rejoindre une room
+app.post('/api/livekit/token', async (req, res) => {
+  const { userId, userName, roomName } = req.body;
+  if (!userId || !roomName) return res.status(400).json({ error: 'userId and roomName required' });
+
+  try {
+    const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
+      identity: userId,
+      name: userName || userId,
+      ttl: '4h',
+    });
+    at.addGrant({
+      roomJoin: true,
+      room: roomName,
+      canPublish: true,
+      canSubscribe: true,
+      canPublishSources: ['microphone'],
+    });
+    const token = await at.toJwt();
+    res.json({ token, url: LIVEKIT_URL, room: roomName });
+    console.log(`[LiveKit] Token généré pour ${userName} dans room ${roomName}`);
+  } catch (e: any) {
+    console.error('[LiveKit] Token error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/livekit/rooms - lister les rooms actives (pour le dispatch)
+app.get('/api/livekit/rooms', async (req, res) => {
+  res.json({
+    rooms: [
+      { name: 'dispatch', label: 'Canal Dispatch', type: 'group' },
+    ],
+    livekitUrl: LIVEKIT_URL,
+  });
+});
+
 // ─── User Addresses ───────────────────────────────────────────────────────
 interface UserAddress {
   id: string;
