@@ -24,6 +24,7 @@ import { offlineCache } from '@/services/offline-cache';
 import { OfflineBanner } from '@/components/offline-banner';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
+import * as DocumentPicker from 'expo-document-picker';
 import { Audio } from 'expo-av';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -474,7 +475,41 @@ export default function MessagesScreen() {
     }
   }, [selectedConversation, user, fetchMessages]);
 
-  const handleToggleRecording = useCallback(async () => {
+  const handleSendDocument = useCallback(async () => {
+    if (!selectedConversation || !user?.id) return;
+    setShowMediaMenu(false);
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: '*/*',
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (result.canceled || !result.assets?.[0]) return;
+      const asset = result.assets[0];
+      setSendingMedia(true);
+      const formData = new FormData();
+      formData.append('file', { uri: asset.uri, name: asset.name, type: asset.mimeType || 'application/octet-stream' } as any);
+      formData.append('senderId', user.id);
+      formData.append('senderName', user.name || '');
+      formData.append('mediaType', 'document');
+      formData.append('fileName', asset.name);
+      const res = await fetch(`${getApiBaseUrl()}/api/conversations/${encodeURIComponent(selectedConversation.id)}/media`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+        body: formData,
+      });
+      if (!res.ok) throw new Error('Upload failed');
+      await fetchMessages(selectedConversation.id);
+      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+    } catch (e) {
+      Alert.alert('Erreur', "Impossible d'envoyer le document.");
+      console.warn('[Media] Document error:', e);
+    } finally {
+      setSendingMedia(false);
+    }
+  }, [selectedConversation, user, fetchMessages]);
+
+    const handleToggleRecording = useCallback(async () => {
     if (!selectedConversation || !user?.id) return;
     if (isRecording) {
       // Stop and send
@@ -661,9 +696,19 @@ export default function MessagesScreen() {
 
                     {/* Text message */}
                     {!isImage && !isAudio && !isLocation && (
-                      <Text style={[styles.messageText, isMe && styles.myMessageText, isAlert && styles.alertMessageText]}>
-                        {isAlert && '🚨 '}{item.text}
-                      </Text>
+                      {item.type === 'document' && item.mediaUrl ? (
+                        <TouchableOpacity onPress={() => {
+                          const url = item.mediaUrl!.startsWith('http') ? item.mediaUrl! : `${getApiBaseUrl()}${item.mediaUrl}`;
+                          require('react-native').Linking.openURL(url);
+                        }}>
+                          <Text style={[styles.messageText, isMe && styles.myMessageText]}>📎 {item.text?.replace('📎 ', '') || 'Document'}</Text>
+                          <Text style={[styles.timestamp, isMe && styles.myTimestamp, { color: isMe ? 'rgba(255,255,255,0.6)' : '#3b82f6' }]}>Appuyer pour ouvrir</Text>
+                        </TouchableOpacity>
+                      ) : (
+                        <Text style={[styles.messageText, isMe && styles.myMessageText, isAlert && styles.alertMessageText]}>
+                          {isAlert && '🚨 '}{item.text}
+                        </Text>
+                      )}
                     )}
 
                     <Text style={[styles.timestamp, isMe && styles.myTimestamp]}>{formatTime(item.timestamp)}</Text>
@@ -748,6 +793,10 @@ export default function MessagesScreen() {
                 <TouchableOpacity style={styles.mediaMenuItem} onPress={handleSendLocation}>
                   <Text style={styles.mediaMenuItemIcon}>📍</Text>
                   <Text style={styles.mediaMenuItemText}>Position</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.mediaMenuItem} onPress={handleSendDocument}>
+                  <Text style={styles.mediaMenuItemIcon}>📎</Text>
+                  <Text style={styles.mediaMenuItemText}>Document</Text>
                 </TouchableOpacity>
               </View>
             </View>
