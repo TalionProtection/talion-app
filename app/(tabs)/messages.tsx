@@ -696,7 +696,7 @@ export default function MessagesScreen() {
 
                     {/* Text message */}
                     {!isImage && !isAudio && !isLocation && (
-                      {item.type === 'document' && item.mediaUrl ? (
+                      item.type === 'document' && item.mediaUrl ? (
                         <TouchableOpacity onPress={() => {
                           const url = item.mediaUrl!.startsWith('http') ? item.mediaUrl! : `${getApiBaseUrl()}${item.mediaUrl}`;
                           require('react-native').Linking.openURL(url);
@@ -708,7 +708,7 @@ export default function MessagesScreen() {
                         <Text style={[styles.messageText, isMe && styles.myMessageText, isAlert && styles.alertMessageText]}>
                           {isAlert && '🚨 '}{item.text}
                         </Text>
-                      )}
+                      )
                     )}
 
                     <Text style={[styles.timestamp, isMe && styles.myTimestamp]}>{formatTime(item.timestamp)}</Text>
