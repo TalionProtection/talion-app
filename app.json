@@ -12,7 +12,10 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.talioncrisiscomm",
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "UIFileSharingEnabled": true,
+        "LSSupportsOpeningDocumentsInPlace": true,
+        "NSDocumentsFolderUsageDescription": "Talion needs access to documents for sharing files in chat."
       }
     },
     "android": {
@@ -64,8 +67,7 @@
             "backgroundColor": "#000000"
           }
         }
-      ],
-      "expo-document-picker"
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
