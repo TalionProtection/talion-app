@@ -4688,6 +4688,7 @@ app.post('/api/livekit/token', async (req, res) => {
   if (!userId || !roomName) return res.status(400).json({ error: 'userId and roomName required' });
 
   try {
+    const { AccessToken } = await import('livekit-server-sdk');
     const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
       identity: userId,
       name: userName || userId,
