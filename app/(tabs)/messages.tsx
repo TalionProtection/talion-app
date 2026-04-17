@@ -485,7 +485,6 @@ export default function MessagesScreen() {
         copyToCacheDirectory: true,
         multiple: false,
       });
-      Alert.alert('Debug', 'Résultat: ' + JSON.stringify({canceled: result.canceled, assets: result.assets?.length}));
       if (result.canceled || !result.assets?.[0]) return;
       const asset = result.assets[0];
       setSendingMedia(true);

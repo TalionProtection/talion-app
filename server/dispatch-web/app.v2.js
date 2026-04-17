@@ -3461,6 +3461,10 @@ function renderMessages() {
     if (m.type === 'image' && m.mediaUrl) {
       const imgUrl = m.mediaUrl.startsWith('http') ? m.mediaUrl : apiBase + m.mediaUrl;
       msgContent = `<a href="${imgUrl}" target="_blank"><img src="${imgUrl}" style="max-width:220px;max-height:180px;border-radius:8px;display:block;cursor:pointer;" /></a>`;
+    } else if (m.type === 'document' && m.mediaUrl) {
+      const docUrl = m.mediaUrl.startsWith('http') ? m.mediaUrl : apiBase + m.mediaUrl;
+      const fileName = m.content || m.text || 'Document';
+      msgContent = `<a href="${docUrl}" target="_blank" style="color:inherit;text-decoration:none;display:flex;align-items:center;gap:6px;"><span style="font-size:20px;">📎</span><span style="text-decoration:underline;">${escapeHtml(fileName.replace('📎 ',''))}</span></a>`;
     } else if (m.type === 'audio' && m.mediaUrl) {
       const audioUrl = m.mediaUrl.startsWith('http') ? m.mediaUrl : apiBase + m.mediaUrl;
       msgContent = `<audio controls style="max-width:200px;"><source src="${audioUrl}" /></audio>`;
