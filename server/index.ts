@@ -4941,3 +4941,4 @@ app.get('/api/alerts/:id/context', async (req, res) => {
   const { passwordHash, ...safeUser } = user;
   res.json({ user: { ...safeUser, hasPassword: !!user.passwordHash }, addresses, family, locationContext });
 });
+// livekit-server-sdk installed
