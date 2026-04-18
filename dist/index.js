@@ -3212,12 +3212,21 @@ async function handlePTTTransmit(ws, senderId, senderRole, data) {
   ws.send(JSON.stringify({ type: "pttTransmitAck", messageId: pttMsg.id, timestamp: pttMsg.timestamp }));
   if (senderRole === "dispatcher" || senderRole === "admin") {
     try {
+      const { targetUserId } = data;
       const audioBuffer = Buffer.from(audioBase64, "base64");
       const audioFileName = `${Date.now()}-ptt-dispatch.m4a`;
       const { data: uploadData, error: uploadError } = await supabaseAdmin.storage.from("media").upload(audioFileName, audioBuffer, { contentType: mimeType || "audio/webm", upsert: false });
       if (!uploadError && uploadData) {
         const { data: { publicUrl } } = supabaseAdmin.storage.from("media").getPublicUrl(audioFileName);
-        const channelUsers = channel.allowedRoles.includes("user") ? Array.from(adminUsers.values()).filter((u) => u.role === "user" || u.role === "responder") : [];
+        let channelUsers = [];
+        if (targetUserId) {
+          const targetUser = adminUsers.get(targetUserId);
+          if (targetUser) channelUsers = [targetUser];
+        } else {
+          channelUsers = Array.from(adminUsers.values()).filter(
+            (u) => (u.role === "user" || u.role === "responder") && u.status === "active"
+          );
+        }
         for (const targetUser of channelUsers) {
           const sorted = [senderId, targetUser.id].sort();
           const convId = `dm-${sorted[0]}-${sorted[1]}`;

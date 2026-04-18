@@ -3951,7 +3951,7 @@ async function handlePTTTransmit(ws: any, senderId: string, senderRole: string, 
   // Aussi envoyer via messagerie pour que les users reçoivent même en background
   if (senderRole === 'dispatcher' || senderRole === 'admin') {
     try {
-      // Uploader l'audio dans Supabase Storage
+      const { targetUserId } = data; // optionnel - si absent, envoie à tous
       const audioBuffer = Buffer.from(audioBase64, 'base64');
       const audioFileName = `${Date.now()}-ptt-dispatch.m4a`;
       const { data: uploadData, error: uploadError } = await supabaseAdmin.storage
@@ -3961,9 +3961,17 @@ async function handlePTTTransmit(ws: any, senderId: string, senderRole: string, 
       if (!uploadError && uploadData) {
         const { data: { publicUrl } } = supabaseAdmin.storage.from('media').getPublicUrl(audioFileName);
         
-        // Trouver ou créer une conversation avec chaque user connecté au canal
-        const channelUsers = channel.allowedRoles.includes('user' as any) ? 
-          Array.from(adminUsers.values()).filter(u => u.role === 'user' || u.role === 'responder') : [];
+        // Si targetUserId spécifié, envoyer seulement à cet user
+        let channelUsers: any[] = [];
+        if (targetUserId) {
+          const targetUser = adminUsers.get(targetUserId);
+          if (targetUser) channelUsers = [targetUser];
+        } else {
+          // Envoyer à tous les users actifs du canal
+          channelUsers = Array.from(adminUsers.values()).filter(u => 
+            (u.role === 'user' || u.role === 'responder') && u.status === 'active'
+          );
+        }
         
         for (const targetUser of channelUsers) {
           const sorted = [senderId, targetUser.id].sort();

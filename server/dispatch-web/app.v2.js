@@ -4623,7 +4623,7 @@ async function finalizePTTRecording(isEmergency) {
         ws.send(JSON.stringify({ type: 'pttEmergency', userId: 'dispatch-console', userRole: 'dispatcher', data: { audioBase64: rawBase64, mimeType: 'audio/webm', senderName: 'Dispatch Console', duration: 0 } }));
       }
     } else if (pttCurrentChannel) {
-      const msg = { type: 'pttTransmit', userId: 'dispatch-console', userRole: 'dispatcher', data: { channelId: pttCurrentChannel.id, audioBase64: rawBase64, mimeType: 'audio/webm', senderName: 'Dispatch Console', duration: 0 } };
+      const msg = { type: 'pttTransmit', userId: 'dispatch-console', userRole: 'dispatcher', data: { channelId: pttCurrentChannel.id, audioBase64: rawBase64, mimeType: 'audio/webm', senderName: 'Dispatch Console', duration: 0, targetUserId: pttSelectedTargetUser || null } };
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(msg));
       }
