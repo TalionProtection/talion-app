@@ -3139,7 +3139,7 @@ app.delete("/api/patrol/reports/:id/media/:mediaId", (req, res) => {
   });
   res.json({ success: true });
 });
-function handlePTTTransmit(ws, senderId, senderRole, data) {
+async function handlePTTTransmit(ws, senderId, senderRole, data) {
   const { channelId, audioBase64, duration, senderName, mimeType } = data;
   if (!channelId || !audioBase64) {
     console.error(`[PTT] REJECTED: Missing channelId=${channelId ? "yes" : "NO"} or audioBase64=${audioBase64 ? audioBase64.length + " chars" : "EMPTY/MISSING"}. Full data keys: ${Object.keys(data || {}).join(", ")}`);
@@ -3210,6 +3210,59 @@ function handlePTTTransmit(ws, senderId, senderRole, data) {
     }
   });
   ws.send(JSON.stringify({ type: "pttTransmitAck", messageId: pttMsg.id, timestamp: pttMsg.timestamp }));
+  if (senderRole === "dispatcher" || senderRole === "admin") {
+    try {
+      const audioBuffer = Buffer.from(audioBase64, "base64");
+      const audioFileName = `${Date.now()}-ptt-dispatch.m4a`;
+      const { data: uploadData, error: uploadError } = await supabaseAdmin.storage.from("media").upload(audioFileName, audioBuffer, { contentType: mimeType || "audio/webm", upsert: false });
+      if (!uploadError && uploadData) {
+        const { data: { publicUrl } } = supabaseAdmin.storage.from("media").getPublicUrl(audioFileName);
+        const channelUsers = channel.allowedRoles.includes("user") ? Array.from(adminUsers.values()).filter((u) => u.role === "user" || u.role === "responder") : [];
+        for (const targetUser of channelUsers) {
+          const sorted = [senderId, targetUser.id].sort();
+          const convId = `dm-${sorted[0]}-${sorted[1]}`;
+          let conv = conversations.get(convId);
+          if (!conv) {
+            conv = {
+              id: convId,
+              type: "direct",
+              name: "Direct Message",
+              participantIds: sorted,
+              createdBy: senderId,
+              createdAt: Date.now(),
+              lastMessage: "\u{1F399} Message vocal",
+              lastMessageTime: Date.now()
+            };
+            conversations.set(convId, conv);
+            saveConversationToSupabase(conv).catch(() => {
+            });
+          }
+          const msg = {
+            id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+            conversationId: convId,
+            senderId,
+            senderName: senderName || "Dispatch",
+            senderRole,
+            text: "\u{1F399} Message vocal PTT",
+            type: "audio",
+            timestamp: Date.now(),
+            mediaUrl: publicUrl,
+            mediaType: "audio"
+          };
+          if (!messages.has(convId)) messages.set(convId, []);
+          messages.get(convId).push(msg);
+          saveMessageToSupabase(msg).catch(() => {
+          });
+          conv.lastMessage = "\u{1F399} Message vocal PTT";
+          conv.lastMessageTime = msg.timestamp;
+          conversations.set(convId, conv);
+          sendPushToUser(targetUser.id, `\u{1F399} ${senderName || "Dispatch"}`, "Message vocal PTT", { type: "ptt" });
+        }
+      }
+    } catch (e) {
+      console.error("[PTT\u2192Msg] Error:", e);
+    }
+  }
 }
 function handlePTTJoinChannel(ws, userId, userRole, data) {
   const { channelId } = data;
