@@ -4613,6 +4613,25 @@ function stopDispatchPTT() {
   }
 }
 
+async function finalizePTTRecordingWav() {
+  if (pttRecordedChunks.length === 0) return;
+  const blob = pttRecordedChunks[0];
+  pttRecordedChunks = [];
+  const reader = new FileReader();
+  reader.onloadend = () => {
+    const dataUrl = reader.result;
+    const rawBase64 = typeof dataUrl === 'string' && dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+    if (pttCurrentChannel) {
+      const msg = { type: 'pttTransmit', userId: 'dispatch-console', userRole: 'dispatcher', data: { channelId: pttCurrentChannel.id, audioBase64: rawBase64, mimeType: 'audio/wav', senderName: 'Dispatch Console', duration: 0, targetUserId: pttSelectedTargetUser || null } };
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+      if (!pttMessages[pttCurrentChannel.id]) pttMessages[pttCurrentChannel.id] = [];
+      pttMessages[pttCurrentChannel.id].push({ senderId: 'dispatch-console', senderName: 'Dispatch Console', senderRole: 'dispatcher', channelId: pttCurrentChannel.id, audioData: rawBase64, mimeType: 'audio/wav', duration: 0, timestamp: new Date().toISOString() });
+      renderPTTMessages();
+    }
+  };
+  reader.readAsDataURL(blob);
+}
+
 async function finalizePTTRecording(isEmergency) {
   if (pttRecordedChunks.length === 0) return;
   const actualMime = pttMediaRecorder ? pttMediaRecorder.mimeType : 'audio/webm';
