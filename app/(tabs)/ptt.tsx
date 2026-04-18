@@ -26,6 +26,32 @@ export default function PTTScreen() {
   useEffect(() => {
     if (isDispatcher) fetchUsers();
     
+    // Rejoindre le canal PTT dispatch
+    const joinPttChannel = () => {
+      // Chercher le canal dispatch
+      fetch(`${getApiBaseUrl()}/api/ptt/channels`)
+        .then(r => r.json())
+        .then(channels => {
+          const dispatchChannel = channels.find((c: any) => 
+            c.name?.toLowerCase().includes('dispatch') || c.type === 'all'
+          );
+          if (dispatchChannel) {
+            websocketService.send({
+              type: 'pttJoinChannel',
+              channelId: dispatchChannel.id,
+            });
+            console.log('[PTT] Joined channel:', dispatchChannel.id, dispatchChannel.name);
+          } else if (channels.length > 0) {
+            // Rejoindre le premier canal disponible
+            websocketService.send({ type: 'pttJoinChannel', channelId: channels[0].id });
+            console.log('[PTT] Joined first channel:', channels[0].id);
+          }
+        })
+        .catch(e => console.warn('[PTT] Channel fetch error:', e));
+    };
+    
+    setTimeout(joinPttChannel, 1000);
+    
     // Écouter les messages PTT entrants
     const handlePTT = (data: any) => {
       if (data.type === 'pttStart') setActiveSpeaker(data.senderName);
