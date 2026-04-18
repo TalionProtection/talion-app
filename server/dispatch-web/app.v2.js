@@ -4430,6 +4430,7 @@ let pttCurrentChannel = null;
 let pttMessages = {};
 let pttIsRecording = false;
 let pttMediaRecorder = null;
+let pttSelectedTargetUser = null; // ID du user cible pour PTT 1-1
 let pttRecordedChunks = [];
 let pttLastEmergencyMsg = null;
 let pttEmergencyMode = false;
