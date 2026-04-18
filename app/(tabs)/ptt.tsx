@@ -9,6 +9,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { Audio } from 'expo-av';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { websocketService } from '@/services/websocket';
+import { Audio as ExpoAudio } from 'expo-av';
 
 export default function PTTScreen() {
   const { user } = useAuth();
@@ -17,6 +18,8 @@ export default function PTTScreen() {
   const [users, setUsers] = useState<any[]>([]);
   const [selectedUser, setSelectedUser] = useState<any | null>(null);
   const [channel, setChannel] = useState('dispatch');
+  const [pttMessages, setPttMessages] = useState<Array<{id: string, senderName: string, audioUrl?: string, audioBase64?: string, mimeType?: string, timestamp: number}>>([]);
+  const soundRef = useRef<ExpoAudio.Sound | null>(null);
   const recordingRef = useRef<Audio.Recording | null>(null);
   const isDispatcher = user?.role === 'dispatcher' || user?.role === 'admin';
 
@@ -28,9 +31,48 @@ export default function PTTScreen() {
       if (data.type === 'pttStart') setActiveSpeaker(data.senderName);
       if (data.type === 'pttEnd') setActiveSpeaker(null);
     };
+    const handlePttMessage = (data: any) => {
+      if (data.type === 'pttMessage' || data.type === 'newPttMessage') {
+        const msg = data.data || data;
+        setPttMessages(prev => [{
+          id: msg.id || Date.now().toString(),
+          senderName: msg.senderName || 'Dispatch',
+          audioBase64: msg.audioBase64,
+          mimeType: msg.mimeType || 'audio/webm',
+          timestamp: Date.now(),
+        }, ...prev].slice(0, 20));
+        setActiveSpeaker(msg.senderName || 'Dispatch');
+        setTimeout(() => setActiveSpeaker(null), 3000);
+      }
+    };
     websocketService.on('ptt', handlePTT);
-    return () => websocketService.off('ptt', handlePTT);
+    websocketService.on('pttMessage', handlePttMessage);
+    websocketService.on('message', handlePttMessage);
+    return () => {
+      websocketService.off('ptt', handlePTT);
+      websocketService.off('pttMessage', handlePttMessage);
+      websocketService.off('message', handlePttMessage);
+    };
   }, [user?.id]);
+
+  const playPttAudio = async (msg: any) => {
+    try {
+      if (soundRef.current) {
+        await soundRef.current.unloadAsync();
+        soundRef.current = null;
+      }
+      await ExpoAudio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
+      if (msg.audioBase64) {
+        // Jouer depuis base64
+        const uri = `data:${msg.mimeType || 'audio/webm'};base64,${msg.audioBase64}`;
+        const { sound } = await ExpoAudio.Sound.createAsync({ uri });
+        soundRef.current = sound;
+        await sound.playAsync();
+      }
+    } catch (e) {
+      console.error('[PTT] Play error:', e);
+    }
+  };
 
   const fetchUsers = async () => {
     try {
@@ -143,6 +185,26 @@ export default function PTTScreen() {
           </Pressable>
         </View>
 
+        {/* Messages PTT reçus */}
+        {pttMessages.length > 0 && (
+          <View style={styles.pttMessagesSection}>
+            <Text style={styles.sectionTitle}>Messages reçus</Text>
+            <ScrollView style={{ maxHeight: 200 }}>
+              {pttMessages.map(msg => (
+                <TouchableOpacity
+                  key={msg.id}
+                  style={styles.pttMessageItem}
+                  onPress={() => playPttAudio(msg)}
+                >
+                  <Text style={styles.pttMessageSender}>🎙 {msg.senderName}</Text>
+                  <Text style={styles.pttMessageTime}>{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>
+                  <Text style={styles.pttMessagePlay}>▶ Écouter</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+        )}
+
         {isDispatcher && (
           <View style={styles.usersSection}>
             <Text style={styles.sectionTitle}>Appel direct</Text>
@@ -198,4 +260,9 @@ const styles = StyleSheet.create({
   userName: { fontSize: 14, fontWeight: '600', color: '#1f2937' },
   userRole: { fontSize: 12, color: '#6b7280' },
   callIcon: { fontSize: 20 },
+  pttMessagesSection: { marginHorizontal: 16, marginBottom: 8 },
+  pttMessageItem: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#ffffff', borderRadius: 8, padding: 10, marginBottom: 6, gap: 8 },
+  pttMessageSender: { flex: 1, fontSize: 13, fontWeight: '600', color: '#1f2937' },
+  pttMessageTime: { fontSize: 11, color: '#9ca3af' },
+  pttMessagePlay: { fontSize: 12, color: '#3b82f6', fontWeight: '600' },
 });
