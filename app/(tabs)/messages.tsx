@@ -209,7 +209,7 @@ function useAudioRecorder() {
 
 // ─── Audio Player Component ──────────────────────────────────────────────────
 
-function AudioPlayer({ uri, isMe }: { uri: string; isMe: boolean }) {
+function AudioPlayer({ uri, isMe, onPlayingChange }: { uri: string; isMe: boolean; onPlayingChange?: (playing: boolean) => void }) {
   const soundRef = useRef<Audio.Sound | null>(null);
   const [playing, setPlaying] = useState(false);
   const [duration, setDuration] = useState(0);
@@ -230,15 +230,17 @@ function AudioPlayer({ uri, isMe }: { uri: string; isMe: boolean }) {
             if (s.isLoaded) {
               setPosition(s.positionMillis);
               setDuration(s.durationMillis || 0);
-              if (s.didJustFinish) { setPlaying(false); setPosition(0); soundRef.current = null; }
+              if (s.didJustFinish) { setPlaying(false); setPosition(0); soundRef.current = null; onPlayingChange?.(false); }
             }
           }
         );
         soundRef.current = sound;
         setPlaying(true);
+        onPlayingChange?.(true);
       } else if (playing) {
         await soundRef.current.pauseAsync();
         setPlaying(false);
+        onPlayingChange?.(false);
       } else {
         await soundRef.current.playAsync();
         setPlaying(true);
@@ -683,6 +685,7 @@ export default function MessagesScreen() {
                       <AudioPlayer
                         uri={item.mediaUrl.startsWith('http') ? item.mediaUrl : `${baseUrl}${item.mediaUrl}`}
                         isMe={isMe}
+                        onPlayingChange={(playing) => { isPlayingAudioRef.current = playing; }}
                       />
                     )}
 
