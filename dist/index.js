@@ -451,8 +451,8 @@ wss.on("connection", (ws) => {
         userRole = role;
       }, userId, userRole);
     } catch (error) {
+      if (error?.message?.includes("undefined") || error?.message?.includes("null")) return;
       console.error("Failed to parse message:", error);
-      ws.send(JSON.stringify({ type: "error", message: "Invalid message format" }));
     }
   });
   ws.on("close", () => {

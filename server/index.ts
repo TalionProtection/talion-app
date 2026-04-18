@@ -708,9 +708,9 @@ wss.on('connection', (ws: any) => {
         userId = id;
         userRole = role;
       }, userId, userRole);
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.message?.includes('undefined') || error?.message?.includes('null')) return;
       console.error('Failed to parse message:', error);
-      ws.send(JSON.stringify({ type: 'error', message: 'Invalid message format' }));
     }
   });
 
