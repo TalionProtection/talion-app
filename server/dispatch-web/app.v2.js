@@ -4615,7 +4615,8 @@ function stopDispatchPTT() {
 
 async function finalizePTTRecording(isEmergency) {
   if (pttRecordedChunks.length === 0) return;
-  const blob = new Blob(pttRecordedChunks, { type: 'audio/webm' });
+  const actualMime = pttMediaRecorder ? pttMediaRecorder.mimeType : 'audio/webm';
+  const blob = new Blob(pttRecordedChunks, { type: actualMime });
   pttRecordedChunks = [];
 
   const reader = new FileReader();
@@ -4635,7 +4636,7 @@ async function finalizePTTRecording(isEmergency) {
       }
       // Also add locally (store raw base64)
       if (!pttMessages[pttCurrentChannel.id]) pttMessages[pttCurrentChannel.id] = [];
-      pttMessages[pttCurrentChannel.id].push({ senderId: 'dispatch-console', senderName: 'Dispatch Console', senderRole: 'dispatcher', channelId: pttCurrentChannel.id, audioData: rawBase64, mimeType: 'audio/webm', duration: 0, timestamp: new Date().toISOString() });
+      pttMessages[pttCurrentChannel.id].push({ senderId: 'dispatch-console', senderName: 'Dispatch Console', senderRole: 'dispatcher', channelId: pttCurrentChannel.id, audioData: rawBase64, mimeType: actualMimeType, duration: 0, timestamp: new Date().toISOString() });
       renderPTTMessages();
     }
   };
