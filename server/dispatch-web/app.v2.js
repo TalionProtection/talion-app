@@ -4569,7 +4569,11 @@ async function startDispatchPTT() {
   if (pttIsRecording || !pttCurrentChannel) return;
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    pttMediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+    // Essayer mp4 d'abord (compatible iOS), sinon webm
+    const preferredMime = MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : 
+                          MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+    pttMediaRecorder = new MediaRecorder(stream, { mimeType: preferredMime });
+    console.log('[PTT] Recording format:', preferredMime);
     pttRecordedChunks = [];
     pttMediaRecorder.ondataavailable = (e) => {
       if (e.data.size > 0) pttRecordedChunks.push(e.data);
@@ -4623,7 +4627,8 @@ async function finalizePTTRecording(isEmergency) {
         ws.send(JSON.stringify({ type: 'pttEmergency', userId: 'dispatch-console', userRole: 'dispatcher', data: { audioBase64: rawBase64, mimeType: 'audio/webm', senderName: 'Dispatch Console', duration: 0 } }));
       }
     } else if (pttCurrentChannel) {
-      const msg = { type: 'pttTransmit', userId: 'dispatch-console', userRole: 'dispatcher', data: { channelId: pttCurrentChannel.id, audioBase64: rawBase64, mimeType: 'audio/webm', senderName: 'Dispatch Console', duration: 0, targetUserId: pttSelectedTargetUser || null } };
+      const actualMimeType = pttMediaRecorder ? pttMediaRecorder.mimeType : 'audio/webm';
+      const msg = { type: 'pttTransmit', userId: 'dispatch-console', userRole: 'dispatcher', data: { channelId: pttCurrentChannel.id, audioBase64: rawBase64, mimeType: actualMimeType, senderName: 'Dispatch Console', duration: 0, targetUserId: pttSelectedTargetUser || null } };
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(msg));
       }

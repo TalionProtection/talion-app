@@ -3953,7 +3953,8 @@ async function handlePTTTransmit(ws: any, senderId: string, senderRole: string, 
     try {
       const { targetUserId } = data; // optionnel - si absent, envoie à tous
       const audioBuffer = Buffer.from(audioBase64, 'base64');
-      const audioFileName = `${Date.now()}-ptt-dispatch.m4a`;
+      const audioFileName = `${Date.now()}-ptt-dispatch.webm`;
+      // Sauvegarder avec le mimeType original
       const { data: uploadData, error: uploadError } = await supabaseAdmin.storage
         .from('media')
         .upload(audioFileName, audioBuffer, { contentType: mimeType || 'audio/webm', upsert: false });
@@ -3995,6 +3996,7 @@ async function handlePTTTransmit(ws: any, senderId: string, senderRole: string, 
             senderRole, text: '🎙 Message vocal PTT',
             type: 'audio', timestamp: Date.now(),
             mediaUrl: publicUrl, mediaType: 'audio',
+            // Note: webm format from dispatch - iOS may not play directly
           };
           if (!messages.has(convId)) messages.set(convId, []);
           messages.get(convId)!.push(msg);
