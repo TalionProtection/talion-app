@@ -4581,7 +4581,7 @@ async function startDispatchPTT() {
     };
     pttMediaRecorder.onstop = () => {
       stream.getTracks().forEach(t => t.stop());
-      finalizePTTRecording(false);
+      setTimeout(() => finalizePTTRecording(false), 300);
     };
     pttMediaRecorder.start(100);
     pttIsRecording = true;
