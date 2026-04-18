@@ -3213,10 +3213,16 @@ async function handlePTTTransmit(ws, senderId, senderRole, data) {
   if (senderRole === "dispatcher" || senderRole === "admin") {
     try {
       const { targetUserId } = data;
+      console.log("[PTT\u2192Msg] Starting upload, audioBase64 length:", audioBase64?.length);
       const audioBuffer = Buffer.from(audioBase64, "base64");
-      const audioFileName = `${Date.now()}-ptt-dispatch.webm`;
+      const audioFileName = `${Date.now()}-ptt-dispatch.mp4`;
+      console.log("[PTT\u2192Msg] Buffer size:", audioBuffer.length, "bytes");
       const { data: uploadData, error: uploadError } = await supabaseAdmin.storage.from("media").upload(audioFileName, audioBuffer, { contentType: mimeType || "audio/webm", upsert: false });
+      if (uploadError) {
+        console.error("[PTT\u2192Msg] Upload error:", uploadError.message);
+      }
       if (!uploadError && uploadData) {
+        console.log("[PTT\u2192Msg] Uploaded to Supabase:", uploadData.path);
         const { data: { publicUrl } } = supabaseAdmin.storage.from("media").getPublicUrl(audioFileName);
         let channelUsers = [];
         if (targetUserId) {
@@ -3270,7 +3276,7 @@ async function handlePTTTransmit(ws, senderId, senderRole, data) {
         }
       }
     } catch (e) {
-      console.error("[PTT\u2192Msg] Error:", e);
+      console.error("[PTT\u2192Msg] Error:", e?.message || e);
     }
   }
 }

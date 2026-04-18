@@ -3952,14 +3952,18 @@ async function handlePTTTransmit(ws: any, senderId: string, senderRole: string, 
   if (senderRole === 'dispatcher' || senderRole === 'admin') {
     try {
       const { targetUserId } = data; // optionnel - si absent, envoie à tous
+      console.log('[PTT→Msg] Starting upload, audioBase64 length:', audioBase64?.length);
       const audioBuffer = Buffer.from(audioBase64, 'base64');
-      const audioFileName = `${Date.now()}-ptt-dispatch.webm`;
+      const audioFileName = `${Date.now()}-ptt-dispatch.mp4`;
+      console.log('[PTT→Msg] Buffer size:', audioBuffer.length, 'bytes');
       // Sauvegarder avec le mimeType original
       const { data: uploadData, error: uploadError } = await supabaseAdmin.storage
         .from('media')
         .upload(audioFileName, audioBuffer, { contentType: mimeType || 'audio/webm', upsert: false });
       
+      if (uploadError) { console.error('[PTT→Msg] Upload error:', uploadError.message); }
       if (!uploadError && uploadData) {
+        console.log('[PTT→Msg] Uploaded to Supabase:', uploadData.path);
         const { data: { publicUrl } } = supabaseAdmin.storage.from('media').getPublicUrl(audioFileName);
         
         // Si targetUserId spécifié, envoyer seulement à cet user
@@ -4009,7 +4013,7 @@ async function handlePTTTransmit(ws: any, senderId: string, senderRole: string, 
           sendPushToUser(targetUser.id, `🎙 ${senderName || 'Dispatch'}`, 'Message vocal PTT', { type: 'ptt' });
         }
       }
-    } catch (e) { console.error('[PTT→Msg] Error:', e); }
+    } catch (e: any) { console.error('[PTT→Msg] Error:', e?.message || e); }
   }
 }
 
