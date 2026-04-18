@@ -26,31 +26,20 @@ export default function PTTScreen() {
   useEffect(() => {
     if (isDispatcher) fetchUsers();
     
-    // Rejoindre le canal PTT dispatch
+    // Rejoindre tous les canaux PTT
     const joinPttChannel = () => {
-      // Chercher le canal dispatch
-      fetch(`${getApiBaseUrl()}/api/ptt/channels`)
-        .then(r => r.json())
-        .then(channels => {
-          const dispatchChannel = channels.find((c: any) => 
-            c.name?.toLowerCase().includes('dispatch') || c.type === 'all'
-          );
-          if (dispatchChannel) {
-            websocketService.send({
-              type: 'pttJoinChannel',
-              channelId: dispatchChannel.id,
-            });
-            console.log('[PTT] Joined channel:', dispatchChannel.id, dispatchChannel.name);
-          } else if (channels.length > 0) {
-            // Rejoindre le premier canal disponible
-            websocketService.send({ type: 'pttJoinChannel', channelId: channels[0].id });
-            console.log('[PTT] Joined first channel:', channels[0].id);
-          }
-        })
-        .catch(e => console.warn('[PTT] Channel fetch error:', e));
+      // Rejoindre le canal emergency (tous les rôles)
+      websocketService.send({ type: 'pttJoinChannel', channelId: 'emergency' });
+      websocketService.send({ type: 'pttJoinChannel', channelId: 'general' });
+      console.log('[PTT] Joined emergency + general channels');
     };
     
     setTimeout(joinPttChannel, 1000);
+    
+    // Rejoindre à chaque reconnexion
+    websocketService.on('authenticated', () => {
+      setTimeout(joinPttChannel, 500);
+    });
     
     // Écouter les messages PTT entrants
     const handlePTT = (data: any) => {
