@@ -3215,7 +3215,7 @@ async function handlePTTTransmit(ws, senderId, senderRole, data) {
       const { targetUserId } = data;
       console.log("[PTT\u2192Msg] Starting upload, audioBase64 length:", audioBase64?.length);
       const audioBuffer = Buffer.from(audioBase64, "base64");
-      const audioFileName = `${Date.now()}-ptt-dispatch.mp4`;
+      const audioFileName = `${Date.now()}-ptt-dispatch.m4a`;
       console.log("[PTT\u2192Msg] Buffer size:", audioBuffer.length, "bytes");
       const { data: uploadData, error: uploadError } = await supabaseAdmin.storage.from("media").upload(audioFileName, audioBuffer, { contentType: mimeType || "audio/webm", upsert: false });
       if (uploadError) {

@@ -3954,7 +3954,7 @@ async function handlePTTTransmit(ws: any, senderId: string, senderRole: string, 
       const { targetUserId } = data; // optionnel - si absent, envoie à tous
       console.log('[PTT→Msg] Starting upload, audioBase64 length:', audioBase64?.length);
       const audioBuffer = Buffer.from(audioBase64, 'base64');
-      const audioFileName = `${Date.now()}-ptt-dispatch.mp4`;
+      const audioFileName = `${Date.now()}-ptt-dispatch.m4a`;
       console.log('[PTT→Msg] Buffer size:', audioBuffer.length, 'bytes');
       // Sauvegarder avec le mimeType original
       const { data: uploadData, error: uploadError } = await supabaseAdmin.storage
