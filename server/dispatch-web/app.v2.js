@@ -4570,21 +4570,59 @@ async function startDispatchPTT() {
   if (pttIsRecording || !pttCurrentChannel) return;
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    // Essayer mp4 d'abord (compatible iOS), sinon webm
-    const preferredMime = MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : 
-                          MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
-    pttMediaRecorder = new MediaRecorder(stream, { mimeType: preferredMime });
-    console.log('[PTT] Recording format:', preferredMime);
+    // Enregistrement WAV PCM via WebAudio pour compatibilité iOS
+    const audioCtxRec = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    const source = audioCtxRec.createMediaStreamSource(stream);
+    const processor = audioCtxRec.createScriptProcessor(4096, 1, 1);
+    const pcmChunks = [];
     pttRecordedChunks = [];
-    pttMediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) pttRecordedChunks.push(e.data);
+    
+    processor.onaudioprocess = (e) => {
+      if (!pttIsRecording) return;
+      const float32 = e.inputBuffer.getChannelData(0);
+      const int16 = new Int16Array(float32.length);
+      for (let i = 0; i < float32.length; i++) {
+        int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
+      }
+      pcmChunks.push(new Uint8Array(int16.buffer));
     };
-    pttMediaRecorder.onstop = () => {
-      stream.getTracks().forEach(t => t.stop());
-      setTimeout(() => finalizePTTRecording(false), 300);
+    source.connect(processor);
+    processor.connect(audioCtxRec.destination);
+    
+    pttMediaRecorder = {
+      stop: () => {
+        pttIsRecording = false;
+        processor.disconnect();
+        source.disconnect();
+        stream.getTracks().forEach(t => t.stop());
+        audioCtxRec.close();
+        const totalLength = pcmChunks.reduce((sum, c) => sum + c.length, 0);
+        const wavBuffer = new ArrayBuffer(44 + totalLength);
+        const view = new DataView(wavBuffer);
+        const sampleRate = 16000;
+        const writeStr = (offset, str) => { for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i)); };
+        writeStr(0, 'RIFF'); view.setUint32(4, 36 + totalLength, true); writeStr(8, 'WAVE');
+        writeStr(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+        view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+        writeStr(36, 'data'); view.setUint32(40, totalLength, true);
+        let offset = 44;
+        pcmChunks.forEach(chunk => { new Uint8Array(wavBuffer).set(chunk, offset); offset += chunk.length; });
+        const blob = new Blob([wavBuffer], { type: 'audio/wav' });
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const rawBase64 = reader.result.split(',')[1];
+          if (pttCurrentChannel && ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'pttTransmit', userId: 'dispatch-console', userRole: 'dispatcher', data: { channelId: pttCurrentChannel.id, audioBase64: rawBase64, mimeType: 'audio/wav', senderName: 'Dispatch Console', duration: 0, targetUserId: pttSelectedTargetUser || null } }));
+          }
+        };
+        reader.readAsDataURL(blob);
+      },
+      mimeType: 'audio/wav'
     };
-    pttMediaRecorder.start(100);
+    
     pttIsRecording = true;
+    console.log('[PTT] Recording format: audio/wav PCM 16kHz');
 
     const btn = document.getElementById('pttRecordBtn');
     if (btn) { btn.classList.add('recording'); btn.innerHTML = '🔴 ENREGISTREMENT...'; }
