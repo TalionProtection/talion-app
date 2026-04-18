@@ -297,6 +297,7 @@ export default function MessagesScreen() {
   const [loading, setLoading] = useState(false);
   const [sendingMedia, setSendingMedia] = useState(false);
   const [fullscreenImage, setFullscreenImage] = useState<string | null>(null);
+  const isPlayingAudioRef = useRef(false);
 
   // Chat input
   const [messageText, setMessageText] = useState('');
@@ -349,6 +350,7 @@ export default function MessagesScreen() {
   }, []);
 
   const fetchMessages = useCallback(async (convId: string) => {
+    if (isPlayingAudioRef.current) return; // Ne pas recharger pendant la lecture audio
     try {
       const data = await apiGet<ServerMessage[]>(`/api/conversations/${encodeURIComponent(convId)}/messages`);
       setChatMessages(data);
@@ -371,7 +373,7 @@ export default function MessagesScreen() {
   useEffect(() => {
     if (view === 'chat' && selectedConversation) {
       fetchMessages(selectedConversation.id);
-      const interval = setInterval(() => fetchMessages(selectedConversation.id), 3000);
+      const interval = setInterval(() => fetchMessages(selectedConversation.id), 10000);
       return () => clearInterval(interval);
     }
   }, [view, selectedConversation, fetchMessages]);
