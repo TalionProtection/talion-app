@@ -3314,7 +3314,10 @@ async function loadConversations() {
   }
 }
 
+let isAudioPlaying = false;
+
 async function loadMessages(convId) {
+  if (isAudioPlaying) return; // Ne pas recharger pendant la lecture audio
   const data = await msgFetch(`/api/messaging/conversations/${convId}/messages`);
   if (data) {
     msgCurrentMessages = data.messages || [];
@@ -3467,7 +3470,7 @@ function renderMessages() {
       msgContent = `<a href="${docUrl}" target="_blank" style="color:inherit;text-decoration:none;display:flex;align-items:center;gap:6px;"><span style="font-size:20px;">📎</span><span style="text-decoration:underline;">${escapeHtml(fileName.replace('📎 ',''))}</span></a>`;
     } else if (m.type === 'audio' && m.mediaUrl) {
       const audioUrl = m.mediaUrl.startsWith('http') ? m.mediaUrl : apiBase + m.mediaUrl;
-      msgContent = `<audio controls style="max-width:200px;"><source src="${audioUrl}" /></audio>`;
+      msgContent = `<audio controls style="max-width:200px;" onplay="isAudioPlaying=true" onended="isAudioPlaying=false" onpause="isAudioPlaying=false"><source src="${audioUrl}" /></audio>`;
     } else if (m.type === 'location' && m.location) {
       const { latitude, longitude, address } = m.location;
       const mapsUrl = `https://maps.google.com/?q=${latitude},${longitude}`;
