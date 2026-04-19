@@ -4475,6 +4475,16 @@ function renderPTTChannels() {
 
 function selectPTTChannel(channel) {
   pttCurrentChannel = channel;
+  // Extraire targetUserId si canal direct
+  if (channel.id && channel.id.startsWith('direct-')) {
+    const parts = channel.id.replace('direct-', '').split('-');
+    // Trouver l'ID qui n'est pas dispatch-console
+    const members = channel.members || [];
+    pttSelectedTargetUser = members.find(m => m !== 'dispatch-console') || null;
+    console.log('[PTT] Direct channel target:', pttSelectedTargetUser);
+  } else {
+    pttSelectedTargetUser = null;
+  }
   renderPTTChannels();
 
   const el = document.getElementById('pttCurrentChannel');
@@ -4810,6 +4820,7 @@ async function initiateDirectPTTCall(targetUserId, targetUserName) {
       pttChannels.push(channel);
     }
     renderPTTChannels();
+    pttSelectedTargetUser = targetUserId;
     selectPTTChannel(channel);
     showToast(`Canal direct avec ${targetUserName} prêt`, 'success');
   } catch (e) {
