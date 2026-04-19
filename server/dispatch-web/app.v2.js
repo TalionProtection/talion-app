@@ -4821,6 +4821,7 @@ async function initiateDirectPTTCall(targetUserId, targetUserName) {
     }
     renderPTTChannels();
     pttSelectedTargetUser = targetUserId;
+    pttSelectedTargetUser = targetUserId;
     selectPTTChannel(channel);
     showToast(`Canal direct avec ${targetUserName} prêt`, 'success');
   } catch (e) {
