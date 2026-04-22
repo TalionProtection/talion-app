@@ -636,6 +636,7 @@ export default function MessagesScreen() {
               const isLocation = item.type === 'location';
               const isImage = item.type === 'image';
               const isAudio = item.type === 'audio';
+              const isVideo = item.type === 'video';
 
               if (isSystem) {
                 return (
@@ -659,6 +660,7 @@ export default function MessagesScreen() {
                     isLocation && styles.locationBubble,
                     isImage && styles.imageBubble,
                     isAudio && styles.audioBubble,
+                    isVideo && styles.imageBubble,
                   ]}>
                     {!isMe && selectedConversation.type === 'group' && (
                       <Text style={[styles.senderLabel, { color: isMe ? 'rgba(255,255,255,0.7)' : ROLE_COLORS[item.senderRole] || '#6b7280' }]}>
@@ -677,6 +679,19 @@ export default function MessagesScreen() {
                           style={styles.messageImage}
                           resizeMode="cover"
                         />
+                      </TouchableOpacity>
+                    )}
+
+                    {/* Video message */}
+                    {isVideo && item.mediaUrl && (
+                      <TouchableOpacity activeOpacity={0.9} onPress={() => {
+                        const url = item.mediaUrl!.startsWith('http') ? item.mediaUrl! : `${baseUrl}${item.mediaUrl}`;
+                        require('react-native').Linking.openURL(url).catch(() => {});
+                      }}>
+                        <View style={styles.messageImage}>
+                          <Text style={{ fontSize: 48, textAlign: 'center', paddingVertical: 40 }}>🎥</Text>
+                          <Text style={{ color: '#ffffff', textAlign: 'center', fontSize: 12, paddingBottom: 8 }}>Appuyer pour ouvrir</Text>
+                        </View>
                       </TouchableOpacity>
                     )}
 
@@ -707,7 +722,7 @@ export default function MessagesScreen() {
                     )}
 
                     {/* Text message */}
-                    {!isImage && !isAudio && !isLocation && (
+                    {!isImage && !isAudio && !isLocation && !isVideo && (
                       item.type === 'document' && item.mediaUrl ? (
                         <TouchableOpacity onPress={() => {
                           const url = item.mediaUrl!.startsWith('http') ? item.mediaUrl! : `${getApiBaseUrl()}${item.mediaUrl}`;

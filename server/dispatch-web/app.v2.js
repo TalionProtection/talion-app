@@ -3315,9 +3315,10 @@ async function loadConversations() {
 }
 
 let isAudioPlaying = false;
+let isVideoPlaying = false;
 
 async function loadMessages(convId) {
-  if (isAudioPlaying) return; // Ne pas recharger pendant la lecture audio
+  if (isAudioPlaying || isVideoPlaying) return; // Ne pas recharger pendant la lecture audio
   const data = await msgFetch(`/api/messaging/conversations/${convId}/messages`);
   if (data) {
     msgCurrentMessages = data.messages || [];
@@ -3470,7 +3471,7 @@ function renderMessages() {
       msgContent = `<a href="${docUrl}" target="_blank" style="color:inherit;text-decoration:none;display:flex;align-items:center;gap:6px;"><span style="font-size:20px;">📎</span><span style="text-decoration:underline;">${escapeHtml(fileName.replace('📎 ',''))}</span></a>`;
     } else if (m.type === 'video' && m.mediaUrl) {
       const videoUrl = m.mediaUrl.startsWith('http') ? m.mediaUrl : apiBase + m.mediaUrl;
-      msgContent = `<video controls style="max-width:280px;max-height:200px;border-radius:8px;display:block;" src="${videoUrl}"></video>`;
+      msgContent = `<video controls style="max-width:280px;max-height:200px;border-radius:8px;display:block;" src="${videoUrl}" onplay="isVideoPlaying=true" onended="isVideoPlaying=false" onpause="isVideoPlaying=false"></video>`;
     } else if (m.type === 'audio' && m.mediaUrl) {
       const audioUrl = m.mediaUrl.startsWith('http') ? m.mediaUrl : apiBase + m.mediaUrl;
       msgContent = `<audio controls style="max-width:200px;" onplay="isAudioPlaying=true" onended="isAudioPlaying=false" onpause="isAudioPlaying=false"><source src="${audioUrl}" /></audio>`;
