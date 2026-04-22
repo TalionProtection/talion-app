@@ -375,7 +375,7 @@ export default function MessagesScreen() {
   useEffect(() => {
     if (view === 'chat' && selectedConversation) {
       fetchMessages(selectedConversation.id);
-      const interval = setInterval(() => fetchMessages(selectedConversation.id), 10000);
+      const interval = setInterval(() => fetchMessages(selectedConversation.id), 30000);
       return () => clearInterval(interval);
     }
   }, [view, selectedConversation, fetchMessages]);
