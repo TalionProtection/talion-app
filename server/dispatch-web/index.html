@@ -301,6 +301,9 @@
             <label class="msg-media-btn" title="Envoyer un document" style="cursor:pointer;padding:6px 10px;border-radius:8px;background:var(--bg-chip);border:none;font-size:18px;display:flex;align-items:center;">
               📎<input type="file" id="msgDocInput" accept="*/*" style="display:none;" onchange="sendDispatchMedia(this,'document')">
             </label>
+            <label class="msg-media-btn" title="Envoyer une vidéo" style="cursor:pointer;padding:6px 10px;border-radius:8px;background:var(--bg-chip);border:none;font-size:18px;display:flex;align-items:center;">
+              🎥<input type="file" id="msgVideoInput" accept="video/*" style="display:none;" onchange="sendDispatchMedia(this,'video')">
+            </label>
             <textarea id="msgInput" rows="1" placeholder="Type a message..." onkeydown="handleMsgKeydown(event)"></textarea>
             <button class="btn btn-primary msg-send-btn" onclick="sendChatMessage()">&#x27A4; Send</button>
           </div>

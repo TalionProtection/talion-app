@@ -288,7 +288,7 @@ interface ChatMessage {
   senderName: string;
   senderRole: string;
   text: string;
-  type: 'text' | 'location' | 'alert' | 'image' | 'audio' | 'document' | 'system';
+  type: 'text' | 'location' | 'alert' | 'image' | 'audio' | 'document' | 'video' | 'system';
   timestamp: number;
   mediaUrl?: string;
   mediaType?: string;
@@ -3247,9 +3247,9 @@ app.post('/api/conversations/:id/media', uploadMedia.single('file'), async (req:
   } catch (e) {
     console.warn('[Media] Storage error, using local fallback:', e);
   }
-  const msgType = mediaType === 'audio' ? 'audio' : mediaType === 'document' ? 'document' : 'image';
+  const msgType = mediaType === 'audio' ? 'audio' : mediaType === 'document' ? 'document' : mediaType === 'video' ? 'video' : 'image';
   const fileName = req.body.fileName || req.file.originalname || 'Document';
-  const text = mediaType === 'audio' ? '🎤 Message vocal' : mediaType === 'document' ? `📎 ${fileName}` : '📷 Photo';
+  const text = mediaType === 'audio' ? '🎤 Message vocal' : mediaType === 'document' ? `📎 ${fileName}` : mediaType === 'video' ? '🎥 Vidéo' : '📷 Photo';
 
   const msg: ChatMessage = {
     id: uuidv4(),
@@ -3282,7 +3282,7 @@ app.post('/api/conversations/:id/media', uploadMedia.single('file'), async (req:
   for (const pid of allParticipants) {
     if (pid === senderId) continue;
     sendPushToUser(pid, `${msgType === 'audio' ? '🎤' : '📷'} ${msg.senderName}`,
-      msgType === 'audio' ? 'Message vocal' : msgType === 'document' ? 'Document partagé' : 'Photo',
+      msgType === 'audio' ? 'Message vocal' : msgType === 'document' ? 'Document partagé' : msgType === 'video' ? 'Vidéo partagée' : 'Photo',
       { type: 'message', conversationId: conv.id, senderId }
     ).catch(() => {});
   }

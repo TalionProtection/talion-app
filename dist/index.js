@@ -2594,9 +2594,9 @@ app.post("/api/conversations/:id/media", uploadMedia.single("file"), async (req,
   } catch (e) {
     console.warn("[Media] Storage error, using local fallback:", e);
   }
-  const msgType = mediaType === "audio" ? "audio" : mediaType === "document" ? "document" : "image";
+  const msgType = mediaType === "audio" ? "audio" : mediaType === "document" ? "document" : mediaType === "video" ? "video" : "image";
   const fileName = req.body.fileName || req.file.originalname || "Document";
-  const text = mediaType === "audio" ? "\u{1F3A4} Message vocal" : mediaType === "document" ? `\u{1F4CE} ${fileName}` : "\u{1F4F7} Photo";
+  const text = mediaType === "audio" ? "\u{1F3A4} Message vocal" : mediaType === "document" ? `\u{1F4CE} ${fileName}` : mediaType === "video" ? "\u{1F3A5} Vid\xE9o" : "\u{1F4F7} Photo";
   const msg = {
     id: (0, import_uuid.v4)(),
     conversationId: conv.id,
@@ -2634,7 +2634,7 @@ app.post("/api/conversations/:id/media", uploadMedia.single("file"), async (req,
     sendPushToUser(
       pid,
       `${msgType === "audio" ? "\u{1F3A4}" : "\u{1F4F7}"} ${msg.senderName}`,
-      msgType === "audio" ? "Message vocal" : msgType === "document" ? "Document partag\xE9" : "Photo",
+      msgType === "audio" ? "Message vocal" : msgType === "document" ? "Document partag\xE9" : msgType === "video" ? "Vid\xE9o partag\xE9e" : "Photo",
       { type: "message", conversationId: conv.id, senderId }
     ).catch(() => {
     });

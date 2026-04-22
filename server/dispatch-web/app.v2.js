@@ -3468,6 +3468,9 @@ function renderMessages() {
       const docUrl = m.mediaUrl.startsWith('http') ? m.mediaUrl : apiBase + m.mediaUrl;
       const fileName = m.content || m.text || 'Document';
       msgContent = `<a href="${docUrl}" target="_blank" style="color:inherit;text-decoration:none;display:flex;align-items:center;gap:6px;"><span style="font-size:20px;">📎</span><span style="text-decoration:underline;">${escapeHtml(fileName.replace('📎 ',''))}</span></a>`;
+    } else if (m.type === 'video' && m.mediaUrl) {
+      const videoUrl = m.mediaUrl.startsWith('http') ? m.mediaUrl : apiBase + m.mediaUrl;
+      msgContent = `<video controls style="max-width:280px;max-height:200px;border-radius:8px;display:block;" src="${videoUrl}"></video>`;
     } else if (m.type === 'audio' && m.mediaUrl) {
       const audioUrl = m.mediaUrl.startsWith('http') ? m.mediaUrl : apiBase + m.mediaUrl;
       msgContent = `<audio controls style="max-width:200px;" onplay="isAudioPlaying=true" onended="isAudioPlaying=false" onpause="isAudioPlaying=false"><source src="${audioUrl}" /></audio>`;
