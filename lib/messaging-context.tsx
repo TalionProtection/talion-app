@@ -97,6 +97,7 @@ interface MessagingContextType {
   markConversationRead: (conversationId: string) => void;
   getContactsForRole: (currentRole: string) => Contact[];
   deleteConversation: (conversationId: string) => void;
+  syncConversations: (serverConvos: any[]) => void;
 }
 
 const MessagingContext = createContext<MessagingContextType | null>(null);
@@ -420,6 +421,22 @@ export function MessagingProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
+  const syncConversations = useCallback((serverConvos: any[]) => {
+    setConversations(serverConvos.map((c: any) => ({
+      id: c.id,
+      participantIds: c.participantIds || [],
+      participantNames: c.participantNames || [],
+      participantRoles: c.participantRoles || [],
+      displayName: c.displayName || c.name || 'Conversation',
+      lastMessage: c.lastMessage || ',
+      lastMessageTime: c.lastMessageTime || 0,
+      unreadCount: c.unreadCount || 0,
+      isActive: true,
+      avatar: (c.displayName || c.name || '?').charAt(0).toUpperCase(),
+      type: c.type || 'direct',
+    })));
+  }, []);
+
   // Total unread count
   const totalUnread = conversations.reduce((sum, c) => sum + c.unreadCount, 0);
 
@@ -436,6 +453,7 @@ export function MessagingProvider({ children }: { children: React.ReactNode }) {
         markConversationRead,
         getContactsForRole,
         deleteConversation,
+        syncConversations,
       }}
     >
       {children}

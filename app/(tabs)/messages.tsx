@@ -285,7 +285,7 @@ type ViewState = 'list' | 'chat' | 'new-direct' | 'new-group';
 
 export default function MessagesScreen() {
   const { user } = useAuth();
-  const { markConversationRead } = useMessaging();
+  const { markConversationRead, syncConversations } = useMessaging();
 
   // Navigation state
   const [view, setView] = useState<ViewState>('list');
@@ -325,6 +325,7 @@ export default function MessagesScreen() {
     try {
       const data = await apiGet<ServerConversation[]>(`/api/conversations?userId=${user.id}`);
       setConversations(data);
+      syncConversations(data);
       offlineCache.cacheConversations(data);
     } catch (e) {
       console.warn('[Messages] Failed to fetch conversations, trying cache:', e);
