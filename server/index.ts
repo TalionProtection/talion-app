@@ -46,8 +46,16 @@ app.use('/api/messaging', requireAuth, requireRole('dispatcher'));
 // the mobile app's patrol.tsx never sent an Authorization header, so requireRole('responder')
 // here 401'd every real patrol submission as soon as this landed. Reverted to non-blocking
 // until the mobile app fix (auth header added) has shipped and propagated to field agents —
-// re-enable `requireAuth, requireRole('responder')` once confirmed.
-app.use('/api/patrol', optionalAuth);
+// re-enable `requireAuth, requireRole('responder')` once confirmed. The warning log below is
+// how we'll confirm that: watch for it to stop appearing before flipping back.
+app.use('/api/patrol', async (req, res, next) => {
+  await optionalAuth(req, res, () => {
+    if (!req.supabaseUser) {
+      console.warn(`[Auth][PatrolRollback] No valid token on ${req.method} ${req.originalUrl} — still on old app build?`);
+    }
+    next();
+  });
+});
 app.use('/api/conversations', requireAuth);
 app.use('/alerts', requireAuth);
 
