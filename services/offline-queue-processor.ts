@@ -7,6 +7,7 @@
 
 import { offlineCache, type QueuedAction } from './offline-cache';
 import { getApiBaseUrl } from '@/lib/server-url';
+import { authHeader } from '@/lib/auth-fetch';
 import { createPatrolReport, uploadMediaToReport, type PatrolReportDraft, type LocalMedia } from './patrol-api';
 
 export interface PatrolReportQueuePayload {
@@ -42,7 +43,7 @@ async function executeAction(action: QueuedAction): Promise<boolean> {
         const { conversationId, ...messageData } = action.payload;
         const res = await fetch(`${baseUrl}/api/conversations/${conversationId}/messages`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
           body: JSON.stringify(messageData),
         });
         return res.ok;

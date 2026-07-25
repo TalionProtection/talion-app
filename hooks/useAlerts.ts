@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
+import { authHeader } from '@/lib/auth-fetch';
 import { alertSoundService } from '@/services/alert-sound-service';
 import { notificationService } from '@/services/notification-service';
 import { offlineCache } from '@/services/offline-cache';
@@ -75,7 +76,7 @@ if (userRole) params.set('role', userRole);
 if (userId) params.set('userId', userId);
 const response = await fetchWithTimeout(`${baseUrl}/alerts?${params}`, {
   method: 'GET',
-  headers: { 'Accept': 'application/json' },
+  headers: { 'Accept': 'application/json', ...(await authHeader()) },
   timeout: 10000,
 });
 

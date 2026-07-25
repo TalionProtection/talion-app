@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
+import { authHeader } from '@/lib/auth-fetch';
 
 export interface ActiveSOSAlert {
   id: string;
@@ -41,7 +42,7 @@ export function useActiveSOSAlert(userId: string | undefined) {
       const baseUrl = getApiBaseUrl();
       const response = await fetchWithTimeout(`${baseUrl}/alerts`, {
         method: 'GET',
-        headers: { 'Accept': 'application/json' },
+        headers: { 'Accept': 'application/json', ...(await authHeader()) },
         timeout: 10000,
       });
 

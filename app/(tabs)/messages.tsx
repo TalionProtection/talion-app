@@ -20,6 +20,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { useMessaging } from '@/lib/messaging-context';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
+import { authHeader } from '@/lib/auth-fetch';
 import { offlineCache } from '@/services/offline-cache';
 import { OfflineBanner } from '@/components/offline-banner';
 import * as ImagePicker from 'expo-image-picker';
@@ -110,7 +111,7 @@ function formatDuration(ms: number): string {
 // ─── API Helpers ────────────────────────────────────────────────────────────
 
 async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetchWithTimeout(`${getApiBaseUrl()}${path}`, { timeout: 10000 });
+  const res = await fetchWithTimeout(`${getApiBaseUrl()}${path}`, { timeout: 10000, headers: await authHeader() });
   if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`);
   return res.json();
 }
@@ -118,7 +119,7 @@ async function apiGet<T>(path: string): Promise<T> {
 async function apiPost<T>(path: string, body: any): Promise<T> {
   const res = await fetchWithTimeout(`${getApiBaseUrl()}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
     body: JSON.stringify(body),
     timeout: 10000,
   });
@@ -140,7 +141,7 @@ async function uploadMedia(uri: string, convId: string, senderId: string, sender
   console.log('[Upload] Sending to:', url);
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Accept': 'application/json' },
+    headers: { 'Accept': 'application/json', ...(await authHeader()) },
     body: formData,
   });
   const responseText = await res.text();
@@ -502,7 +503,7 @@ export default function MessagesScreen() {
       formData.append('fileName', asset.name);
       const res = await fetch(`${getApiBaseUrl()}/api/conversations/${encodeURIComponent(selectedConversation.id)}/media`, {
         method: 'POST',
-        headers: { 'Accept': 'application/json' },
+        headers: { 'Accept': 'application/json', ...(await authHeader()) },
         body: formData,
       });
       if (!res.ok) throw new Error('Upload failed');

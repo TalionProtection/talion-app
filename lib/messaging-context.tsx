@@ -10,6 +10,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { websocketService } from '@/services/websocket';
 import { alertSoundService } from '@/services/alert-sound-service';
 import { getApiBaseUrl } from '@/lib/server-url';
+import { authHeader } from '@/lib/auth-fetch';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -120,7 +121,7 @@ export function MessagingProvider({ children }: { children: React.ReactNode }) {
       try {
         // Charger les conversations depuis le serveur (source de vérité pour unreadCount)
         const baseUrl = getApiBaseUrl();
-        const res = await fetch(`${baseUrl}/api/conversations?userId=${user.id}`);
+        const res = await fetch(`${baseUrl}/api/conversations?userId=${user.id}`, { headers: await authHeader() });
         if (res.ok) {
           const serverConvos = await res.json();
           // Convertir le format serveur en format Conversation local
@@ -375,11 +376,11 @@ export function MessagingProvider({ children }: { children: React.ReactNode }) {
     // Sync avec le serveur
     if (user?.id) {
       const baseUrl = getApiBaseUrl();
-      fetch(`${baseUrl}/api/conversations/${encodeURIComponent(conversationId)}/read`, {
+      authHeader().then(hdr => fetch(`${baseUrl}/api/conversations/${encodeURIComponent(conversationId)}/read`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...hdr },
         body: JSON.stringify({ userId: user.id }),
-      }).catch(() => {});
+      })).catch(() => {});
     }
   }, [user?.id]);
 

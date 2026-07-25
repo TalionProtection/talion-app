@@ -13,6 +13,7 @@ import { OfflineBanner } from '@/components/offline-banner';
 import { useWebSocketProvider } from '@/lib/websocket-provider';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
+import { authHeader } from '@/lib/auth-fetch';
 
 const STATUS_STORAGE_KEY = '@talion_user_status';
 
@@ -255,7 +256,7 @@ export default function HomeScreen() {
       const apiBase = getApiBaseUrl();
       const res = await fetchWithTimeout(`${apiBase}/alerts/${encodeURIComponent(incidentId)}/respond`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
         body: JSON.stringify({ responderId: user.id, status: newStatus }),
         timeout: 10000,
       });

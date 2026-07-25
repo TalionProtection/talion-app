@@ -13,6 +13,7 @@ import { notificationService, type SOSNotificationPayload } from '@/services/not
 import locationService from '@/services/location-service';
 import { alertSoundService } from '@/services/alert-sound-service';
 import { getApiBaseUrl } from '@/lib/server-url';
+import { authHeader } from '@/lib/auth-fetch';
 import { offlineCache } from '@/services/offline-cache';
 
 interface SOSButtonProps {
@@ -112,7 +113,7 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
       const baseUrl = getApiBaseUrl();
       await fetch(`${baseUrl}/alerts/${encodeURIComponent(alertId)}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
         body: JSON.stringify({ location }),
       });
       console.log(`[SOSButton] Location updated for ${alertId}: ${location.address}`);

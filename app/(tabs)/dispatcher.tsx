@@ -18,6 +18,7 @@ import { router } from 'expo-router';
 import { useAlerts, type ServerAlert } from '@/hooks/useAlerts';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
+import { authHeader } from '@/lib/auth-fetch';
 import { formatIncidentId, formatIncidentType, formatStatusFr, formatSeverityFr, formatTimeAgoFr } from '@/lib/format-utils';
 
 interface TimelineEntry {
@@ -156,7 +157,7 @@ export default function DispatcherScreen() {
     try {
       const baseUrl = getApiBaseUrl();
       // Use /dispatch/responders which has fallback demo data
-      const res = await fetchWithTimeout(`${baseUrl}/dispatch/responders`, { timeout: 10000 });
+      const res = await fetchWithTimeout(`${baseUrl}/dispatch/responders`, { timeout: 10000, headers: await authHeader() });
       if (res.ok) {
         const data = await res.json();
         // Also fetch admin user details for enrichment
@@ -213,12 +214,12 @@ export default function DispatcherScreen() {
     setLocalStatusOverrides((prev) => ({ ...prev, [incident.id]: 'acknowledged' }));
     // Also update on server
     const baseUrl = getApiBaseUrl();
-    fetchWithTimeout(`${baseUrl}/alerts/${incident.id}/acknowledge`, {
+    authHeader().then(hdr => fetchWithTimeout(`${baseUrl}/alerts/${incident.id}/acknowledge`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...hdr },
       body: JSON.stringify({ userId: user?.id }),
       timeout: 10000,
-    }).then(() => refresh()).catch(() => {});
+    })).then(() => refresh()).catch(() => {});
   };
 
   const handleAssignResponder = async (incident: Incident, responder: Responder) => {
@@ -226,7 +227,7 @@ export default function DispatcherScreen() {
       const baseUrl = getApiBaseUrl();
       const res = await fetchWithTimeout(`${baseUrl}/dispatch/incidents/${incident.id}/assign`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
         body: JSON.stringify({ responderId: responder.id }),
         timeout: 10000,
       });
@@ -256,7 +257,7 @@ export default function DispatcherScreen() {
             const baseUrl = getApiBaseUrl();
             const res = await fetchWithTimeout(`${baseUrl}/dispatch/incidents/${incident.id}/unassign`, {
               method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
+              headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
               body: JSON.stringify({ responderId }),
               timeout: 10000,
             });
@@ -284,12 +285,12 @@ export default function DispatcherScreen() {
           );
           // Also update on server
           const baseUrl = getApiBaseUrl();
-          fetchWithTimeout(`${baseUrl}/alerts/${incident.id}/resolve`, {
+          authHeader().then(hdr => fetchWithTimeout(`${baseUrl}/alerts/${incident.id}/resolve`, {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...hdr },
             body: JSON.stringify({ userId: user?.id }),
             timeout: 10000,
-          }).then(() => refresh()).catch(() => {});
+          })).then(() => refresh()).catch(() => {});
         },
       },
     ]);
@@ -304,7 +305,7 @@ export default function DispatcherScreen() {
       const baseUrl = getApiBaseUrl();
       const res = await fetchWithTimeout(`${baseUrl}/dispatch/broadcast`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
         body: JSON.stringify({
           message: broadcastMessage.trim(),
           severity: broadcastSeverity,

@@ -8,6 +8,7 @@ import { TalionScreen } from '@/components/talion-banner';
 import { useAuth } from '@/hooks/useAuth';
 import { Audio } from 'expo-av';
 import { getApiBaseUrl } from '@/lib/server-url';
+import { authHeader } from '@/lib/auth-fetch';
 import { websocketService } from '@/services/websocket';
 import { Audio as ExpoAudio } from 'expo-av';
 
@@ -138,7 +139,7 @@ export default function PTTScreen() {
         const targetId = selectedUser ? selectedUser.id : 'b8044334-a903-4661-9f77-59fe469d67b3';
         const convRes = await fetch(`${getApiBaseUrl()}/api/conversations`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
           body: JSON.stringify({ type: 'direct', participantIds: [user!.id, targetId], createdBy: user!.id }),
         });
         const convData = await convRes.json();
@@ -151,7 +152,7 @@ export default function PTTScreen() {
           formData.append('mediaType', 'audio');
           await fetch(`${getApiBaseUrl()}/api/conversations/${encodeURIComponent(convId)}/media`, {
             method: 'POST',
-            headers: { 'Accept': 'application/json' },
+            headers: { 'Accept': 'application/json', ...(await authHeader()) },
             body: formData,
           });
         }

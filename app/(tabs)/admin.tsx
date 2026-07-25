@@ -18,6 +18,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { TalionScreen } from '@/components/talion-banner';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
+import { authHeader } from '@/lib/auth-fetch';
 import type { UserRole } from '@/lib/auth-context';
 import { offlineCache } from '@/services/offline-cache';
 
@@ -209,7 +210,7 @@ export default function AdminScreen() {
 
   const fetchIncidents = useCallback(async () => {
     try {
-      const res = await fetchWithTimeout(`${BASE}/alerts`, { timeout: 10000 });
+      const res = await fetchWithTimeout(`${BASE}/alerts`, { timeout: 10000, headers: await authHeader() });
       if (res.ok) {
         // Also cache alerts from admin view
         const data = await res.json();

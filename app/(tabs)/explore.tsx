@@ -7,6 +7,7 @@ import NativeMapView, { Marker, Circle, Callout, isNativeMap } from '@/component
 import { websocketService, type LocationUpdate, type Alert as WSAlert } from '@/services/websocket';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
+import { authHeader } from '@/lib/auth-fetch';
 import locationService from '@/services/location-service';
 import { offlineCache } from '@/services/offline-cache';
 import { OfflineBanner } from '@/components/offline-banner';
@@ -415,7 +416,7 @@ export default function MapScreen() {
   // Fetch geofences from server
   const fetchGeofences = useCallback(async () => {
     try {
-      const res = await fetchWithTimeout(`${getApiBaseUrl()}/dispatch/geofence/zones`, { timeout: 10000 });
+      const res = await fetchWithTimeout(`${getApiBaseUrl()}/dispatch/geofence/zones`, { timeout: 10000, headers: await authHeader() });
       const data = await res.json();
       // API may return plain array or { success, zones }
       const zones = Array.isArray(data) ? data : (data.zones || []);
@@ -443,7 +444,7 @@ export default function MapScreen() {
     try {
       const res = await fetchWithTimeout(`${getApiBaseUrl()}/dispatch/geofence/zones`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
         body: JSON.stringify({
           center: { latitude: location.latitude, longitude: location.longitude },
           radiusKm: parseFloat(gfRadius) || 0.5,
@@ -473,7 +474,7 @@ export default function MapScreen() {
       {
         text: 'Delete', style: 'destructive', onPress: async () => {
           try {
-            await fetchWithTimeout(`${getApiBaseUrl()}/dispatch/geofence/zones/${zoneId}`, { method: 'DELETE', timeout: 10000 });
+            await fetchWithTimeout(`${getApiBaseUrl()}/dispatch/geofence/zones/${zoneId}`, { method: 'DELETE', timeout: 10000, headers: await authHeader() });
             setSelectedGeofence(null);
             fetchGeofences();
           } catch (e) { RNAlert.alert('Error', 'Failed to delete zone.'); }
@@ -500,12 +501,12 @@ export default function MapScreen() {
     try {
       if (editingGeofence) {
         // Delete old and create new with updated params
-        await fetchWithTimeout(`${getApiBaseUrl()}/dispatch/geofence/zones/${editingGeofence.id}`, { method: 'DELETE', timeout: 10000 });
+        await fetchWithTimeout(`${getApiBaseUrl()}/dispatch/geofence/zones/${editingGeofence.id}`, { method: 'DELETE', timeout: 10000, headers: await authHeader() });
       }
       const center = editingGeofence ? editingGeofence.center : { latitude: location.latitude, longitude: location.longitude };
       const res = await fetchWithTimeout(`${getApiBaseUrl()}/dispatch/geofence/zones`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
         body: JSON.stringify({
           center,
           radiusKm: parseFloat(gfRadius) || 0.5,
@@ -564,7 +565,7 @@ export default function MapScreen() {
       const baseUrl = getApiBaseUrl();
       const response = await fetchWithTimeout(`${baseUrl}/alerts`, {
         method: 'GET',
-        headers: { 'Accept': 'application/json' },
+        headers: { 'Accept': 'application/json', ...(await authHeader()) },
         timeout: 10000,
       });
       if (!response.ok) throw new Error(`Server returned ${response.status}`);
@@ -796,7 +797,7 @@ export default function MapScreen() {
       if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       const res = await fetchWithTimeout(`${getApiBaseUrl()}/alerts/${incidentId}/acknowledge`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
         body: JSON.stringify({ userId: user?.id, userName: user?.name }),
         timeout: 10000,
       });
@@ -841,7 +842,7 @@ export default function MapScreen() {
           try {
             const res = await fetchWithTimeout(`${getApiBaseUrl()}/alerts/${incidentId}/resolve`, {
               method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
+              headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
               body: JSON.stringify({ userId: user?.id, userName: user?.name }),
               timeout: 10000,
             });
