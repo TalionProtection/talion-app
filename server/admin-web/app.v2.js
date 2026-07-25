@@ -11,6 +11,12 @@ const API_BASE = (() => {
   return origin;
 })();
 
+// ─── Auth: refuse to render the console at all without a stored session token
+// (guards direct navigation to this page, bypassing /console/). ────────────
+if (!localStorage.getItem('talion_token')) {
+  window.location.href = '/console/';
+}
+
 // ─── Auth: attach the console session token to every same-origin fetch, and
 // bounce back to login on a 401 (token missing/expired/invalid). ───────────
 (() => {
