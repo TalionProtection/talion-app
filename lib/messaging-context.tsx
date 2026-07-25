@@ -428,7 +428,7 @@ export function MessagingProvider({ children }: { children: React.ReactNode }) {
       participantNames: c.participantNames || [],
       participantRoles: c.participantRoles || [],
       displayName: c.displayName || c.name || 'Conversation',
-      lastMessage: c.lastMessage || ',
+      lastMessage: c.lastMessage || '',
       lastMessageTime: c.lastMessageTime || 0,
       unreadCount: c.unreadCount || 0,
       isActive: true,
