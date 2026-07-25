@@ -56,6 +56,7 @@ function RootLayoutContent() {
         <Stack.Screen name="login" />
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
+        <Stack.Screen name="reveal-confirm" options={{ presentation: 'modal', title: 'Confirmer visibilité' }} />
       </Stack>
       <StatusBar style="auto" />
     </ThemeProvider>

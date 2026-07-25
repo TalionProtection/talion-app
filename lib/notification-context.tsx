@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
 import { Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
+import { useRouter } from 'expo-router';
 import {
   notificationService,
   type SOSNotificationPayload,
@@ -27,6 +28,7 @@ const NotificationContext = createContext<NotificationContextType | null>(null);
 // ─── Provider ───────────────────────────────────────────────────────────────
 export function NotificationProvider({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
+  const router = useRouter();
   const [isPermissionGranted, setIsPermissionGranted] = useState(false);
   const [preferences, setPreferences] = useState<NotificationPreferences>(
     notificationService.getPreferences()
@@ -67,7 +69,9 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       notificationService.setOnNotificationResponse((response) => {
         const data = response.notification.request.content.data;
         console.log('Notification tapped:', data);
-        // Navigation based on notification type can be handled here
+        if (data?.type === 'reveal_request' && data?.alertId) {
+          router.push({ pathname: '/reveal-confirm', params: { alertId: String(data.alertId) } });
+        }
       });
     };
 

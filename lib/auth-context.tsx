@@ -32,6 +32,7 @@ export interface User {
   phoneMobile?: string;
   avatar?: string;
   tags?: string[];
+  ghostMode?: boolean;
 }
 
 export interface AuthContextType {
@@ -77,6 +78,7 @@ async function fetchUserProfile(userId: string): Promise<User | null> {
       phoneMobile: adminUser.phone_mobile ?? '',
       tags: adminUser.tags ?? [],
       avatar: adminUser.photo_url ?? undefined,
+      ghostMode: adminUser.ghost_mode ?? false,
     };
   }
 

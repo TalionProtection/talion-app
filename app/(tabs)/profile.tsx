@@ -10,6 +10,7 @@ import {
   StyleSheet,
   Platform,
   Image,
+  Switch,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '@/hooks/useAuth';
@@ -20,6 +21,9 @@ import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
+import { getApiBaseUrl } from '@/lib/server-url';
+import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
+import { supabase } from '@/lib/auth-context';
 
 const ROLE_LABELS: Record<string, string> = {
   user: 'Utilisateur',
@@ -41,8 +45,36 @@ export default function ProfileScreen() {
   const [isSaving, setIsSaving] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
+  const [ghostMode, setGhostMode] = useState(user?.ghostMode || false);
+  const [ghostModeSaving, setGhostModeSaving] = useState(false);
 
   const markChanged = useCallback(() => setHasChanges(true), []);
+
+  const handleToggleGhostMode = useCallback(async (value: boolean) => {
+    if (!user) return;
+    const previous = ghostMode;
+    setGhostMode(value); // optimistic
+    setGhostModeSaving(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetchWithTimeout(`${getApiBaseUrl()}/api/users/${user.id}/ghost-mode`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+        },
+        body: JSON.stringify({ ghostMode: value }),
+        timeout: 10000,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } catch (e) {
+      console.error('[Profile] Failed to update Ghost mode:', e);
+      setGhostMode(previous); // revert on failure
+      Alert.alert('Erreur', 'Impossible de mettre à jour le mode Ghost. Réessayez.');
+    }
+    setGhostModeSaving(false);
+  }, [user, ghostMode]);
 
   const handlePickPhoto = async () => {
     try {
@@ -323,6 +355,29 @@ export default function ProfileScreen() {
             </View>
           )}
         </View>
+
+        {/* Privacy: Ghost mode */}
+        {user.role === 'user' && (
+          <View style={styles.formSection}>
+            <Text style={styles.sectionTitle}>Confidentialité</Text>
+            <View style={styles.fieldGroup}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                <View style={{ flex: 1, marginRight: 12 }}>
+                  <Text style={styles.fieldLabel}>Mode Ghost</Text>
+                  <Text style={styles.fieldHint}>
+                    Reste invisible du dispatch. Si un incident est signalé près de vous,
+                    vous recevrez une demande pour confirmer devenir visible.
+                  </Text>
+                </View>
+                {ghostModeSaving ? (
+                  <ActivityIndicator size="small" color="#1e3a5f" />
+                ) : (
+                  <Switch value={ghostMode} onValueChange={handleToggleGhostMode} />
+                )}
+              </View>
+            </View>
+          </View>
+        )}
 
         {/* Save Button */}
         {isEditing && (

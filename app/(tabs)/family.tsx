@@ -11,6 +11,7 @@ import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
 import { useLocation } from '@/lib/location-context';
 import NativeMapView, { Marker, Circle, isNativeMap } from '@/components/map-view';
+import { websocketService } from '@/services/websocket';
 import * as Haptics from 'expo-haptics';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -313,7 +314,7 @@ export default function FamilyScreen() {
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
-  // Auto-refresh every 30s
+  // Auto-refresh every 30s (fallback/initial-load — live updates arrive via WS below)
   useEffect(() => {
     const interval = setInterval(() => {
       fetchMembers();
@@ -322,6 +323,23 @@ export default function FamilyScreen() {
     }, 30000);
     return () => clearInterval(interval);
   }, [fetchMembers, fetchProxAlerts, fetchCurfewChecks]);
+
+  // Live position updates: the server already broadcasts `familyLocationUpdate` to
+  // every family member on each location ping (server/index.ts handleLocationUpdate) —
+  // this app just wasn't listening for it yet, relying only on the 30s poll above.
+  useEffect(() => {
+    const handleFamilyLocation = (data: any) => {
+      const loc = data?.data || data;
+      if (!loc?.userId || !loc?.location) return;
+      setMembers(prev => prev.map(m =>
+        m.userId === loc.userId
+          ? { ...m, location: { latitude: loc.location.latitude, longitude: loc.location.longitude }, lastSeen: loc.timestamp || Date.now() }
+          : m
+      ));
+    };
+    websocketService.on('familyLocation', handleFamilyLocation);
+    return () => websocketService.off('familyLocation', handleFamilyLocation);
+  }, []);
 
   // ─── Location History ───────────────────────────────────────────────────
 

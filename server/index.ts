@@ -364,6 +364,7 @@ interface AdminUser {
   photoUrl?: string;
   relationships?: { userId: string; type: string }[]; // type: 'parent', 'child', 'spouse', 'sibling', 'cohabitant', 'other'
   passwordHash?: string; // bcrypt-hashed password for email+password auth
+  ghostMode?: boolean; // hides this user from dispatch's live location view until revealed for an active incident, or the user turns it off themselves
 }
 
 interface LoginHistoryEntry {
@@ -457,6 +458,8 @@ interface Alert {
   photos?: string[]; // array of relative URLs e.g. ['/uploads/xxx.jpg']
   responderEscalation?: Record<string, 0 | 1 | 2>; // escalation tier reached per pending assignment
   escalationLevel?: 0 | 1 | 2; // max of responderEscalation, drives dispatch UI sort/style
+  visibilityRadiusMeters?: number; // Ghost-mode users within this radius get a reveal-request push
+  revealedUserIds?: string[]; // Ghost-mode users who confirmed becoming visible for this incident
 }
 
 interface AdminIncident {
@@ -1087,6 +1090,18 @@ function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: numbe
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+// Ghost-mode gating: true if this user has confirmed visibility for any currently
+// active (non-resolved/cancelled) incident. Computed at read-time from `alerts` —
+// no separate expiry timer needed, since it naturally stops counting the moment the
+// incident resolves or is cancelled.
+function isRevealedForActiveIncident(userId: string): boolean {
+  for (const alert of alerts.values()) {
+    if (alert.status === 'resolved' || alert.status === 'cancelled') continue;
+    if (alert.revealedUserIds?.includes(userId)) return true;
+  }
+  return false;
+}
+
 // ─── ETA estimate (straight-line distance × road-distance factor ÷ assumed speed) ───
 const ETA_ROAD_DISTANCE_FACTOR = 1.3; // straight-line → approximate real road distance
 const ETA_AVERAGE_SPEED_KMH = 32; // assumed effective average speed (urban, incl. stops/traffic)
@@ -1426,13 +1441,15 @@ function handleLocationUpdate(ws: any, userId: string, userRole: string, locatio
     });
     checkGeofences(userId, locationData);
   } else {
-    // Regular user location update - broadcast as userLocationUpdate to dispatchers
-    broadcastToRole('dispatcher', {
-      type: 'userLocationUpdate',
-      userId,
-      location: locationData,
-      timestamp: Date.now(),
-    });
+    // Regular user location update - broadcast as userLocationUpdate to dispatch (both
+    // dispatcher and admin consoles), unless this user is in Ghost mode and hasn't
+    // confirmed visibility for a currently active incident.
+    const isGhosted = adminUsers.get(userId)?.ghostMode && !isRevealedForActiveIncident(userId);
+    if (!isGhosted) {
+      const msg = { type: 'userLocationUpdate', userId, location: locationData, timestamp: Date.now() };
+      broadcastToRole('dispatcher', msg);
+      broadcastToRole('admin', msg);
+    }
   }
   // Family location sharing: broadcast to family members regardless of role
   const familyIds = getFamilyMemberIds(userId);
@@ -1964,7 +1981,7 @@ app.get('/responders', (req, res) => {
 
 // Dispatch console: create incident without auth (internal use)
 app.post('/dispatch/incidents', async (req, res) => {
-  const { type, severity, location, description, createdBy } = req.body;
+  const { type, severity, location, description, createdBy, visibilityRadiusMeters } = req.body;
   const alert: Alert = {
     id: await generateIncidentId(type || 'other', createdBy || 'Dispatch Console', location || {}),
     type: type || 'other',
@@ -1975,6 +1992,8 @@ app.post('/dispatch/incidents', async (req, res) => {
     createdAt: Date.now(),
     status: 'active',
     respondingUsers: [],
+    visibilityRadiusMeters: visibilityRadiusMeters ? Number(visibilityRadiusMeters) : undefined,
+    revealedUserIds: [],
   };
   alerts.set(alert.id, alert);
   persistAlerts();
@@ -1988,6 +2007,18 @@ app.post('/dispatch/incidents', async (req, res) => {
         `🚨 Nouvel incident — ${alert.type.toUpperCase()}`,
         alert.description || alert.location?.address || 'Incident signalé',
         { type: alert.type, alertId: alert.id }
+      ).catch(() => {});
+    }
+  }
+  // Ask Ghost-mode users within the visibility radius to confirm becoming visible
+  if (alert.visibilityRadiusMeters && alert.visibilityRadiusMeters > 0) {
+    const ghostUserIds = findGhostUsersNearLocation(alert.location, alert.visibilityRadiusMeters);
+    for (const ghostUserId of ghostUserIds) {
+      sendPushToUser(
+        ghostUserId,
+        '📍 Incident à proximité',
+        'Confirmez pour partager votre position avec les secours.',
+        { type: 'reveal_request', alertId: alert.id }
       ).catch(() => {});
     }
   }
@@ -3185,6 +3216,22 @@ function computeNearbyResponders(alert: Alert): NearbyResponderInfo[] {
   return result;
 }
 
+// Ghost-mode users (role 'user') within radiusMeters of a location — used to send
+// reveal-request pushes when an incident is created with a visibility radius.
+function findGhostUsersNearLocation(location: { latitude: number; longitude: number }, radiusMeters: number): string[] {
+  const nearby: string[] = [];
+  adminUsers.forEach((user) => {
+    if (user.role !== 'user') return;
+    if (!user.ghostMode) return;
+    const runtimeUser = users.get(user.id);
+    const loc = runtimeUser?.location;
+    if (!loc) return;
+    const dist = haversineDistance(location.latitude, location.longitude, loc.latitude, loc.longitude);
+    if (dist <= radiusMeters) nearby.push(user.id);
+  });
+  return nearby;
+}
+
 // Dispatch: get responders with distance/ETA to a specific incident (for assign modal)
 app.get('/dispatch/incidents/:id/responders-nearby', (req, res) => {
   const alert = alerts.get(req.params.id);
@@ -3275,6 +3322,35 @@ app.put('/alerts/:id/respond', requireRole('responder'), (req, res) => {
     }
   }
   res.json({ success: true, responderId, status, statusLabel });
+});
+
+// POST /alerts/:id/reveal - a Ghost-mode user confirms becoming visible to dispatch
+// for this specific incident, in response to a reveal-request push notification.
+app.post('/alerts/:id/reveal', (req, res) => {
+  const alert = alerts.get(req.params.id as string);
+  if (!alert) return res.status(404).json({ error: 'Incident not found' });
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+
+  if (!alert.revealedUserIds) alert.revealedUserIds = [];
+  if (!alert.revealedUserIds.includes(userId)) {
+    alert.revealedUserIds.push(userId);
+  }
+  alerts.set(alert.id, alert);
+  persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[Reveal] Supabase save error:', e));
+
+  // Broadcast this user's current location immediately, rather than waiting for
+  // their next natural location ping, so they appear on the map right away.
+  const runtimeUser = users.get(userId);
+  if (runtimeUser?.location) {
+    const msg = { type: 'userLocationUpdate', userId, location: runtimeUser.location, timestamp: Date.now() };
+    broadcastToRole('dispatcher', msg);
+    broadcastToRole('admin', msg);
+  }
+
+  addAuditEntry('incident', 'Utilisateur révélé', adminUsers.get(userId)?.name || userId, `Position partagée pour l'incident ${alert.id}`, userId);
+  res.json({ success: true });
 });
 
 // Dispatch: send broadcast — creates a real alert so mobile apps receive it via polling + WS
@@ -3427,6 +3503,7 @@ app.get('/dispatch/map/users', (req, res) => {
   // Combine real connected users with demo user locations
   const connectedUsersList = Array.from(users.values())
     .filter(u => u.location && u.role !== 'responder')
+    .filter(u => !(adminUsers.get(u.id)?.ghostMode && !isRevealedForActiveIncident(u.id)))
     .map(u => {
       const adminUser = adminUsers.get(u.id);
       const name = adminUser ? `${adminUser.firstName} ${adminUser.lastName}`.trim() : u.id;
@@ -3519,6 +3596,26 @@ app.put('/api/users/:id/tags', (req, res) => {
   user.tags = req.body.tags || [];
   adminUsers.set(user.id, user);
   res.json({ success: true, user: { id: user.id, name: user.name, tags: user.tags } });
+});
+
+// PUT /api/users/:id/ghost-mode - toggle whether this user is hidden from dispatch's
+// live location view. Goes through the server (not a direct client->Supabase write)
+// so the in-memory adminUsers map — and therefore the broadcast/snapshot gating in
+// handleLocationUpdate and GET /dispatch/map/users — reflects the change immediately.
+app.put('/api/users/:id/ghost-mode', requireAuth, (req, res) => {
+  const targetId = req.params.id as string;
+  const caller = req.supabaseUser!;
+  const isSelf = caller.id === targetId;
+  const isDispatchStaff = caller.role === 'dispatcher' || caller.role === 'admin';
+  if (!isSelf && !isDispatchStaff) {
+    return res.status(403).json({ error: 'Not authorized to change this user\'s Ghost mode' });
+  }
+  const user = adminUsers.get(targetId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  user.ghostMode = Boolean(req.body.ghostMode);
+  adminUsers.set(user.id, user);
+  saveAdminUserToSupabase(user).catch(e => console.error('[GhostMode] Supabase save error:', e));
+  res.json({ success: true, ghostMode: user.ghostMode });
 });
 
 // GET /api/conversations?userId=xxx - list conversations for a user
@@ -4876,6 +4973,7 @@ async function loadAdminUsersFromSupabase(): Promise<void> {
           phoneLandline: u.phone_landline || '', phoneMobile: u.phone_mobile || '',
           comments: u.comments || '', photoUrl: u.photo_url || '',
           relationships: u.relationships || [], passwordHash: u.password_hash || undefined,
+          ghostMode: u.ghost_mode || false,
         });
       });
       console.log(`[Supabase] Loaded ${data.length} users from admin_users`);
@@ -4893,6 +4991,7 @@ async function saveAdminUserToSupabase(user: AdminUser): Promise<void> {
       phone_landline: user.phoneLandline || '', phone_mobile: user.phoneMobile || '',
       comments: user.comments || '', photo_url: user.photoUrl || '',
       relationships: user.relationships || [], password_hash: user.passwordHash || null,
+      ghost_mode: user.ghostMode || false,
     });
     if (error) console.error('[Supabase] saveAdminUserToSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] saveAdminUserToSupabase error:', e); }
@@ -4928,6 +5027,8 @@ async function loadAlertsFromSupabase(): Promise<void> {
           photos: a.photos || [],
           responderEscalation: a.responder_escalation || {},
           escalationLevel: a.escalation_level || 0,
+          visibilityRadiusMeters: a.visibility_radius_meters || undefined,
+          revealedUserIds: a.revealed_user_ids || [],
         });
       });
       console.log(`[Supabase] Loaded ${data.length} alerts`);
@@ -4952,6 +5053,8 @@ async function saveAlertToSupabase(alert: Alert): Promise<void> {
       photos: alert.photos || [],
       responder_escalation: alert.responderEscalation || {},
       escalation_level: alert.escalationLevel || 0,
+      visibility_radius_meters: alert.visibilityRadiusMeters || null,
+      revealed_user_ids: alert.revealedUserIds || [],
     });
     if (error) console.error('[Supabase] saveAlertToSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] saveAlertToSupabase error:', e); }

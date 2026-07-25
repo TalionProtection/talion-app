@@ -203,6 +203,11 @@
               <input type="number" id="incidentLng" step="0.000001" placeholder="6.1580">
             </div>
           </div>
+          <div class="form-group">
+            <label>Rayon de révélation (m)</label>
+            <input type="number" id="incidentVisibilityRadius" step="50" min="0" placeholder="500">
+            <span style="font-size:11px;color:var(--text-muted);">Les utilisateurs en mode Ghost dans ce rayon reçoivent une demande de confirmation pour devenir visibles. Laisser vide ou 0 pour ne rien envoyer.</span>
+          </div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="closeCreateIncidentModal()">Cancel</button>

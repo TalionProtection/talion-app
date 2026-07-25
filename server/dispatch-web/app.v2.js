@@ -1120,6 +1120,7 @@ function openCreateIncidentModal() {
   document.getElementById('incidentAddress').value = '';
   document.getElementById('incidentLat').value = '';
   document.getElementById('incidentLng').value = '';
+  document.getElementById('incidentVisibilityRadius').value = '';
   document.getElementById('addressSuggestions').style.display = 'none';
   // Reset active states
   document.querySelectorAll('#incidentTypeOptions .type-btn').forEach(b => b.classList.remove('active'));
@@ -1154,6 +1155,7 @@ async function submitCreateIncident() {
   const address = document.getElementById('incidentAddress').value.trim() || 'Unknown location';
   const lat = parseFloat(document.getElementById('incidentLat').value) || 46.1950;
   const lng = parseFloat(document.getElementById('incidentLng').value) || 6.1580;
+  const visibilityRadiusMeters = parseFloat(document.getElementById('incidentVisibilityRadius').value) || undefined;
 
   try {
     const res = await fetch(`${API_BASE}/dispatch/incidents`, {
@@ -1165,6 +1167,7 @@ async function submitCreateIncident() {
         description,
         location: { latitude: lat, longitude: lng, address },
         createdBy: 'Dispatch Console',
+        visibilityRadiusMeters,
       }),
     });
     const data = await res.json();
