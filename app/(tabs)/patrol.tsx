@@ -17,7 +17,9 @@ import { TalionScreen, TalionBanner } from '@/components/talion-banner';
 import { useAuth } from '@/hooks/useAuth';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
-import { supabase } from '@/lib/auth-context';
+import { authHeader, createPatrolReport, uploadMediaToReport as uploadMedia } from '@/services/patrol-api';
+import { offlineCache } from '@/services/offline-cache';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
 
@@ -51,6 +53,7 @@ interface PatrolReport {
   tasks: PatrolTask[];
   notes?: string;
   media?: PatrolMedia[];
+  escalatedIncidentId?: string;
 }
 
 // Local media item before upload
@@ -80,59 +83,14 @@ const DEFAULT_TASKS = [
 ];
 
 // ─── API Helpers ────────────────────────────────────────────────────────────
-
-// /api/patrol/* requires a valid Supabase bearer token (requireAuth + requireRole('responder'))
-// — fetch a fresh one on every call rather than caching it, since it can expire.
-async function authHeader(): Promise<Record<string, string>> {
-  const { data: { session } } = await supabase.auth.getSession();
-  return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {};
-}
+// Report creation + media upload live in services/patrol-api.ts, shared with the
+// offline-queue retry executor (services/offline-queue-processor.ts) so both paths
+// authenticate and submit identically.
 
 async function apiGet<T>(path: string): Promise<T> {
   const res = await fetchWithTimeout(`${getApiBaseUrl()}${path}`, { timeout: 10000, headers: await authHeader() });
   if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`);
   return res.json();
-}
-
-async function apiPost<T>(path: string, body: any): Promise<T> {
-  const res = await fetchWithTimeout(`${getApiBaseUrl()}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
-    body: JSON.stringify(body),
-    timeout: 10000,
-  });
-  if (!res.ok) throw new Error(`POST ${path} failed: ${res.status}`);
-  return res.json();
-}
-
-async function uploadMediaToReport(reportId: string, media: LocalMedia): Promise<PatrolMedia | null> {
-  try {
-    const formData = new FormData();
-    const ext = media.filename.split('.').pop()?.toLowerCase() || 'jpg';
-    const mimeType = media.type === 'video'
-      ? `video/${ext === 'mov' ? 'quicktime' : ext}`
-      : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
-
-    // React Native FormData expects this shape
-    formData.append('media', {
-      uri: media.uri,
-      name: media.filename,
-      type: mimeType,
-    } as any);
-
-    const res = await fetch(`${getApiBaseUrl()}/api/patrol/reports/${reportId}/media`, {
-      method: 'POST',
-      body: formData,
-      // Don't set Content-Type header; fetch will set it with boundary for multipart
-      headers: await authHeader(),
-    });
-    if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
-    const data = await res.json();
-    return data.media || null;
-  } catch (err) {
-    console.error('[Patrol] Media upload error:', err);
-    return null;
-  }
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -170,7 +128,7 @@ export default function PatrolScreen() {
   const [selectedSite, setSelectedSite] = useState('');
   const [selectedStatus, setSelectedStatus] = useState<PatrolStatus>('habituel');
   const [taskResults, setTaskResults] = useState<Record<string, TaskResult>>({});
-  const [autreComment, setAutreComment] = useState('');
+  const [taskComments, setTaskComments] = useState<Record<string, string>>({});
   const [notes, setNotes] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showSitePicker, setShowSitePicker] = useState(false);
@@ -290,46 +248,59 @@ export default function PatrolScreen() {
     setSelectedSite('');
     setSelectedStatus('habituel');
     setTaskResults({});
-    setAutreComment('');
+    setTaskComments({});
     setNotes('');
     setLocalMedia([]);
   };
 
-  const handleCreate = () => {
+  const handleCreate = async () => {
     resetForm();
     // Pre-fill task results as 'ok'
     const defaults: Record<string, TaskResult> = {};
     DEFAULT_TASKS.forEach(t => { defaults[t.name] = 'ok'; });
     setTaskResults(defaults);
     setView('create');
+
+    // Pre-select the agent's last-used site, if it's still a valid site
+    if (user?.id) {
+      try {
+        const lastSite = await AsyncStorage.getItem(`patrol_last_site_${user.id}`);
+        if (lastSite && sites.includes(lastSite)) {
+          setSelectedSite(lastSite);
+        }
+      } catch { /* ignore */ }
+    }
   };
 
   const handleSubmit = async () => {
     if (!selectedSite) return;
     if (!user?.id) return;
 
+    const tasks: PatrolTask[] = DEFAULT_TASKS.map(t => ({
+      name: t.name,
+      label: t.label,
+      result: taskResults[t.name] || 'ok',
+      ...(taskComments[t.name] ? { comment: taskComments[t.name] } : {}),
+    }));
+
+    const reportDraft = {
+      createdBy: user.id,
+      location: selectedSite,
+      status: selectedStatus,
+      tasks,
+      notes: notes || undefined,
+    };
+    const media = [...localMedia];
+
     setIsSubmitting(true);
     try {
-      const tasks: PatrolTask[] = DEFAULT_TASKS.map(t => ({
-        name: t.name,
-        label: t.label,
-        result: taskResults[t.name] || 'ok',
-        ...(t.name === 'autre' && autreComment ? { comment: autreComment } : {}),
-      }));
+      const report = await createPatrolReport(reportDraft);
+      AsyncStorage.setItem(`patrol_last_site_${user.id}`, selectedSite).catch(() => {});
 
-      const data = await apiPost<{ success: boolean; report: PatrolReport }>('/api/patrol/reports', {
-        createdBy: user.id,
-        location: selectedSite,
-        status: selectedStatus,
-        tasks,
-        notes: notes || undefined,
-      });
-
-      // Upload media attachments if any
-      if (data.report && localMedia.length > 0) {
+      if (media.length > 0) {
         setIsUploading(true);
-        for (const media of localMedia) {
-          await uploadMediaToReport(data.report.id, media);
+        for (const m of media) {
+          await uploadMedia(report.id, m);
         }
         setIsUploading(false);
       }
@@ -342,10 +313,24 @@ export default function PatrolScreen() {
       setView('list');
       resetForm();
     } catch (err) {
-      console.error('[Patrol] Failed to submit report:', err);
+      console.error('[Patrol] Failed to submit report, queuing for retry:', err);
+      // Network/server failure — queue the whole submission (report + pending media)
+      // instead of dropping it. services/offline-queue-processor.ts drains this once
+      // connectivity returns, without re-creating the report if it already succeeded.
+      await offlineCache.enqueueAction('patrol_report', {
+        reportDraft,
+        media,
+        uploadedUris: [],
+      });
+      Alert.alert(
+        'Hors ligne',
+        'Le rapport a été mis en file d\'attente et sera envoyé automatiquement dès que la connexion revient.',
+      );
       if (Platform.OS !== 'web') {
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       }
+      setView('list');
+      resetForm();
     } finally {
       setIsSubmitting(false);
       setIsUploading(false);
@@ -571,14 +556,15 @@ export default function PatrolScreen() {
                   ]}>PAS OK</Text>
                 </TouchableOpacity>
               </View>
-              {/* Comment field for 'autre' task */}
-              {task.name === 'autre' && (
+              {/* Comment field: always for 'autre', and for 'anomalies' once flagged PAS OK
+                  so the detail goes into a structured field instead of the general notes. */}
+              {(task.name === 'autre' || (task.name === 'anomalies' && taskResults[task.name] === 'pas_ok')) && (
                 <TextInput
                   style={styles.autreInput}
                   placeholder="Précisez..."
                   placeholderTextColor="#9ca3af"
-                  value={autreComment}
-                  onChangeText={setAutreComment}
+                  value={taskComments[task.name] || ''}
+                  onChangeText={(text) => setTaskComments(prev => ({ ...prev, [task.name]: text }))}
                   multiline
                   returnKeyType="done"
                 />

@@ -61,6 +61,7 @@ if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 const ALERTS_FILE = path.join(dataDir, 'alerts.json');
 const LOCATION_HISTORY_FILE = path.join(dataDir, 'location-history.json');
 const FAMILY_PERIMETERS_FILE = path.join(dataDir, 'family-perimeters.json');
+const CURFEW_CHECKS_FILE = path.join(dataDir, 'curfew-checks.json');
 const PROXIMITY_ALERTS_FILE = path.join(dataDir, 'proximity-alerts.json');
 const PATROL_REPORTS_FILE = path.join(dataDir, 'patrol-reports.json');
 const PTT_CHANNELS_FILE = path.join(dataDir, 'ptt-channels.json');
@@ -534,6 +535,27 @@ interface FamilyPerimeter {
   updatedAt: number;
 }
 
+// ─── Curfew Check types ────────────────────────────────────────────────
+// A one-off or daily-recurring "alert me if this person hasn't arrived" check.
+// Decoupled from FamilyPerimeter (own center/radius) so it doesn't depend on one
+// existing — the creation UI can prefill from an existing perimeter, though.
+interface CurfewCheck {
+  id: string;
+  ownerId: string;
+  targetUserId: string;
+  targetUserName: string;
+  center: { latitude: number; longitude: number; address?: string };
+  radiusMeters: number;
+  hour: number; // 0-23, wall-clock — needed to recompute the next occurrence if recurring
+  minute: number; // 0-59
+  recurrence: 'once' | 'daily';
+  nextCheckAt: number; // epoch ms of the next scheduled fire
+  active: boolean; // false once a 'once' check has fired, or either kind is cancelled
+  createdAt: number;
+  lastFiredAt?: number;
+  lastResult?: 'inside' | 'outside';
+}
+
 // ─── Patrol Report types ──────────────────────────────────────────────
 type PatrolStatus = 'habituel' | 'inhabituel' | 'identification' | 'suspect' | 'menace' | 'attaque';
 type TaskResult = 'ok' | 'pas_ok';
@@ -564,6 +586,7 @@ interface PatrolReport {
   tasks: PatrolTask[];
   notes?: string;
   media?: PatrolMedia[];
+  escalatedIncidentId?: string; // set once a dispatcher has escalated this report to a real incident
 }
 
 interface ProximityAlert {
@@ -572,7 +595,7 @@ interface ProximityAlert {
   targetUserId: string;
   targetUserName: string;
   ownerId: string;
-  eventType: 'exit' | 'entry';
+  eventType: 'exit' | 'entry' | 'curfew_violation';
   /** Distance from center when alert triggered */
   distanceMeters: number;
   location: { latitude: number; longitude: number };
@@ -632,6 +655,10 @@ const familyPerimeters = new Map<string, FamilyPerimeter>();
 const proximityAlerts: ProximityAlert[] = [];
 // Track which targets are currently outside their perimeter: Map<perimeterId, boolean>
 const perimeterState = new Map<string, boolean>(); // true = outside
+
+// Curfew check storage (persisted) + their scheduled timers (in-memory only)
+const curfewChecks = new Map<string, CurfewCheck>();
+const curfewTimers = new Map<string, ReturnType<typeof setTimeout>>(); // key: check.id
 
 // Patrol reports storage
 const patrolReports: PatrolReport[] = [];
@@ -730,6 +757,14 @@ seedDemoData();
     console.log(`[Persist] Loaded ${savedProxAlerts.length} proximity alerts from disk`);
   }
 
+  // Load persisted curfew checks (scheduling happens in server.listen()'s callback,
+  // once `users` positions can start arriving — see the boot-time rehydration below)
+  const savedCurfewChecks = loadJsonFile<CurfewCheck[]>(CURFEW_CHECKS_FILE, []);
+  savedCurfewChecks.forEach(c => curfewChecks.set(c.id, c));
+  if (savedCurfewChecks.length > 0) {
+    console.log(`[Persist] Loaded ${savedCurfewChecks.length} curfew checks from disk`);
+  }
+
   // Load persisted location history
   const savedHistory = loadJsonFile<Record<string, LocationHistoryEntry[]>>(LOCATION_HISTORY_FILE, {});
   for (const [uid, entries] of Object.entries(savedHistory)) {
@@ -758,6 +793,11 @@ function persistAlerts() {
 function persistPerimeters() {
   debouncedSave(FAMILY_PERIMETERS_FILE, Array.from(familyPerimeters.values()));
   familyPerimeters.forEach(p => saveFamilyPerimeterToSupabase(p));
+}
+
+// Helper: persist curfew checks to disk (debounced)
+function persistCurfewChecks() {
+  debouncedSave(CURFEW_CHECKS_FILE, Array.from(curfewChecks.values()));
 }
 
 // Helper: persist proximity alerts to disk (debounced)
@@ -1240,6 +1280,82 @@ async function sendProximityPush(ownerId: string, alert: ProximityAlert, perimet
       body: JSON.stringify(messages),
     });
   } catch (e) { console.error('[Proximity Push] Error:', e); }
+}
+
+// ─── Curfew Checks ──────────────────────────────────────────────────────
+// One-off or daily "alert me if this person hasn't arrived" checks, modeled on the
+// acceptance-timer pattern (setTimeout-per-entity in a Map) but — unlike acceptance
+// timers — rehydrated on server restart (see server.listen() below), since this is
+// a promise made to the user rather than an internal nudge.
+
+function computeNextOccurrence(hour: number, minute: number, from: number = Date.now()): number {
+  const d = new Date(from);
+  d.setHours(hour, minute, 0, 0);
+  if (d.getTime() <= from) d.setDate(d.getDate() + 1);
+  return d.getTime();
+}
+
+function clearCurfewTimer(id: string) {
+  const t = curfewTimers.get(id);
+  if (t) { clearTimeout(t); curfewTimers.delete(id); }
+}
+
+function scheduleCurfewCheck(check: CurfewCheck) {
+  clearCurfewTimer(check.id);
+  if (!check.active) return;
+  const delay = Math.max(0, check.nextCheckAt - Date.now());
+  curfewTimers.set(check.id, setTimeout(() => fireCurfewCheck(check.id), delay));
+}
+
+async function fireCurfewCheck(id: string) {
+  const check = curfewChecks.get(id);
+  if (!check || !check.active) return;
+
+  const target = users.get(check.targetUserId);
+  let result: 'inside' | 'outside' = 'outside';
+  if (target?.location) {
+    const dist = haversineDistance(check.center.latitude, check.center.longitude, target.location.latitude, target.location.longitude);
+    result = dist <= check.radiusMeters ? 'inside' : 'outside';
+  }
+  check.lastFiredAt = Date.now();
+  check.lastResult = result;
+
+  if (result === 'outside') {
+    sendPushToUser(
+      check.ownerId,
+      '⏰ Couvre-feu non respecté',
+      `${check.targetUserName} n'est pas dans la zone attendue${check.center.address ? ' (' + check.center.address + ')' : ''}.`,
+      { type: 'curfew_check', curfewCheckId: check.id }
+    ).catch(() => {});
+
+    const alert: ProximityAlert = {
+      id: uuidv4(),
+      perimeterId: check.id,
+      targetUserId: check.targetUserId,
+      targetUserName: check.targetUserName,
+      ownerId: check.ownerId,
+      eventType: 'curfew_violation',
+      distanceMeters: target?.location
+        ? Math.round(haversineDistance(check.center.latitude, check.center.longitude, target.location.latitude, target.location.longitude))
+        : -1,
+      location: target?.location || check.center,
+      timestamp: Date.now(),
+      acknowledged: false,
+    };
+    proximityAlerts.unshift(alert);
+    if (proximityAlerts.length > 500) proximityAlerts.length = 500;
+    persistProximityAlerts();
+  }
+  // result === 'inside' → satisfied, stay silent (alert only if NOT arrived)
+
+  if (check.recurrence === 'once') {
+    check.active = false;
+  } else {
+    check.nextCheckAt = computeNextOccurrence(check.hour, check.minute);
+    scheduleCurfewCheck(check);
+  }
+  curfewChecks.set(check.id, check);
+  persistCurfewChecks();
 }
 
 // Location update handler
@@ -2312,6 +2428,7 @@ app.get('/api/family/members', (req, res) => {
         relationship: r.type,
         isSharing,
         lastSeen: runtimeUser?.lastSeen || null,
+        location: runtimeUser?.location || null,
       };
     });
   res.json(members);
@@ -2380,6 +2497,62 @@ app.delete('/api/family/perimeters/:id', (req, res) => {
   if (existed) deleteFamilyPerimeterFromSupabase(req.params.id);
   perimeterState.delete(req.params.id);
   if (existed) persistPerimeters();
+  res.json({ success: existed });
+});
+
+// GET /api/family/curfew-checks - list a user's curfew checks (owner)
+app.get('/api/family/curfew-checks', (req, res) => {
+  const userId = req.query.userId as string;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  const userChecks = Array.from(curfewChecks.values())
+    .filter(c => c.ownerId === userId)
+    .sort((a, b) => b.createdAt - a.createdAt);
+  res.json(userChecks);
+});
+
+// POST /api/family/curfew-checks - create a one-off or daily curfew check
+app.post('/api/family/curfew-checks', (req, res) => {
+  const { ownerId, targetUserId, center, radiusMeters, hour, minute, recurrence } = req.body;
+  if (!ownerId || !targetUserId || !center?.latitude || !center?.longitude || !radiusMeters) {
+    return res.status(400).json({ error: 'ownerId, targetUserId, center {latitude, longitude}, and radiusMeters required' });
+  }
+  if (hour == null || minute == null || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return res.status(400).json({ error: 'hour (0-23) and minute (0-59) required' });
+  }
+  if (recurrence !== 'once' && recurrence !== 'daily') {
+    return res.status(400).json({ error: "recurrence must be 'once' or 'daily'" });
+  }
+  const familyIds = getFamilyMemberIds(ownerId);
+  if (!familyIds.includes(targetUserId)) {
+    return res.status(403).json({ error: 'Target user is not a family member' });
+  }
+  const targetAdmin = adminUsers.get(targetUserId);
+  const check: CurfewCheck = {
+    id: uuidv4(),
+    ownerId,
+    targetUserId,
+    targetUserName: targetAdmin?.name || targetUserId,
+    center: { latitude: center.latitude, longitude: center.longitude, address: center.address || undefined },
+    radiusMeters: Number(radiusMeters),
+    hour: Number(hour),
+    minute: Number(minute),
+    recurrence,
+    nextCheckAt: computeNextOccurrence(Number(hour), Number(minute)),
+    active: true,
+    createdAt: Date.now(),
+  };
+  curfewChecks.set(check.id, check);
+  persistCurfewChecks();
+  scheduleCurfewCheck(check);
+  console.log(`[Curfew] Created ${check.id} for ${check.targetUserName} by ${ownerId} at ${hour}:${String(minute).padStart(2, '0')} (${recurrence})`);
+  res.json(check);
+});
+
+// DELETE /api/family/curfew-checks/:id - cancel a curfew check
+app.delete('/api/family/curfew-checks/:id', (req, res) => {
+  clearCurfewTimer(req.params.id);
+  const existed = curfewChecks.delete(req.params.id);
+  if (existed) persistCurfewChecks();
   res.json({ success: existed });
 });
 
@@ -3885,6 +4058,10 @@ const PATROL_STATUS_CONFIG: Record<PatrolStatus, { label: string; color: string;
   attaque:        { label: 'Attaque',        color: '#000000', severity: 5 },
 };
 
+// Coverage thresholds for the dispatch console's per-site "last patrolled" view
+const PATROL_COVERAGE_WARNING_HOURS = 4;
+const PATROL_COVERAGE_CRITICAL_HOURS = 8;
+
 // GET /api/patrol/sites - list predefined patrol sites
 app.get('/api/patrol/sites', (_req, res) => {
   res.json({ sites: PATROL_SITES });
@@ -4003,6 +4180,9 @@ app.post('/api/patrol/reports', (req, res) => {
 app.get('/api/patrol/reports', (req, res) => {
   const locationFilter = req.query.location as string;
   const statusFilter = req.query.status as string;
+  const agentFilter = (req.query.agent || req.query.createdBy) as string;
+  const from = req.query.from ? Number(req.query.from) : null;
+  const to = req.query.to ? Number(req.query.to) : null;
   const limit = Math.min(Number(req.query.limit) || 100, 500);
 
   // Identity/role come from the authenticated session when present. TEMPORARY: fall back
@@ -4018,7 +4198,17 @@ app.get('/api/patrol/reports', (req, res) => {
   if (statusFilter) {
     filtered = filtered.filter(r => r.status === statusFilter);
   }
-  // Responders only see their own reports; dispatchers/admins see all
+  if (agentFilter) {
+    filtered = filtered.filter(r => r.createdBy === agentFilter);
+  }
+  if (from !== null) {
+    filtered = filtered.filter(r => r.createdAt >= from);
+  }
+  if (to !== null) {
+    filtered = filtered.filter(r => r.createdAt <= to);
+  }
+  // Responders only see their own reports; dispatchers/admins see all — applied last so
+  // agent/date filters above can't be used to widen a responder's own view.
   if (currentRole === 'responder') {
     filtered = filtered.filter(r => r.createdBy === currentUserId);
   }
@@ -4026,11 +4216,75 @@ app.get('/api/patrol/reports', (req, res) => {
   res.json({ reports: filtered.slice(0, limit), total: filtered.length });
 });
 
+// GET /api/patrol/coverage - last patrol time per fixed site, for dispatch oversight
+app.get('/api/patrol/coverage', (_req, res) => {
+  const now = Date.now();
+  const sites = PATROL_SITES.map(location => {
+    const reportsForSite = patrolReports.filter(r => r.location === location);
+    const lastReportAt = reportsForSite.length
+      ? Math.max(...reportsForSite.map(r => r.createdAt))
+      : null;
+    const hoursSince = lastReportAt !== null ? (now - lastReportAt) / (60 * 60 * 1000) : null;
+    const level: 'ok' | 'warning' | 'critical' =
+      hoursSince === null || hoursSince >= PATROL_COVERAGE_CRITICAL_HOURS ? 'critical'
+      : hoursSince >= PATROL_COVERAGE_WARNING_HOURS ? 'warning'
+      : 'ok';
+    return { location, lastReportAt, hoursSince, level };
+  });
+  res.json({ sites });
+});
+
 // GET /api/patrol/reports/:id - get a single patrol report
 app.get('/api/patrol/reports/:id', (req, res) => {
   const report = patrolReports.find(r => r.id === req.params.id);
   if (!report) return res.status(404).json({ error: 'Patrol report not found' });
   res.json(report);
+});
+
+// POST /api/patrol/reports/:id/escalate-to-incident - dispatch escalates a patrol
+// report to a real incident in one round trip (creates the incident + marks the
+// report escalated), so it can't end up created-but-unmarked on a client error.
+app.post('/api/patrol/reports/:id/escalate-to-incident', async (req, res) => {
+  const report = patrolReports.find(r => r.id === req.params.id);
+  if (!report) return res.status(404).json({ error: 'Patrol report not found' });
+  if (report.escalatedIncidentId) {
+    return res.status(400).json({ error: 'Report already escalated', incidentId: report.escalatedIncidentId });
+  }
+
+  const severityConfig = PATROL_STATUS_CONFIG[report.status];
+  const severity: Alert['severity'] =
+    severityConfig.severity >= 5 ? 'critical'
+    : severityConfig.severity >= 4 ? 'high'
+    : severityConfig.severity >= 3 ? 'medium'
+    : 'low';
+
+  const coords = await geocodeAddress(report.location);
+  const location = coords
+    ? { ...coords, address: report.location }
+    : { latitude: 46.1950, longitude: 6.1580, address: report.location }; // same fallback as the console's manual incident creation
+
+  const alert: Alert = {
+    id: await generateIncidentId('other', report.createdByName, location),
+    type: 'other',
+    severity,
+    location,
+    description: `Ronde escaladée — ${severityConfig.label} (rapport ${report.id})`,
+    createdBy: report.createdByName,
+    createdAt: Date.now(),
+    status: 'active',
+    respondingUsers: [],
+  };
+  alerts.set(alert.id, alert);
+  persistAlerts();
+  saveAlertToSupabase(alert).catch(() => {});
+  broadcastMessage({ type: 'newAlert', data: alert });
+  sendPushToDispatchersAndResponders(alert, alert.createdBy).catch(() => {});
+
+  report.escalatedIncidentId = alert.id;
+  persistPatrolReports();
+  addAuditEntry('incident', 'Ronde escaladée', 'Dispatch Console', `Ronde ${report.id} escaladée vers l'incident ${alert.id}`);
+
+  res.json({ success: true, incidentId: alert.id, alert });
 });
 
 // POST /api/patrol/reports/:id/media - upload media (photo/video) to a patrol report
@@ -4569,6 +4823,25 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
     loadMessagesFromSupabase(),
   ]);
   console.log('[Startup] All Supabase data loaded — ready to serve requests');
+
+  // Rehydrate curfew checks: unlike acceptance timers, these must survive a restart
+  // since they're a promise made to the user. Any check whose time already passed
+  // while the server was down fires immediately (late) rather than being silently
+  // dropped; anything still upcoming gets its setTimeout re-armed for the remaining delay.
+  let rehydratedCount = 0;
+  for (const check of curfewChecks.values()) {
+    if (!check.active) continue;
+    rehydratedCount++;
+    if (check.nextCheckAt <= Date.now()) {
+      fireCurfewCheck(check.id).catch(e => console.error('[Curfew] Rehydration fire error:', e));
+    } else {
+      scheduleCurfewCheck(check);
+    }
+  }
+  if (rehydratedCount > 0) {
+    console.log(`[Startup] Rehydrated ${rehydratedCount} active curfew checks`);
+  }
+
   console.log(`WebSocket endpoint: ws://localhost:${PORT}`);
   console.log(`Admin Console: http://localhost:${PORT}/admin-console/`);
   console.log(`Dispatch Console: http://localhost:${PORT}/dispatch-console/`);

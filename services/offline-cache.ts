@@ -21,7 +21,7 @@ export interface CacheEntry<T = any> {
 
 export interface QueuedAction {
   id: string;
-  type: 'sos' | 'message' | 'status_update' | 'location_update';
+  type: 'sos' | 'message' | 'status_update' | 'location_update' | 'patrol_report';
   payload: any;
   createdAt: number;
   retryCount: number;
@@ -268,6 +268,21 @@ class OfflineCacheService {
       await AsyncStorage.setItem(QUEUE_KEY, JSON.stringify(updated));
     } catch (e) {
       console.warn('[OfflineCache] Failed to mark retry:', e);
+    }
+  }
+
+  /**
+   * Overwrite a queued action's payload in place (used to persist partial progress
+   * across retries for multi-step actions, e.g. patrol reports where the report
+   * itself succeeded but a media upload didn't — avoids re-creating it on retry).
+   */
+  async updateActionPayload(actionId: string, payload: any): Promise<void> {
+    try {
+      const queue = await this.getQueue();
+      const updated = queue.map(a => (a.id === actionId ? { ...a, payload } : a));
+      await AsyncStorage.setItem(QUEUE_KEY, JSON.stringify(updated));
+    } catch (e) {
+      console.warn('[OfflineCache] Failed to update action payload:', e);
     }
   }
 

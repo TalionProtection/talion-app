@@ -4308,6 +4308,9 @@ function selectPOI(name, lat, lng) {
 
 let patrolReports = [];
 let patrolFilter = 'all';
+let patrolAgentFilter = '';
+let patrolDateFrom = '';
+let patrolDateTo = '';
 
 const PATROL_STATUS_CONFIG = {
   habituel:       { label: 'Habituel',       color: '#22C55E', textColor: '#fff' },
@@ -4324,12 +4327,39 @@ async function refreshPatrolReports() {
     if (!res.ok) throw new Error('Failed to fetch patrol reports');
     const data = await res.json();
     patrolReports = data.reports || [];
+    populatePatrolAgentFilter();
     renderPatrolReports();
     updatePatrolStats();
     updatePatrolNavBadge();
   } catch (err) {
     console.error('[Patrol] Refresh error:', err);
   }
+  try {
+    const covRes = await fetch(`${API_BASE}/api/patrol/coverage`);
+    if (covRes.ok) {
+      const covData = await covRes.json();
+      renderPatrolCoverage(covData.sites || []);
+    }
+  } catch (err) {
+    console.error('[Patrol] Coverage refresh error:', err);
+  }
+}
+
+function populatePatrolAgentFilter() {
+  const select = document.getElementById('patrolAgentFilter');
+  if (!select) return;
+  const current = select.value;
+  const agents = [...new Set(patrolReports.map(r => r.createdByName || r.createdBy).filter(Boolean))].sort();
+  select.innerHTML = '<option value="">Tous les agents</option>' +
+    agents.map(a => `<option value="${a}">${a}</option>`).join('');
+  if (agents.includes(current)) select.value = current;
+}
+
+function applyPatrolFilters() {
+  patrolAgentFilter = document.getElementById('patrolAgentFilter')?.value || '';
+  patrolDateFrom = document.getElementById('patrolDateFrom')?.value || '';
+  patrolDateTo = document.getElementById('patrolDateTo')?.value || '';
+  renderPatrolReports();
 }
 
 function filterPatrolReports(status) {
@@ -4342,13 +4372,29 @@ function filterPatrolReports(status) {
   renderPatrolReports();
 }
 
+function getFilteredPatrolReports() {
+  let filtered = patrolFilter === 'all'
+    ? patrolReports
+    : patrolReports.filter(r => r.status === patrolFilter);
+  if (patrolAgentFilter) {
+    filtered = filtered.filter(r => (r.createdByName || r.createdBy) === patrolAgentFilter);
+  }
+  if (patrolDateFrom) {
+    const fromTs = new Date(patrolDateFrom + 'T00:00:00').getTime();
+    filtered = filtered.filter(r => r.createdAt >= fromTs);
+  }
+  if (patrolDateTo) {
+    const toTs = new Date(patrolDateTo + 'T23:59:59').getTime();
+    filtered = filtered.filter(r => r.createdAt <= toTs);
+  }
+  return filtered;
+}
+
 function renderPatrolReports() {
   const grid = document.getElementById('patrolReportsGrid');
   if (!grid) return;
 
-  const filtered = patrolFilter === 'all'
-    ? patrolReports
-    : patrolReports.filter(r => r.status === patrolFilter);
+  const filtered = getFilteredPatrolReports();
 
   if (filtered.length === 0) {
     grid.innerHTML = '<div class="empty-state"><p>Aucun rapport de ronde</p></div>';
@@ -4380,6 +4426,51 @@ function renderPatrolReports() {
       </div>
     `;
   }).join('');
+}
+
+function renderPatrolCoverage(sites) {
+  const panel = document.getElementById('patrolCoveragePanel');
+  if (!panel) return;
+  if (!sites.length) { panel.innerHTML = ''; return; }
+
+  const levelColor = { ok: '#22C55E', warning: '#EAB308', critical: '#EF4444' };
+  const levelLabel = { ok: 'OK', warning: 'Attention', critical: 'Critique' };
+
+  panel.innerHTML = `
+    <div class="patrol-coverage-title">Couverture par site</div>
+    <div class="patrol-coverage-grid">
+      ${sites.map(s => {
+        const hoursLabel = s.hoursSince === null ? 'Jamais' : `il y a ${s.hoursSince < 1 ? '<1h' : Math.round(s.hoursSince) + 'h'}`;
+        return `
+        <div class="patrol-coverage-card" style="border-left:4px solid ${levelColor[s.level]}">
+          <div class="patrol-coverage-site">${s.location}</div>
+          <div class="patrol-coverage-status" style="color:${levelColor[s.level]}">${levelLabel[s.level]} — ${hoursLabel}</div>
+        </div>`;
+      }).join('')}
+    </div>
+  `;
+}
+
+function exportPatrolReportsCSV() {
+  const filtered = getFilteredPatrolReports();
+  const header = ['ID', 'Date', 'Site', 'Agent', 'Statut', 'Tâches PAS OK', 'Médias', 'Notes'];
+  const rows = filtered.map(r => {
+    const pasOkTasks = (r.tasks || []).filter(t => t.result === 'pas_ok').map(t => t.label).join('; ');
+    const date = new Date(r.createdAt).toLocaleString('fr-CH');
+    const csvEscape = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    return [r.id, date, r.location, r.createdByName || r.createdBy, r.status, pasOkTasks, (r.media || []).length, r.notes || '']
+      .map(csvEscape).join(',');
+  });
+  const csv = [header.map(h => `"${h}"`).join(','), ...rows].join('\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `rondes_${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 function updatePatrolStats() {
@@ -4483,11 +4574,35 @@ function showPatrolDetail(reportId) {
     `;
   }
 
+  // Escalation to a real incident, for non-routine reports only
+  if (report.status !== 'habituel') {
+    html += report.escalatedIncidentId
+      ? `<div style="margin-top:16px;padding:12px;background:#eff6ff;border-radius:10px;color:#1e3a8a;font-weight:600;">→ Incident ${formatIncidentId(report.escalatedIncidentId)}</div>`
+      : `<button class="btn btn-danger" style="width:100%;margin-top:16px;" onclick="escalatePatrolReport('${report.id}')">&#x1F6A8; Créer un incident</button>`;
+  }
+
   const content = document.getElementById('patrolDetailContent');
   if (content) content.innerHTML = html;
 
   const modal = document.getElementById('patrolDetailModal');
   if (modal) modal.style.display = 'flex';
+}
+
+async function escalatePatrolReport(reportId) {
+  try {
+    const res = await fetch(`${API_BASE}/api/patrol/reports/${reportId}/escalate-to-incident`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      showToast(data.error || 'Échec de l\'escalade', 'error');
+      return;
+    }
+    showToast(`🚨 Incident ${formatIncidentId(data.incidentId)} créé`, 'success');
+    await refreshPatrolReports();
+    showPatrolDetail(reportId);
+  } catch (err) {
+    console.error('[Patrol] Escalation failed:', err);
+    showToast('Échec de l\'escalade', 'error');
+  }
 }
 
 function closePatrolDetailModal() {

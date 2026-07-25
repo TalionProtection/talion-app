@@ -478,12 +478,21 @@
         </div>
         <button class="btn btn-primary" onclick="refreshPatrolReports()">&#x1F504; Rafraîchir</button>
       </div>
+      <div class="toolbar patrol-filter-row">
+        <select id="patrolAgentFilter" class="filter-select" onchange="applyPatrolFilters()">
+          <option value="">Tous les agents</option>
+        </select>
+        <input type="date" id="patrolDateFrom" class="filter-select" onchange="applyPatrolFilters()" title="Du">
+        <input type="date" id="patrolDateTo" class="filter-select" onchange="applyPatrolFilters()" title="Au">
+        <button class="btn btn-secondary" onclick="exportPatrolReportsCSV()">&#x1F4E5; Exporter CSV</button>
+      </div>
       <div class="patrol-stats-row" id="patrolStatsRow">
         <div class="stat-card"><div class="stat-number" id="patrolTotalCount">0</div><div class="stat-label">Total rapports</div></div>
         <div class="stat-card"><div class="stat-number" style="color:#22C55E" id="patrolGreenCount">0</div><div class="stat-label">Habituel</div></div>
         <div class="stat-card"><div class="stat-number" style="color:#EF4444" id="patrolAlertCount">0</div><div class="stat-label">Alertes</div></div>
         <div class="stat-card"><div class="stat-number" style="color:#F97316" id="patrolPasOkCount">0</div><div class="stat-label">Tâches PAS OK</div></div>
       </div>
+      <div class="patrol-coverage-panel" id="patrolCoveragePanel"></div>
       <div class="patrol-reports-grid" id="patrolReportsGrid">
         <div class="empty-state">&#x1F4CB; Aucun rapport de ronde</div>
       </div>

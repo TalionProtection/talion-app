@@ -7,6 +7,14 @@
 
 import { offlineCache, type QueuedAction } from './offline-cache';
 import { getApiBaseUrl } from '@/lib/server-url';
+import { createPatrolReport, uploadMediaToReport, type PatrolReportDraft, type LocalMedia } from './patrol-api';
+
+export interface PatrolReportQueuePayload {
+  reportDraft: PatrolReportDraft;
+  media: LocalMedia[];
+  serverReportId?: string;
+  uploadedUris?: string[];
+}
 
 /**
  * Process a single queued action by sending it to the server.
@@ -70,6 +78,36 @@ async function executeAction(action: QueuedAction): Promise<boolean> {
           body: JSON.stringify(action.payload),
         });
         return res.ok;
+      } catch {
+        return false;
+      }
+    }
+
+    case 'patrol_report': {
+      const payload = action.payload as PatrolReportQueuePayload;
+      try {
+        // Skip re-creating the report if a prior pass already succeeded — the server
+        // has no idempotency key, so retrying the POST would create a duplicate.
+        let reportId = payload.serverReportId;
+        if (!reportId) {
+          const report = await createPatrolReport(payload.reportDraft);
+          reportId = report.id;
+          payload.serverReportId = reportId;
+          await offlineCache.updateActionPayload(action.id, payload);
+        }
+
+        const uploadedUris = payload.uploadedUris || [];
+        const pending = (payload.media || []).filter(m => !uploadedUris.includes(m.uri));
+        for (const media of pending) {
+          const result = await uploadMediaToReport(reportId, media);
+          if (result) {
+            uploadedUris.push(media.uri);
+            payload.uploadedUris = uploadedUris;
+            await offlineCache.updateActionPayload(action.id, payload);
+          }
+        }
+
+        return uploadedUris.length === (payload.media || []).length;
       } catch {
         return false;
       }

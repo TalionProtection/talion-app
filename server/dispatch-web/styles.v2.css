@@ -2245,6 +2245,51 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   margin-left: 6px;
   vertical-align: middle;
 }
+.patrol-filter-row {
+  padding: 0 24px 12px;
+  gap: 10px;
+  align-items: center;
+}
+.filter-select {
+  background: var(--bg-card);
+  border: 1px solid var(--border-main);
+  color: var(--text-primary);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+.patrol-coverage-panel {
+  padding: 0 24px 16px;
+}
+.patrol-coverage-title {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+.patrol-coverage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+.patrol-coverage-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-main);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.patrol-coverage-site {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.patrol-coverage-status {
+  font-size: 12px;
+  font-weight: 600;
+  margin-top: 2px;
+}
 .patrol-stats-row {
   display: flex;
   gap: 12px;

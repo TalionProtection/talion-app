@@ -43,11 +43,27 @@ interface ProximityAlert {
   targetUserId: string;
   targetUserName: string;
   ownerId: string;
-  eventType: 'exit' | 'entry';
+  eventType: 'exit' | 'entry' | 'curfew_violation';
   distanceMeters: number;
   location: { latitude: number; longitude: number };
   timestamp: number;
   acknowledged: boolean;
+}
+
+interface CurfewCheck {
+  id: string;
+  ownerId: string;
+  targetUserId: string;
+  targetUserName: string;
+  center: { latitude: number; longitude: number; address?: string };
+  radiusMeters: number;
+  hour: number;
+  minute: number;
+  recurrence: 'once' | 'daily';
+  nextCheckAt: number;
+  active: boolean;
+  lastFiredAt?: number;
+  lastResult?: 'inside' | 'outside';
 }
 
 interface LocationHistoryEntry {
@@ -67,6 +83,22 @@ function timeAgo(ts: number | null): string {
   if (diff < 86400000) return `Il y a ${Math.floor(diff / 3600000)}h`;
   return `Il y a ${Math.floor(diff / 86400000)}j`;
 }
+
+type Staleness = 'fresh' | 'aging' | 'stale';
+
+function stalenessLevel(ts: number | null): Staleness {
+  if (!ts) return 'stale';
+  const diff = Date.now() - ts;
+  if (diff < 5 * 60 * 1000) return 'fresh';
+  if (diff < 30 * 60 * 1000) return 'aging';
+  return 'stale';
+}
+
+const STALENESS_COLOR: Record<Staleness, string> = {
+  fresh: '#22C55E',
+  aging: '#EAB308',
+  stale: '#9CA3AF',
+};
 
 function formatDate(ts: number): string {
   const d = new Date(ts);
@@ -93,6 +125,7 @@ export default function FamilyScreen() {
   const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<TabKey>('members');
   const [members, setMembers] = useState<FamilyMember[]>([]);
+  const [resolvedAddresses, setResolvedAddresses] = useState<Record<string, string>>({});
   const [perimeters, setPerimeters] = useState<FamilyPerimeter[]>([]);
   const [proxAlerts, setProxAlerts] = useState<ProximityAlert[]>([]);
   const [loading, setLoading] = useState(true);
@@ -111,6 +144,16 @@ export default function FamilyScreen() {
   const [perimeterAddress, setPerimeterAddress] = useState('');
   const [perimeterSaving, setPerimeterSaving] = useState(false);
 
+  // Curfew check creation — shares the address search/GPS/radius state above with
+  // the perimeter modal (the two are never open at the same time).
+  const [curfewChecksList, setCurfewChecksList] = useState<CurfewCheck[]>([]);
+  const [showCreateCurfew, setShowCreateCurfew] = useState(false);
+  const [curfewTarget, setCurfewTarget] = useState<FamilyMember | null>(null);
+  const [curfewHour, setCurfewHour] = useState('21');
+  const [curfewMinute, setCurfewMinute] = useState('00');
+  const [curfewRecurrence, setCurfewRecurrence] = useState<'once' | 'daily'>('once');
+  const [curfewSaving, setCurfewSaving] = useState(false);
+
   // Address autocomplete
   const [addressSuggestions, setAddressSuggestions] = useState<Array<{ display_name: string; lat: string; lon: string }>>([]);
   const [addressSearching, setAddressSearching] = useState(false);
@@ -123,6 +166,25 @@ export default function FamilyScreen() {
 
   // Location context for "Use my position" button
   const locationCtx = useLocation();
+
+  // ─── Reverse-geocode each member's current position for display ───────
+  // Keyed by "userId:lat,lng" (rounded) so a 30s poll that hasn't materially
+  // moved the member doesn't trigger a redundant on-device geocode call.
+  const resolvedKeysRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!locationCtx) return;
+    members.forEach(m => {
+      if (!m.location) return;
+      const key = `${m.userId}:${m.location.latitude.toFixed(4)},${m.location.longitude.toFixed(4)}`;
+      if (resolvedKeysRef.current.has(key)) return;
+      resolvedKeysRef.current.add(key);
+      locationCtx.reverseGeocode(m.location.latitude, m.location.longitude)
+        .then(addr => {
+          if (addr) setResolvedAddresses(prev => ({ ...prev, [m.userId]: addr }));
+        })
+        .catch(() => { /* fall back to raw coordinates in the render */ });
+    });
+  }, [members, locationCtx]);
 
   // ─── Address Autocomplete ──────────────────────────────────────────────
 
@@ -226,17 +288,28 @@ export default function FamilyScreen() {
     }
   }, [BASE, userId]);
 
+  const fetchCurfewChecks = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family/curfew-checks?userId=${userId}`, { timeout: 10000 });
+      const data = await res.json();
+      setCurfewChecksList(Array.isArray(data) ? data : []);
+    } catch (e) {
+      console.error('[Family] Error fetching curfew checks:', e);
+    }
+  }, [BASE, userId]);
+
   const loadAll = useCallback(async () => {
     setLoading(true);
-    await Promise.all([fetchMembers(), fetchPerimeters(), fetchProxAlerts()]);
+    await Promise.all([fetchMembers(), fetchPerimeters(), fetchProxAlerts(), fetchCurfewChecks()]);
     setLoading(false);
-  }, [fetchMembers, fetchPerimeters, fetchProxAlerts]);
+  }, [fetchMembers, fetchPerimeters, fetchProxAlerts, fetchCurfewChecks]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await Promise.all([fetchMembers(), fetchPerimeters(), fetchProxAlerts()]);
+    await Promise.all([fetchMembers(), fetchPerimeters(), fetchProxAlerts(), fetchCurfewChecks()]);
     setRefreshing(false);
-  }, [fetchMembers, fetchPerimeters, fetchProxAlerts]);
+  }, [fetchMembers, fetchPerimeters, fetchProxAlerts, fetchCurfewChecks]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
@@ -245,9 +318,10 @@ export default function FamilyScreen() {
     const interval = setInterval(() => {
       fetchMembers();
       fetchProxAlerts();
+      fetchCurfewChecks();
     }, 30000);
     return () => clearInterval(interval);
-  }, [fetchMembers, fetchProxAlerts]);
+  }, [fetchMembers, fetchProxAlerts, fetchCurfewChecks]);
 
   // ─── Location History ───────────────────────────────────────────────────
 
@@ -351,6 +425,65 @@ export default function FamilyScreen() {
     );
   }, [BASE, fetchPerimeters]);
 
+  // ─── Curfew Check CRUD ──────────────────────────────────────────────────
+
+  const createCurfewCheck = useCallback(async () => {
+    if (!curfewTarget || !userId) return;
+    const radius = parseInt(perimeterRadius, 10);
+    if (isNaN(radius) || radius < 50 || radius > 50000) {
+      Alert.alert('Erreur', 'Le rayon doit être entre 50m et 50km');
+      return;
+    }
+    const hour = parseInt(curfewHour, 10);
+    const minute = parseInt(curfewMinute, 10);
+    if (isNaN(hour) || hour < 0 || hour > 23 || isNaN(minute) || minute < 0 || minute > 59) {
+      Alert.alert('Erreur', 'Heure invalide');
+      return;
+    }
+    const center = perimeterCenter || curfewTarget.location || { latitude: 46.1950, longitude: 6.1580 };
+    setCurfewSaving(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family/curfew-checks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ownerId: userId,
+          targetUserId: curfewTarget.userId,
+          center: { ...center, address: perimeterAddress || undefined },
+          radiusMeters: radius,
+          hour, minute,
+          recurrence: curfewRecurrence,
+        }),
+        timeout: 10000,
+      });
+      if (res.ok) {
+        if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        setShowCreateCurfew(false);
+        setCurfewTarget(null);
+        setPerimeterCenter(null);
+        setPerimeterAddress('');
+        setAddressSuggestions([]);
+        fetchCurfewChecks();
+      } else {
+        const err = await res.json();
+        Alert.alert('Erreur', err.error || 'Impossible de créer l\'alerte');
+      }
+    } catch (e) {
+      Alert.alert('Erreur', 'Erreur réseau');
+    }
+    setCurfewSaving(false);
+  }, [BASE, userId, curfewTarget, perimeterRadius, perimeterCenter, perimeterAddress, curfewHour, curfewMinute, curfewRecurrence, fetchCurfewChecks]);
+
+  const cancelCurfewCheck = useCallback(async (check: CurfewCheck) => {
+    try {
+      await fetchWithTimeout(`${BASE}/api/family/curfew-checks/${check.id}`, { method: 'DELETE', timeout: 10000 });
+      if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      fetchCurfewChecks();
+    } catch (e) {
+      console.error('[Family] Error cancelling curfew check:', e);
+    }
+  }, [BASE, fetchCurfewChecks]);
+
   // ─── Acknowledge Alert ──────────────────────────────────────────────────
 
   const acknowledgeAlert = useCallback(async (alertId: string) => {
@@ -367,7 +500,60 @@ export default function FamilyScreen() {
 
   // ─── Render Helpers ─────────────────────────────────────────────────────
 
-  const renderMemberCard = ({ item }: { item: FamilyMember }) => (
+  // Persistent map above the members list — native only; on web the member cards
+  // below already show a resolved address + freshness, so a redundant fallback
+  // map isn't worth the complexity (family.tsx keeps its web fallbacks simple).
+  const renderFamilyMap = () => {
+    if (!isNativeMap) return null;
+    const withLocation = members.filter(m => m.location);
+    if (withLocation.length === 0) return null;
+
+    const lats = withLocation.map(m => m.location!.latitude);
+    const lngs = withLocation.map(m => m.location!.longitude);
+    const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+    const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
+
+    return (
+      <View style={styles.familyMapContainer}>
+        <NativeMapView
+          initialRegion={{
+            latitude: (minLat + maxLat) / 2,
+            longitude: (minLng + maxLng) / 2,
+            latitudeDelta: Math.max(0.01, (maxLat - minLat) * 1.5),
+            longitudeDelta: Math.max(0.01, (maxLng - minLng) * 1.5),
+          }}
+          showsUserLocation={false}
+          showsMyLocationButton={false}
+          showsCompass={false}
+          style={styles.familyMap}
+        >
+          {withLocation.map(m => (
+            <Marker
+              key={m.userId}
+              coordinate={m.location!}
+              title={m.name}
+              pinColor={STALENESS_COLOR[stalenessLevel(m.lastSeen)]}
+            />
+          ))}
+          {perimeters.filter(p => p.active).map(p => (
+            <Circle
+              key={p.id}
+              center={p.center}
+              radius={p.radiusMeters}
+              fillColor="rgba(30, 58, 95, 0.15)"
+              strokeColor="#1e3a5f"
+              strokeWidth={2}
+            />
+          ))}
+        </NativeMapView>
+      </View>
+    );
+  };
+
+  const renderMemberCard = ({ item }: { item: FamilyMember }) => {
+    const staleness = stalenessLevel(item.lastSeen);
+    const stalenessColor = STALENESS_COLOR[staleness];
+    return (
     <View style={styles.card}>
       <View style={styles.cardHeader}>
         <View style={styles.avatarCircle}>
@@ -387,11 +573,11 @@ export default function FamilyScreen() {
 
       {item.location && (
         <View style={styles.locationRow}>
-          <IconSymbol name="location.fill" size={14} color="#6B7280" />
+          <IconSymbol name="location.fill" size={14} color={stalenessColor} />
           <Text style={styles.locationText}>
-            {item.location.latitude.toFixed(4)}, {item.location.longitude.toFixed(4)}
+            {resolvedAddresses[item.userId] || `${item.location.latitude.toFixed(4)}, ${item.location.longitude.toFixed(4)}`}
           </Text>
-          <Text style={styles.timeText}>{timeAgo(item.lastSeen)}</Text>
+          <Text style={[styles.timeText, { color: stalenessColor }]}>{timeAgo(item.lastSeen)}</Text>
         </View>
       )}
 
@@ -413,9 +599,27 @@ export default function FamilyScreen() {
           <IconSymbol name="plus.circle.fill" size={16} color="#1e3a5f" />
           <Text style={styles.actionBtnText}>Périmètre</Text>
         </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.actionBtn}
+          onPress={() => {
+            const existing = perimeters.find(p => p.targetUserId === item.userId && p.active);
+            setCurfewTarget(item);
+            setPerimeterAddress(existing?.center.address || '');
+            setPerimeterCenter(existing ? { latitude: existing.center.latitude, longitude: existing.center.longitude } : null);
+            setPerimeterRadius(existing ? String(existing.radiusMeters) : '500');
+            setCurfewHour('21');
+            setCurfewMinute('00');
+            setCurfewRecurrence('once');
+            setShowCreateCurfew(true);
+          }}
+        >
+          <IconSymbol name="bell.fill" size={16} color="#1e3a5f" />
+          <Text style={styles.actionBtnText}>Couvre-feu</Text>
+        </TouchableOpacity>
       </View>
     </View>
-  );
+    );
+  };
 
   const renderPerimeterCard = ({ item }: { item: FamilyPerimeter }) => (
     <View style={[styles.card, !item.active && styles.cardInactive]}>
@@ -457,23 +661,26 @@ export default function FamilyScreen() {
 
   const renderAlertCard = ({ item }: { item: ProximityAlert }) => {
     const isExit = item.eventType === 'exit';
+    const isCurfew = item.eventType === 'curfew_violation';
+    const needsAck = isExit || isCurfew;
+    const title = isCurfew
+      ? `${item.targetUserName} n'était pas dans la zone attendue à l'heure du couvre-feu`
+      : `${item.targetUserName} ${isExit ? 'a quitté' : 'est revenu(e) dans'} le périmètre`;
     return (
-      <View style={[styles.card, isExit && !item.acknowledged && styles.cardAlert]}>
+      <View style={[styles.card, needsAck && !item.acknowledged && styles.cardAlert]}>
         <View style={styles.cardHeader}>
-          <View style={[styles.avatarCircle, { backgroundColor: isExit ? '#EF4444' : '#22C55E' }]}>
-            <IconSymbol name={isExit ? 'exclamationmark.triangle.fill' : 'checkmark.circle.fill'} size={18} color="#fff" />
+          <View style={[styles.avatarCircle, { backgroundColor: needsAck ? '#EF4444' : '#22C55E' }]}>
+            <IconSymbol name={needsAck ? 'exclamationmark.triangle.fill' : 'checkmark.circle.fill'} size={18} color="#fff" />
           </View>
           <View style={styles.cardInfo}>
-            <Text style={styles.cardTitle}>
-              {item.targetUserName} {isExit ? 'a quitté' : 'est revenu(e) dans'} le périmètre
-            </Text>
+            <Text style={styles.cardTitle}>{title}</Text>
             <Text style={styles.cardSubtitle}>
-              Distance: {item.distanceMeters}m • {formatDate(item.timestamp)}
+              {item.distanceMeters >= 0 ? `Distance: ${item.distanceMeters}m • ` : ''}{formatDate(item.timestamp)}
             </Text>
           </View>
         </View>
 
-        {isExit && !item.acknowledged && (
+        {needsAck && !item.acknowledged && (
           <TouchableOpacity
             style={styles.ackBtn}
             onPress={() => acknowledgeAlert(item.id)}
@@ -484,6 +691,30 @@ export default function FamilyScreen() {
         {item.acknowledged && (
           <Text style={styles.ackedText}>Accusé de réception envoyé</Text>
         )}
+      </View>
+    );
+  };
+
+  const renderActiveCurfewChecks = () => {
+    const active = curfewChecksList.filter(c => c.active);
+    if (active.length === 0) return null;
+    return (
+      <View style={styles.curfewListSection}>
+        <Text style={styles.curfewListTitle}>Alertes de couvre-feu actives</Text>
+        {active.map(c => (
+          <View key={c.id} style={styles.curfewListItem}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.curfewListName}>{c.targetUserName}</Text>
+              <Text style={styles.curfewListDetail}>
+                {c.recurrence === 'daily' ? 'Tous les jours' : 'Aujourd\'hui'} à {String(c.hour).padStart(2, '0')}:{String(c.minute).padStart(2, '0')}
+                {'  •  '}Prochain contrôle: {formatDate(c.nextCheckAt)}
+              </Text>
+            </View>
+            <TouchableOpacity onPress={() => cancelCurfewCheck(c)}>
+              <IconSymbol name="trash.fill" size={18} color="#EF4444" />
+            </TouchableOpacity>
+          </View>
+        ))}
       </View>
     );
   };
@@ -605,6 +836,7 @@ export default function FamilyScreen() {
               renderItem={renderMemberCard}
               contentContainerStyle={styles.listContent}
               ListEmptyComponent={EmptyMembers}
+              ListHeaderComponent={renderFamilyMap}
               refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#1e3a5f" />}
             />
           )}
@@ -625,6 +857,7 @@ export default function FamilyScreen() {
               renderItem={renderAlertCard}
               contentContainerStyle={styles.listContent}
               ListEmptyComponent={EmptyAlerts}
+              ListHeaderComponent={renderActiveCurfewChecks}
               refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#1e3a5f" />}
             />
           )}
@@ -834,6 +1067,142 @@ export default function FamilyScreen() {
                     <ActivityIndicator color="#fff" />
                   ) : (
                     <Text style={styles.createBtnText}>Créer le périmètre</Text>
+                  )}
+                </TouchableOpacity>
+              </>
+            )}
+          </ScrollView>
+        </View>
+      </Modal>
+
+      {/* Curfew check creation modal */}
+      <Modal visible={showCreateCurfew} animationType="slide" presentationStyle="pageSheet">
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Alerte de couvre-feu</Text>
+            <TouchableOpacity onPress={() => { setShowCreateCurfew(false); setCurfewTarget(null); }}>
+              <IconSymbol name="xmark.circle.fill" size={28} color="#6B7280" />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView style={{ padding: 16 }}>
+            {curfewTarget && (
+              <>
+                <Text style={styles.formHint}>
+                  Sois alerté si {curfewTarget.name} n'est pas dans la zone attendue à l'heure choisie.
+                </Text>
+
+                <Text style={styles.formLabel}>Zone attendue</Text>
+                <TouchableOpacity
+                  style={styles.gpsBtn}
+                  onPress={useMyPosition}
+                  disabled={gpsLoading}
+                >
+                  {gpsLoading ? (
+                    <ActivityIndicator size="small" color="#1e3a5f" />
+                  ) : (
+                    <IconSymbol name="location.fill" size={18} color="#1e3a5f" />
+                  )}
+                  <Text style={styles.gpsBtnText}>
+                    {gpsLoading ? 'Localisation en cours...' : 'Utiliser ma position actuelle'}
+                  </Text>
+                </TouchableOpacity>
+
+                <Text style={styles.formLabel}>Adresse</Text>
+                <View style={{ zIndex: 10 }}>
+                  <View style={styles.addressInputRow}>
+                    <TextInput
+                      style={[styles.textInput, { flex: 1 }]}
+                      value={perimeterAddress}
+                      onChangeText={handleAddressChange}
+                      placeholder="Rechercher une adresse..."
+                      placeholderTextColor="#9CA3AF"
+                      returnKeyType="search"
+                    />
+                    {addressSearching && (
+                      <ActivityIndicator size="small" color="#1e3a5f" style={{ position: 'absolute', right: 12 }} />
+                    )}
+                  </View>
+                  {addressSuggestions.length > 0 && (
+                    <View style={styles.suggestionsContainer}>
+                      {addressSuggestions.map((s, idx) => (
+                        <TouchableOpacity
+                          key={`${s.lat}-${s.lon}-${idx}`}
+                          style={[styles.suggestionItem, idx < addressSuggestions.length - 1 && styles.suggestionBorder]}
+                          onPress={() => selectSuggestion(s)}
+                        >
+                          <Text style={styles.suggestionIcon}>📍</Text>
+                          <Text style={styles.suggestionText} numberOfLines={2}>{s.display_name}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  )}
+                  {perimeterCenter && (
+                    <Text style={styles.formHint}>
+                      ✅ Centre: {perimeterCenter.latitude.toFixed(4)}, {perimeterCenter.longitude.toFixed(4)}
+                    </Text>
+                  )}
+                </View>
+
+                <Text style={styles.formLabel}>Rayon (mètres)</Text>
+                <TextInput
+                  style={styles.textInput}
+                  value={perimeterRadius}
+                  onChangeText={setPerimeterRadius}
+                  placeholder="500"
+                  placeholderTextColor="#9CA3AF"
+                  keyboardType="numeric"
+                  returnKeyType="done"
+                />
+
+                <Text style={styles.formLabel}>Heure limite</Text>
+                <View style={styles.timeStepperRow}>
+                  <TextInput
+                    style={[styles.textInput, styles.timeStepperInput]}
+                    value={curfewHour}
+                    onChangeText={setCurfewHour}
+                    placeholder="21"
+                    placeholderTextColor="#9CA3AF"
+                    keyboardType="numeric"
+                    maxLength={2}
+                  />
+                  <Text style={styles.timeStepperSeparator}>:</Text>
+                  <TextInput
+                    style={[styles.textInput, styles.timeStepperInput]}
+                    value={curfewMinute}
+                    onChangeText={setCurfewMinute}
+                    placeholder="00"
+                    placeholderTextColor="#9CA3AF"
+                    keyboardType="numeric"
+                    maxLength={2}
+                  />
+                </View>
+
+                <Text style={styles.formLabel}>Récurrence</Text>
+                <View style={styles.memberSelector}>
+                  <TouchableOpacity
+                    style={[styles.memberChip, curfewRecurrence === 'once' && styles.memberChipActive]}
+                    onPress={() => setCurfewRecurrence('once')}
+                  >
+                    <Text style={[styles.memberChipText, curfewRecurrence === 'once' && styles.memberChipTextActive]}>Ponctuel (aujourd'hui)</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.memberChip, curfewRecurrence === 'daily' && styles.memberChipActive]}
+                    onPress={() => setCurfewRecurrence('daily')}
+                  >
+                    <Text style={[styles.memberChipText, curfewRecurrence === 'daily' && styles.memberChipTextActive]}>Tous les jours</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <TouchableOpacity
+                  style={[styles.createBtn, curfewSaving && { opacity: 0.6 }]}
+                  onPress={createCurfewCheck}
+                  disabled={curfewSaving}
+                >
+                  {curfewSaving ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={styles.createBtnText}>Créer l'alerte</Text>
                   )}
                 </TouchableOpacity>
               </>
@@ -1174,6 +1543,53 @@ const styles = StyleSheet.create({
   memberChipTextActive: {
     color: '#fff',
   },
+  timeStepperRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  timeStepperInput: {
+    width: 64,
+    textAlign: 'center',
+  },
+  timeStepperSeparator: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#374151',
+  },
+  curfewListSection: {
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 4,
+  },
+  curfewListTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    color: '#6B7280',
+    marginBottom: 8,
+  },
+  curfewListItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F9FAFB',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  curfewListName: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#111827',
+  },
+  curfewListDetail: {
+    fontSize: 12,
+    color: '#6B7280',
+    marginTop: 2,
+  },
   createBtn: {
     marginTop: 24,
     backgroundColor: '#1e3a5f',
@@ -1209,6 +1625,19 @@ const styles = StyleSheet.create({
   miniMapSection: {
     marginTop: 16,
     marginBottom: 8,
+  },
+  familyMapContainer: {
+    height: 220,
+    borderRadius: 12,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    marginHorizontal: 16,
+    marginBottom: 12,
+  },
+  familyMap: {
+    width: '100%',
+    height: '100%',
   },
   miniMapContainer: {
     height: 200,
