@@ -24,7 +24,7 @@
     "@react-navigation/native": "^7.1.8",
     "@supabase/supabase-js": "^2.103.0",
     "@types/multer": "^2.1.0",
-    "axios": "^1.13.6",
+    "axios": "^1.18.1",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
     "expo": "~54.0.33",
@@ -79,6 +79,11 @@
     "tsx": "^4.21.0",
     "typescript": "~5.9.2",
     "vitest": "^4.1.1"
+  },
+  "pnpm": {
+    "overrides": {
+      "form-data@>=4.0.0 <4.0.6": ">=4.0.6"
+    }
   },
   "private": true
 }
