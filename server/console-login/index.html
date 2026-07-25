@@ -229,30 +229,7 @@
         <input type="password" id="password" placeholder="Enter your password" autocomplete="current-password">
       </div>
 
-      <div class="form-group">
-        <label>Console</label>
-      </div>
-      <div class="role-cards">
-        <div class="role-card" data-role="admin" onclick="selectRole('admin')">
-          <div class="role-icon">&#x1F6E1;</div>
-          <div class="role-name">Admin</div>
-          <div class="role-desc">User & system management</div>
-        </div>
-        <div class="role-card" data-role="dispatcher" onclick="selectRole('dispatcher')">
-          <div class="role-icon">&#x1F4E1;</div>
-          <div class="role-name">Dispatch</div>
-          <div class="role-desc">Incident & unit control</div>
-        </div>
-      </div>
-
       <button class="btn-login" id="loginBtn" onclick="handleLogin()" disabled>Sign In</button>
-
-      <div class="divider">or quick access</div>
-
-      <div class="quick-access">
-        <button class="quick-btn" onclick="quickAccess('admin')">&#x1F6E1; Admin Console</button>
-        <button class="quick-btn" onclick="quickAccess('dispatcher')">&#x1F4E1; Dispatch Console</button>
-      </div>
     </div>
 
     <div class="footer">
@@ -261,67 +238,65 @@
   </div>
 
   <script>
-    let selectedRole = null;
-
-    function selectRole(role) {
-      selectedRole = role;
-      document.querySelectorAll('.role-card').forEach(c => c.classList.remove('selected'));
-      document.querySelector(`.role-card[data-role="${role}"]`).classList.add('selected');
-      updateLoginBtn();
-    }
-
     function updateLoginBtn() {
       const email = document.getElementById('email').value.trim();
       const password = document.getElementById('password').value.trim();
-      document.getElementById('loginBtn').disabled = !(email && password && selectedRole);
+      document.getElementById('loginBtn').disabled = !(email && password);
     }
 
     document.getElementById('email').addEventListener('input', updateLoginBtn);
     document.getElementById('password').addEventListener('input', updateLoginBtn);
 
-    function handleLogin() {
+    async function handleLogin() {
       const email = document.getElementById('email').value.trim();
       const password = document.getElementById('password').value.trim();
       const errorEl = document.getElementById('errorMsg');
+      const btn = document.getElementById('loginBtn');
 
-      if (!email || !password || !selectedRole) {
-        errorEl.textContent = 'Please fill in all fields and select a console.';
-        errorEl.style.display = 'block';
-        return;
-      }
-
-      // Demo validation: check email contains role keyword
-      const emailLower = email.toLowerCase();
-      const isAdmin = emailLower.includes('admin');
-      const isDispatcher = emailLower.includes('dispatch');
-
-      if (selectedRole === 'admin' && !isAdmin) {
-        errorEl.textContent = 'Access denied. Admin email required (e.g., admin@talion.io).';
-        errorEl.style.display = 'block';
-        return;
-      }
-
-      if (selectedRole === 'dispatcher' && !isDispatcher && !isAdmin) {
-        errorEl.textContent = 'Access denied. Dispatcher email required (e.g., dispatch@talion.io).';
+      if (!email || !password) {
+        errorEl.textContent = 'Please fill in all fields.';
         errorEl.style.display = 'block';
         return;
       }
 
       errorEl.style.display = 'none';
+      btn.disabled = true;
+      btn.textContent = 'Signing in…';
 
-      // Redirect to appropriate console
-      if (selectedRole === 'admin') {
-        window.location.href = '/admin-console/';
-      } else {
-        window.location.href = '/dispatch-v2/';
-      }
-    }
+      try {
+        const res = await fetch('/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          errorEl.textContent = data.error || 'Invalid email or password.';
+          errorEl.style.display = 'block';
+          btn.disabled = false;
+          btn.textContent = 'Sign In';
+          return;
+        }
 
-    function quickAccess(role) {
-      if (role === 'admin') {
-        window.location.href = '/admin-console/';
-      } else {
-        window.location.href = '/dispatch-v2/';
+        localStorage.setItem('talion_token', data.token);
+        localStorage.setItem('talion_role', data.user.role);
+        localStorage.setItem('talion_user', JSON.stringify(data.user));
+
+        if (data.user.role === 'admin') {
+          window.location.href = '/admin-console/';
+        } else if (data.user.role === 'dispatcher') {
+          window.location.href = '/dispatch-v2/';
+        } else {
+          errorEl.textContent = "Ce compte n'a pas accès à une console (rôle: " + data.user.role + ").";
+          errorEl.style.display = 'block';
+          btn.disabled = false;
+          btn.textContent = 'Sign In';
+        }
+      } catch (e) {
+        errorEl.textContent = 'Connection error. Please try again.';
+        errorEl.style.display = 'block';
+        btn.disabled = false;
+        btn.textContent = 'Sign In';
       }
     }
 

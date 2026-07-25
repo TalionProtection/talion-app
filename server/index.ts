@@ -7,7 +7,7 @@ import path from 'path';
 import bcrypt from 'bcryptjs';
 import multer from 'multer';
 import fs from 'fs';
-import { requireAuth, requireRole } from './auth-middleware';
+import { requireAuth, requireRole, optionalAuth } from './auth-middleware';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 
 // ─── Supabase Admin Client (singleton) ───────────────────────────────────
@@ -28,6 +28,22 @@ app.use(express.json({ limit: '50mb' }));
 if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
   console.warn('[Auth] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set — auth middleware disabled');
 }
+
+// ─── Stage 1 auth rollout: attach req.supabaseUser when a valid token is present,
+// but never block the request — lets us confirm via logs that the consoles are
+// sending real tokens before switching these route groups to requireAuth/requireRole. ───
+async function optionalAuthLogged(req: express.Request, res: express.Response, next: express.NextFunction) {
+  await optionalAuth(req, res, () => {
+    if (!req.supabaseUser) {
+      console.warn(`[Auth][Stage1] No valid token on ${req.method} ${req.originalUrl}`);
+    }
+    next();
+  });
+}
+app.use('/dispatch', optionalAuthLogged);
+app.use('/alerts', optionalAuthLogged);
+app.use('/api/conversations', optionalAuthLogged);
+app.use('/api/patrol', optionalAuthLogged);
 
 // ─── Resolve project root (works from server/ in dev and dist/ in prod) ───
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -344,7 +360,7 @@ interface LoginHistoryEntry {
   ip: string;
   userAgent: string;
   device: string; // parsed from user-agent
-  status: 'success' | 'failed_password' | 'failed_email' | 'account_deactivated' | 'account_suspended' | 'no_password';
+  status: 'success' | 'failed_password' | 'failed_email' | 'account_deactivated' | 'account_suspended' | 'no_password' | 'supabase_sync_failed';
 }
 
 // Global login history store
@@ -1395,7 +1411,7 @@ function broadcastUserStatus(userId: string, status: 'online' | 'offline') {
 }
 
 // ─── REST API endpoints ────────────────────────────────────────────// ─── Authentication ───────────────────────────────────────────────────────
-app.post('/auth/login', (req, res) => {
+app.post('/auth/login', async (req, res) => {
   const { email, password } = req.body;
   const ip = (req.headers['x-forwarded-for'] as string || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
   const userAgent = req.headers['user-agent'] || 'unknown';
@@ -1425,6 +1441,35 @@ app.post('/auth/login', (req, res) => {
     addLoginHistory({ userId: user.id, userName: user.name, email, timestamp: Date.now(), ip, userAgent, status: 'failed_password' });
     return res.status(401).json({ error: 'Invalid email or password' });
   }
+
+  // Local password check passed — now obtain a real, verifiable Supabase Auth JWT
+  // (requireAuth validates tokens via supabase.auth.getUser, not the local bcrypt hash).
+  let accessToken: string | null = null;
+  try {
+    const { data: signInData, error: signInError } = await supabaseAdmin.auth.signInWithPassword({ email, password });
+    if (!signInError && signInData.session) {
+      accessToken = signInData.session.access_token;
+    } else {
+      // Supabase Auth identity missing or password drifted from the local bcrypt hash
+      // (e.g. changed via PUT /admin/users/:id, which only updates the local hash) — self-heal.
+      const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(user.id, { password });
+      if (!updateError) {
+        const { data: retryData, error: retryError } = await supabaseAdmin.auth.signInWithPassword({ email, password });
+        if (!retryError && retryData.session) {
+          accessToken = retryData.session.access_token;
+          addAuditEntry('auth', 'Supabase Auth Re-sync', user.name, `Password re-synced to Supabase Auth for ${email} after drift detected`, user.id);
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[Login] Supabase Auth sign-in error:', e);
+  }
+
+  if (!accessToken) {
+    addLoginHistory({ userId: user.id, userName: user.name, email, timestamp: Date.now(), ip, userAgent, status: 'supabase_sync_failed' });
+    return res.status(401).json({ error: "Compte non synchronisé avec Supabase Auth. Contactez un administrateur." });
+  }
+
   // Success
   addLoginHistory({ userId: user.id, userName: user.name, email, timestamp: Date.now(), ip, userAgent, status: 'success' });
   user.lastLogin = Date.now();
@@ -1434,7 +1479,7 @@ app.post('/auth/login', (req, res) => {
   res.json({
     success: true,
     user: safeUser,
-    token: `session-${user.id}-${Date.now()}`,
+    token: accessToken,
   });
 });
 

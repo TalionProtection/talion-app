@@ -11,6 +11,26 @@ const API_BASE = (() => {
   }
   return origin;
 })();
+
+// ─── Auth: attach the console session token to every same-origin fetch, and
+// bounce back to login on a 401 (token missing/expired/invalid). ───────────
+(() => {
+  const _rawFetch = window.fetch.bind(window);
+  window.fetch = (input, init = {}) => {
+    const token = localStorage.getItem('talion_token');
+    const headers = new Headers(init.headers || (typeof input === 'object' && input.headers) || {});
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+    return _rawFetch(input, { ...init, headers }).then(res => {
+      if (res.status === 401) {
+        localStorage.removeItem('talion_token');
+        localStorage.removeItem('talion_role');
+        window.location.href = '/console/';
+      }
+      return res;
+    });
+  };
+})();
+
 let incidents = [];
 let responders = [];
 let broadcastHistory = [];
