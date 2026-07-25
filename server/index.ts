@@ -1425,10 +1425,12 @@ function handleLocationUpdate(ws: any, userId: string, userRole: string, locatio
   checkFamilyPerimeters(userId, locationData);
 
   // Broadcast to dispatchers - use appropriate event type based on role
+  const userName = adminUsers.get(userId)?.name || userId;
   if (user.role === 'responder') {
     broadcastToRole('dispatcher', {
       type: 'responderLocationUpdate',
       userId,
+      name: userName,
       location: locationData,
       timestamp: Date.now(),
     });
@@ -1436,6 +1438,7 @@ function handleLocationUpdate(ws: any, userId: string, userRole: string, locatio
     broadcastToRole('admin', {
       type: 'responderLocationUpdate',
       userId,
+      name: userName,
       location: locationData,
       timestamp: Date.now(),
     });
@@ -1446,7 +1449,7 @@ function handleLocationUpdate(ws: any, userId: string, userRole: string, locatio
     // confirmed visibility for a currently active incident.
     const isGhosted = adminUsers.get(userId)?.ghostMode && !isRevealedForActiveIncident(userId);
     if (!isGhosted) {
-      const msg = { type: 'userLocationUpdate', userId, location: locationData, timestamp: Date.now() };
+      const msg = { type: 'userLocationUpdate', userId, name: userName, location: locationData, timestamp: Date.now() };
       broadcastToRole('dispatcher', msg);
       broadcastToRole('admin', msg);
     }

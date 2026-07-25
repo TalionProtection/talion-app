@@ -334,6 +334,7 @@ function handleWsMessage(msg) {
       if (resp) {
         resp.location = msg.location;
         resp.lastSeen = msg.timestamp || now;
+        if (msg.name) resp.name = msg.name;
         renderOverview();
         renderResponders();
       }
@@ -360,10 +361,12 @@ function handleWsMessage(msg) {
         if (existingUser) {
           existingUser.location = msg.location;
           existingUser.lastSeen = msg.timestamp || now;
+          // Self-heal a stub entry (created before the server sent a name) once a real one arrives
+          if (msg.name) existingUser.name = msg.name;
         } else {
           mapUsers.push({
             id: msg.userId,
-            name: msg.userId,
+            name: msg.name || msg.userId,
             role: 'user',
             status: 'active',
             location: msg.location,
@@ -375,7 +378,7 @@ function handleWsMessage(msg) {
         if (typeof updateUserMarkers === 'function' && dispatchMap) {
           updateUserMarkers(mapUsers);
         }
-        showToast(`\uD83D\uDCCD ${msg.userId} shared their location`, 'info');
+        showToast(`\uD83D\uDCCD ${msg.name || msg.userId} shared their location`, 'info');
         updateLiveUsersCounter();
       }
       break;
