@@ -7,7 +7,7 @@ import path from 'path';
 import bcrypt from 'bcryptjs';
 import multer from 'multer';
 import fs from 'fs';
-import { requireAuth, requireRole, optionalAuth } from './auth-middleware';
+import { requireAuth, requireRole } from './auth-middleware';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 
 // ─── Supabase Admin Client (singleton) ───────────────────────────────────
@@ -29,21 +29,22 @@ if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
   console.warn('[Auth] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set — auth middleware disabled');
 }
 
-// ─── Stage 1 auth rollout: attach req.supabaseUser when a valid token is present,
-// but never block the request — lets us confirm via logs that the consoles are
-// sending real tokens before switching these route groups to requireAuth/requireRole. ───
-async function optionalAuthLogged(req: express.Request, res: express.Response, next: express.NextFunction) {
-  await optionalAuth(req, res, () => {
-    if (!req.supabaseUser) {
-      console.warn(`[Auth][Stage1] No valid token on ${req.method} ${req.originalUrl}`);
-    }
-    next();
-  });
-}
-app.use('/dispatch', optionalAuthLogged);
-app.use('/alerts', optionalAuthLogged);
-app.use('/api/conversations', optionalAuthLogged);
-app.use('/api/patrol', optionalAuthLogged);
+// ─── Stage 2 auth rollout: real enforcement. Confirmed via Stage 1 logs that
+// real admin/dispatcher console sessions send valid tokens; mobile app clients
+// already send real Supabase JWTs today (services/api.ts, lib/auth-context.tsx).
+// - /dispatch/*        : console-only (no mobile caller for any route in this
+//                        group) — dispatcher level.
+// - /api/messaging/*   : dispatch console's own conversations alias, separate
+//                        from /api/conversations — dispatcher level.
+// - /api/patrol/*      : mobile responders + admin console — responder level.
+// - /api/conversations/*: messaging used by every role — any authenticated user.
+// - /alerts/*          : mixed — baseline any authenticated user, with the
+//                        stricter dispatcher/responder routes tightened below.
+app.use('/dispatch', requireAuth, requireRole('dispatcher'));
+app.use('/api/messaging', requireAuth, requireRole('dispatcher'));
+app.use('/api/patrol', requireAuth, requireRole('responder'));
+app.use('/api/conversations', requireAuth);
+app.use('/alerts', requireAuth);
 
 // ─── Resolve project root (works from server/ in dev and dist/ in prod) ───
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -1768,8 +1769,8 @@ app.get('/alerts', (req, res) => {
   res.json(visibleAlerts);
 });
 
-app.get('/alerts/:id', (req, res) => {
-  const alert = alerts.get(req.params.id);
+app.get('/alerts/:id', requireRole('dispatcher'), (req, res) => {
+  const alert = alerts.get(req.params.id as string);
   if (!alert) return res.status(404).json({ error: 'Alert not found' });
   // Return full alert with responding user details (enriched with names)
   const respondingDetails = alert.respondingUsers.map(uid => {
@@ -1804,8 +1805,8 @@ app.put('/alerts/:id', (req, res) => {
   res.json({ success: true });
 });
 
-app.put('/alerts/:id/acknowledge', (req, res) => {
-  const alert = alerts.get(req.params.id);
+app.put('/alerts/:id/acknowledge', requireRole('dispatcher'), (req, res) => {
+  const alert = alerts.get(req.params.id as string);
   if (!alert) return res.status(404).json({ error: 'Alert not found' });
   alert.status = 'acknowledged';
   alerts.set(alert.id, alert);
@@ -1816,8 +1817,8 @@ app.put('/alerts/:id/acknowledge', (req, res) => {
 });
 
 // Mobile app: resolve alert
-app.put('/alerts/:id/resolve', (req, res) => {
-  const alert = alerts.get(req.params.id);
+app.put('/alerts/:id/resolve', requireRole('dispatcher'), (req, res) => {
+  const alert = alerts.get(req.params.id as string);
   if (!alert) return res.status(404).json({ error: 'Alert not found' });
   alert.status = 'resolved';
   alerts.set(alert.id, alert);
@@ -3027,17 +3028,18 @@ app.put('/dispatch/incidents/:id/resolve', (req, res) => {
 });
 
 // Responder: update their response status on an incident (accept, en_route, on_scene)
-app.put('/alerts/:id/respond', (req, res) => {
+app.put('/alerts/:id/respond', requireRole('responder'), (req, res) => {
+  const alertIdParam = req.params.id as string;
   // Try direct lookup first, then try decoded variants
-  let alert = alerts.get(req.params.id);
+  let alert = alerts.get(alertIdParam);
   if (!alert) {
     // Try decoding the ID (handles em dash and special chars)
-    try { alert = alerts.get(decodeURIComponent(req.params.id)); } catch(e) {}
+    try { alert = alerts.get(decodeURIComponent(alertIdParam)); } catch(e) {}
   }
   if (!alert) {
     // Try finding by partial match (last resort)
     for (const [key, val] of alerts) {
-      if (key.includes(req.params.id) || req.params.id.includes(key)) { alert = val; break; }
+      if (key.includes(alertIdParam) || alertIdParam.includes(key)) { alert = val; break; }
     }
   }
   if (!alert) return res.status(404).json({ error: 'Incident not found' });
@@ -3890,9 +3892,9 @@ app.get('/api/patrol/statuses', (_req, res) => {
 
 // POST /api/patrol/reports - create a new patrol report
 app.post('/api/patrol/reports', (req, res) => {
-  const { createdBy, location, status, tasks, notes } = req.body;
-  if (!createdBy || !location || !status || !tasks) {
-    return res.status(400).json({ error: 'createdBy, location, status, and tasks are required' });
+  const { location, status, tasks, notes } = req.body;
+  if (!location || !status || !tasks) {
+    return res.status(400).json({ error: 'location, status, and tasks are required' });
   }
 
   // Validate status
@@ -3900,10 +3902,12 @@ app.post('/api/patrol/reports', (req, res) => {
     return res.status(400).json({ error: `Invalid status. Must be one of: ${Object.keys(PATROL_STATUS_CONFIG).join(', ')}` });
   }
 
-  // Validate role: only responders can create patrol reports
+  // Author is derived from the authenticated session (requireRole('responder') already
+  // enforced above via the /api/patrol prefix) — never trust a client-supplied id here.
+  const createdBy = req.supabaseUser!.id;
   const user = adminUsers.get(createdBy);
-  if (!user || (user.role !== 'responder' && user.role !== 'dispatcher' && user.role !== 'admin')) {
-    return res.status(403).json({ error: 'Only responders, dispatchers, and admins can create patrol reports' });
+  if (!user) {
+    return res.status(404).json({ error: 'User profile not found' });
   }
 
   const report: PatrolReport = {
@@ -3987,19 +3991,13 @@ app.post('/api/patrol/reports', (req, res) => {
 
 // GET /api/patrol/reports - list patrol reports (restricted to responders, dispatchers, admins)
 app.get('/api/patrol/reports', (req, res) => {
-  const userId = req.query.userId as string;
-  const role = req.query.role as string;
   const locationFilter = req.query.location as string;
   const statusFilter = req.query.status as string;
   const limit = Math.min(Number(req.query.limit) || 100, 500);
 
-  // Access control: only responders, dispatchers, and admins
-  if (userId) {
-    const user = adminUsers.get(userId);
-    if (user && user.role === 'user') {
-      return res.status(403).json({ error: 'Regular users cannot access patrol reports' });
-    }
-  }
+  // Identity/role come from the authenticated session (requireRole('responder') already
+  // enforced above via the /api/patrol prefix) — never trust client-supplied query params here.
+  const { id: currentUserId, role: currentRole } = req.supabaseUser!;
 
   let filtered = [...patrolReports];
   if (locationFilter) {
@@ -4009,8 +4007,8 @@ app.get('/api/patrol/reports', (req, res) => {
     filtered = filtered.filter(r => r.status === statusFilter);
   }
   // Responders only see their own reports; dispatchers/admins see all
-  if (role === 'responder' && userId) {
-    filtered = filtered.filter(r => r.createdBy === userId);
+  if (currentRole === 'responder') {
+    filtered = filtered.filter(r => r.createdBy === currentUserId);
   }
 
   res.json({ reports: filtered.slice(0, limit), total: filtered.length });
