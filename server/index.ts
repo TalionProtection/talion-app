@@ -59,78 +59,170 @@ function saveJsonFile(filePath: string, data: any): void {
   } catch (e) { console.error(`[Persist] Failed to save ${filePath}:`, e); }
 }
 
-// ─── Acceptance Timer System (5-minute timeout) ────────────────────────
-const ACCEPTANCE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-const acceptanceTimers = new Map<string, ReturnType<typeof setTimeout>>(); // key: `alertId:responderId`
+// ─── Acceptance Timer System (2-minute soft nudge, 5-minute hard escalation) ────
+const ACCEPTANCE_SOFT_TIMEOUT_MS = 2 * 60 * 1000; // tier 1: soft nudge to dispatch + suggested backup
+const ACCEPTANCE_HARD_TIMEOUT_MS = 5 * 60 * 1000; // tier 2: hard escalation (unchanged user-facing timing)
+interface AcceptanceTimerHandles {
+  soft: ReturnType<typeof setTimeout> | null;
+  hard: ReturnType<typeof setTimeout> | null;
+}
+const acceptanceTimers = new Map<string, AcceptanceTimerHandles>(); // key: `alertId:responderId`
+
+const INCIDENT_TYPE_LABELS: Record<string, string> = {
+  sos: 'SOS', medical: 'Médical', fire: 'Incendie', security: 'Sécurité',
+  accident: 'Accident', broadcast: 'Broadcast', other: 'Autre',
+  home_jacking: 'Home-Jacking', cambriolage: 'Cambriolage',
+  animal_perdu: 'Animal perdu', evenement_climatique: 'Événement climatique',
+  rodage: 'Rodage', vehicule_suspect: 'Véhicule suspect', fugue: 'Fugue',
+  route_bloquee: 'Route bloquée', route_fermee: 'Route fermée',
+};
 
 function startAcceptanceTimer(alertId: string, responderId: string) {
   const timerKey = `${alertId}:${responderId}`;
-  // Clear any existing timer for this assignment
-  const existing = acceptanceTimers.get(timerKey);
-  if (existing) clearTimeout(existing);
+  clearAcceptanceTimer(alertId, responderId); // clear any existing pair for this assignment first
 
-  const timer = setTimeout(() => {
+  const soft = setTimeout(() => {
+    const handles = acceptanceTimers.get(timerKey);
+    if (handles) handles.soft = null;
+    handleSoftEscalation(alertId, responderId);
+  }, ACCEPTANCE_SOFT_TIMEOUT_MS);
+
+  const hard = setTimeout(() => {
     acceptanceTimers.delete(timerKey);
-    const alert = alerts.get(alertId);
-    if (!alert) return;
-    // Check if responder has already accepted
-    const currentStatus = alert.responderStatuses?.[responderId];
-    if (currentStatus && currentStatus !== 'assigned') return; // Already accepted/en_route/on_scene
-    // Responder has NOT accepted within 5 minutes — notify dispatchers
-    const responderName = adminUsers.get(responderId)?.name || responderId;
-    console.log(`[AcceptanceTimer] ${responderName} did not accept incident ${alertId} within 5 minutes`);
-    // Add to status history
-    if (!alert.statusHistory) alert.statusHistory = [];
-    alert.statusHistory.push({
-      responderId,
-      responderName,
-      status: 'assigned', // still assigned, but timed out
-      timestamp: Date.now(),
-    });
-    // Add audit entry
-    addAuditEntry('incident', 'Acceptance Timeout', 'System', `${responderName} n'a pas accepté l'incident ${alertId} dans les 5 minutes`, responderId);
-    // Send push notification to all dispatchers
-    const TYPE_LABELS: Record<string, string> = {
-      sos: 'SOS', medical: 'Médical', fire: 'Incendie', security: 'Sécurité',
-      accident: 'Accident', broadcast: 'Broadcast', other: 'Autre',
-      home_jacking: 'Home-Jacking', cambriolage: 'Cambriolage',
-      animal_perdu: 'Animal perdu', evenement_climatique: 'Événement climatique',
-      rodage: 'Rodage', vehicule_suspect: 'Véhicule suspect', fugue: 'Fugue',
-      route_bloquee: 'Route bloquée', route_fermee: 'Route fermée',
-    };
-    const typeLabel = TYPE_LABELS[alert.type] || alert.type;
-    const notifiedDispatchers = new Set<string>();
-    for (const [_token, entry] of pushTokens) {
-      if ((entry.userRole === 'dispatcher' || entry.userRole === 'admin') && !notifiedDispatchers.has(entry.userId)) {
-        notifiedDispatchers.add(entry.userId);
-        sendPushToUser(
-          entry.userId,
-          `⏰ Délai d'acceptation dépassé`,
-          `${responderName} n'a pas accepté l'incident ${typeLabel} (${alertId}) dans les 5 minutes. Veuillez réassigner.`,
-          { type: 'acceptance_timeout', alertId, responderId }
-        ).catch(() => {});
-      }
-    }
-    // Broadcast WebSocket event for real-time console update
-    broadcastMessage({
-      type: 'acceptanceTimeout',
-      alertId,
-      responderId,
-      responderName,
-      timestamp: Date.now(),
-    });
-  }, ACCEPTANCE_TIMEOUT_MS);
+    handleHardEscalation(alertId, responderId);
+  }, ACCEPTANCE_HARD_TIMEOUT_MS);
 
-  acceptanceTimers.set(timerKey, timer);
+  acceptanceTimers.set(timerKey, { soft, hard });
 }
 
 function clearAcceptanceTimer(alertId: string, responderId: string) {
   const timerKey = `${alertId}:${responderId}`;
-  const timer = acceptanceTimers.get(timerKey);
-  if (timer) {
-    clearTimeout(timer);
+  const handles = acceptanceTimers.get(timerKey);
+  if (handles) {
+    if (handles.soft) clearTimeout(handles.soft);
+    if (handles.hard) clearTimeout(handles.hard);
     acceptanceTimers.delete(timerKey);
   }
+}
+
+// Tier 1 (2 min): responder still hasn't accepted — notify dispatch only (never the responder or a
+// backup candidate) with a suggested replacement, so a human can decide to reassign.
+function handleSoftEscalation(alertId: string, responderId: string) {
+  const alert = alerts.get(alertId);
+  if (!alert) return;
+  const currentStatus = alert.responderStatuses?.[responderId];
+  if (currentStatus && currentStatus !== 'assigned') return; // Already accepted/en_route/on_scene
+
+  const responderName = adminUsers.get(responderId)?.name || responderId;
+  console.log(`[AcceptanceTimer] ${responderName} did not accept incident ${alertId} within 2 minutes (soft)`);
+
+  if (!alert.responderEscalation) alert.responderEscalation = {};
+  alert.responderEscalation[responderId] = 1;
+  recomputeEscalationLevel(alert);
+  alerts.set(alertId, alert);
+  persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[SoftEscalation] Supabase save error:', e));
+
+  const backup = computeNearbyResponders(alert).find(r => r.suggested) || null;
+  const backupNote = backup
+    ? ` Suggestion: ${backup.name} (${backup.distanceLabel}${backup.etaLabel ? ', ETA ' + backup.etaLabel : ''}).`
+    : '';
+
+  addAuditEntry(
+    'incident',
+    'Escalade Niveau 1 (Soft)',
+    'System',
+    `${responderName} n'a pas encore accepté l'incident ${alertId} après 2 minutes.${backupNote}`,
+    responderId
+  );
+
+  const typeLabel = INCIDENT_TYPE_LABELS[alert.type] || alert.type;
+  const notifiedDispatchers = new Set<string>();
+  for (const [_token, entry] of pushTokens) {
+    if ((entry.userRole === 'dispatcher' || entry.userRole === 'admin') && !notifiedDispatchers.has(entry.userId)) {
+      notifiedDispatchers.add(entry.userId);
+      sendPushToUser(
+        entry.userId,
+        `⚠️ Pas encore accepté (2 min) — ${responderName}`,
+        `Incident ${typeLabel} (${alertId}) : ${responderName} n'a pas encore accepté.${backupNote}`,
+        { type: 'escalation_soft', alertId, responderId, suggestedBackupId: backup?.id }
+      ).catch(() => {});
+    }
+  }
+
+  broadcastMessage({
+    type: 'escalationSoft',
+    alertId,
+    responderId,
+    responderName,
+    suggestedBackup: backup ? {
+      id: backup.id, name: backup.name, distanceLabel: backup.distanceLabel,
+      etaMinutes: backup.etaMinutes, etaLabel: backup.etaLabel,
+    } : null,
+    escalationLevel: alert.escalationLevel,
+    timestamp: Date.now(),
+  });
+
+  broadcastMessage({
+    type: 'alertUpdate',
+    data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) },
+  });
+}
+
+// Tier 2 (5 min): responder still hasn't accepted — existing hard-timeout behavior, unchanged,
+// plus bumping the alert's escalation state so the dispatch UI reflects it.
+function handleHardEscalation(alertId: string, responderId: string) {
+  const alert = alerts.get(alertId);
+  if (!alert) return;
+  // Check if responder has already accepted
+  const currentStatus = alert.responderStatuses?.[responderId];
+  if (currentStatus && currentStatus !== 'assigned') return; // Already accepted/en_route/on_scene
+  // Responder has NOT accepted within 5 minutes — notify dispatchers
+  const responderName = adminUsers.get(responderId)?.name || responderId;
+  console.log(`[AcceptanceTimer] ${responderName} did not accept incident ${alertId} within 5 minutes`);
+  // Add to status history
+  if (!alert.statusHistory) alert.statusHistory = [];
+  alert.statusHistory.push({
+    responderId,
+    responderName,
+    status: 'assigned', // still assigned, but timed out
+    timestamp: Date.now(),
+  });
+  // Add audit entry
+  addAuditEntry('incident', 'Acceptance Timeout', 'System', `${responderName} n'a pas accepté l'incident ${alertId} dans les 5 minutes`, responderId);
+  // Send push notification to all dispatchers
+  const typeLabel = INCIDENT_TYPE_LABELS[alert.type] || alert.type;
+  const notifiedDispatchers = new Set<string>();
+  for (const [_token, entry] of pushTokens) {
+    if ((entry.userRole === 'dispatcher' || entry.userRole === 'admin') && !notifiedDispatchers.has(entry.userId)) {
+      notifiedDispatchers.add(entry.userId);
+      sendPushToUser(
+        entry.userId,
+        `⏰ Délai d'acceptation dépassé`,
+        `${responderName} n'a pas accepté l'incident ${typeLabel} (${alertId}) dans les 5 minutes. Veuillez réassigner.`,
+        { type: 'acceptance_timeout', alertId, responderId }
+      ).catch(() => {});
+    }
+  }
+  // Broadcast WebSocket event for real-time console update
+  broadcastMessage({
+    type: 'acceptanceTimeout',
+    alertId,
+    responderId,
+    responderName,
+    timestamp: Date.now(),
+  });
+
+  if (!alert.responderEscalation) alert.responderEscalation = {};
+  alert.responderEscalation[responderId] = 2;
+  recomputeEscalationLevel(alert);
+  alerts.set(alertId, alert);
+  persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[HardEscalation] Supabase save error:', e));
+  broadcastMessage({
+    type: 'alertUpdate',
+    data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) },
+  });
 }
 
 // Debounced save to avoid excessive disk writes
@@ -332,6 +424,8 @@ interface Alert {
   responderStatuses?: Record<string, ResponderStatus>; // per-responder status tracking
   statusHistory?: StatusHistoryEntry[]; // timestamped history of all status changes
   photos?: string[]; // array of relative URLs e.g. ['/uploads/xxx.jpg']
+  responderEscalation?: Record<string, 0 | 1 | 2>; // escalation tier reached per pending assignment
+  escalationLevel?: 0 | 1 | 2; // max of responderEscalation, drives dispatch UI sort/style
 }
 
 interface AdminIncident {
@@ -662,6 +756,12 @@ function persistLocationHistory() {
   debouncedSave(LOCATION_HISTORY_FILE, obj, 5000); // longer debounce for frequent updates
 }
 
+// ─── Helper: recompute an alert's overall escalation level from per-responder state ───
+function recomputeEscalationLevel(alert: Alert): void {
+  const levels = Object.values(alert.responderEscalation || {});
+  alert.escalationLevel = (levels.length ? Math.max(...levels) : 0) as 0 | 1 | 2;
+}
+
 // ─── Helper: add audit entry ─────────────────────────────────────────
 function addAuditEntry(category: AuditEntry['category'], action: string, performedBy: string, details: string, targetUser?: string) {
   auditLog.unshift({
@@ -915,6 +1015,21 @@ function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: numbe
   const dLon = (lon2 - lon1) * Math.PI / 180;
   const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// ─── ETA estimate (straight-line distance × road-distance factor ÷ assumed speed) ───
+const ETA_ROAD_DISTANCE_FACTOR = 1.3; // straight-line → approximate real road distance
+const ETA_AVERAGE_SPEED_KMH = 32; // assumed effective average speed (urban, incl. stops/traffic)
+const ETA_MIN_MINUTES = 1; // floor so very-close responders don't show "0 min"
+
+function estimateEtaMinutes(distanceMeters: number): number {
+  const roadDistanceKm = (distanceMeters / 1000) * ETA_ROAD_DISTANCE_FACTOR;
+  const minutes = (roadDistanceKm / ETA_AVERAGE_SPEED_KMH) * 60;
+  return Math.max(ETA_MIN_MINUTES, Math.round(minutes));
+}
+
+function formatEtaLabel(minutes: number | null): string | null {
+  return minutes == null ? null : `~${minutes} min`;
 }
 
 // Check geofence entry/exit for a responder
@@ -2690,6 +2805,11 @@ app.put('/dispatch/incidents/:id/assign', (req, res) => {
   if (responderId && !alert.responderStatuses[responderId]) {
     alert.responderStatuses[responderId] = 'assigned';
   }
+  if (responderId) {
+    if (!alert.responderEscalation) alert.responderEscalation = {};
+    alert.responderEscalation[responderId] = 0;
+    recomputeEscalationLevel(alert);
+  }
   const responderName = adminUsers.get(responderId)?.name || responderId;
   // Record assignment in status history
   alert.statusHistory.push({
@@ -2746,6 +2866,10 @@ app.put('/dispatch/incidents/:id/unassign', (req, res) => {
   // Clear acceptance timer and remove from responderStatuses
   clearAcceptanceTimer(alert.id, responderId);
   if (alert.responderStatuses) delete alert.responderStatuses[responderId];
+  if (alert.responderEscalation) {
+    delete alert.responderEscalation[responderId];
+    recomputeEscalationLevel(alert);
+  }
   alerts.set(alert.id, alert);
   persistAlerts();
   const responderName = adminUsers.get(responderId)?.name || responderId;
@@ -2758,14 +2882,30 @@ app.put('/dispatch/incidents/:id/unassign', (req, res) => {
   res.json({ success: true, responderName });
 });
 
-// Dispatch: get responders with distance to a specific incident (for assign modal)
-app.get('/dispatch/incidents/:id/responders-nearby', (req, res) => {
-  const alert = alerts.get(req.params.id);
-  if (!alert) return res.status(404).json({ error: 'Incident not found' });
+// Statuses considered eligible for one-click assignment/suggestion in the dispatch UI
+const NEARBY_AVAILABLE_STATUSES = new Set(['available', 'on_duty', 'responding']);
+
+interface NearbyResponderInfo {
+  id: string;
+  name: string;
+  phone: string;
+  tags: string[];
+  status: string;
+  isConnected: boolean;
+  isAssigned: boolean;
+  distanceMeters: number | null;
+  distanceLabel: string;
+  etaMinutes: number | null;
+  etaLabel: string | null;
+  suggested: boolean;
+}
+
+// Responders eligible to be assigned to an incident, sorted (assigned first, then distance, then name)
+// with the nearest available unassigned candidate flagged as `suggested`.
+function computeNearbyResponders(alert: Alert): NearbyResponderInfo[] {
   const incidentLat = alert.location.latitude;
   const incidentLng = alert.location.longitude;
-  const now = Date.now();
-  const result: any[] = [];
+  const result: NearbyResponderInfo[] = [];
 
   adminUsers.forEach((user) => {
     if (user.role !== 'responder') return;
@@ -2774,15 +2914,14 @@ app.get('/dispatch/incidents/:id/responders-nearby', (req, res) => {
     const location = runtimeUser?.location || null;
     let distanceMeters: number | null = null;
     let distanceLabel = 'Position inconnue';
+    let etaMinutes: number | null = null;
+    let etaLabel: string | null = null;
     if (location && location.latitude && location.longitude) {
       distanceMeters = haversineDistance(location.latitude, location.longitude, incidentLat, incidentLng);
-      if (distanceMeters < 1000) {
-        distanceLabel = `${Math.round(distanceMeters)} m`;
-      } else {
-        distanceLabel = `${(distanceMeters / 1000).toFixed(1)} km`;
-      }
+      distanceLabel = distanceMeters < 1000 ? `${Math.round(distanceMeters)} m` : `${(distanceMeters / 1000).toFixed(1)} km`;
+      etaMinutes = estimateEtaMinutes(distanceMeters);
+      etaLabel = formatEtaLabel(etaMinutes);
     }
-    const isAssigned = alert.respondingUsers.includes(user.id);
     result.push({
       id: user.id,
       name: user.name,
@@ -2790,9 +2929,12 @@ app.get('/dispatch/incidents/:id/responders-nearby', (req, res) => {
       tags: user.tags || [],
       status: runtimeUser?.status || responderStatusOverrides.get(user.id)?.status || 'off_duty',
       isConnected: !!runtimeUser,
-      isAssigned,
+      isAssigned: alert.respondingUsers.includes(user.id),
       distanceMeters,
       distanceLabel,
+      etaMinutes,
+      etaLabel,
+      suggested: false,
     });
   });
 
@@ -2805,7 +2947,24 @@ app.get('/dispatch/incidents/:id/responders-nearby', (req, res) => {
     return a.name.localeCompare(b.name);
   });
 
-  res.json({ incidentId: alert.id, incidentAddress: alert.location.address, responders: result });
+  const candidate = result.find(r => !r.isAssigned && NEARBY_AVAILABLE_STATUSES.has(r.status) && r.distanceMeters !== null);
+  if (candidate) candidate.suggested = true;
+
+  return result;
+}
+
+// Dispatch: get responders with distance/ETA to a specific incident (for assign modal)
+app.get('/dispatch/incidents/:id/responders-nearby', (req, res) => {
+  const alert = alerts.get(req.params.id);
+  if (!alert) return res.status(404).json({ error: 'Incident not found' });
+  const result = computeNearbyResponders(alert);
+  const suggested = result.find(r => r.suggested) || null;
+  res.json({
+    incidentId: alert.id,
+    incidentAddress: alert.location.address,
+    responders: result,
+    suggestedResponderId: suggested ? suggested.id : null,
+  });
 });
 
 // Dispatch: resolve incident
@@ -2813,6 +2972,8 @@ app.put('/dispatch/incidents/:id/resolve', (req, res) => {
   const alert = alerts.get(req.params.id);
   if (!alert) return res.status(404).json({ error: 'Incident not found' });
   alert.status = 'resolved';
+  // Stop any pending soft/hard escalation timers so a resolved incident can't keep "escalating"
+  (alert.respondingUsers || []).forEach(uid => clearAcceptanceTimer(alert.id, uid));
   alerts.set(alert.id, alert);
   persistAlerts();
   addAuditEntry('incident', 'Incident Resolved', 'Dispatch Console', `Resolved ${alert.id}: ${alert.type} at ${alert.location.address}`);
@@ -2850,6 +3011,10 @@ app.put('/alerts/:id/respond', (req, res) => {
   alert.responderStatuses[responderId] = status;
   // Clear acceptance timer when responder accepts or moves to any status beyond 'assigned'
   clearAcceptanceTimer(alert.id, responderId);
+  if (alert.responderEscalation) {
+    delete alert.responderEscalation[responderId];
+    recomputeEscalationLevel(alert);
+  }
   const responderName = adminUsers.get(responderId)?.name || responderId;
   // Record status change in history
   alert.statusHistory.push({
@@ -4425,6 +4590,8 @@ async function loadAlertsFromSupabase(): Promise<void> {
           responderStatuses: a.responder_statuses || {},
           statusHistory: a.status_history || [],
           photos: a.photos || [],
+          responderEscalation: a.responder_escalation || {},
+          escalationLevel: a.escalation_level || 0,
         });
       });
       console.log(`[Supabase] Loaded ${data.length} alerts`);
@@ -4447,6 +4614,8 @@ async function saveAlertToSupabase(alert: Alert): Promise<void> {
       responder_statuses: alert.responderStatuses || {},
       status_history: alert.statusHistory || [],
       photos: alert.photos || [],
+      responder_escalation: alert.responderEscalation || {},
+      escalation_level: alert.escalationLevel || 0,
     });
     if (error) console.error('[Supabase] saveAlertToSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] saveAlertToSupabase error:', e); }

@@ -136,6 +136,8 @@ function handleWsMessage(msg) {
         photos: alert.photos || [],
         responderStatuses: alert.responderStatuses || {},
         statusHistory: alert.statusHistory || [],
+        responderEscalation: alert.responderEscalation || {},
+        escalationLevel: alert.escalationLevel || 0,
       };
       if (existing >= 0) { incidents[existing] = formatted; } else { incidents.unshift(formatted); }
       showToast(`🚨 New Incident: ${alert.type.toUpperCase()} - ${alert.location?.address || 'Unknown'}`, 'error');
@@ -173,6 +175,8 @@ function handleWsMessage(msg) {
         respondingDetails: alert.respondingDetails || [],
         responderStatuses: alert.responderStatuses || {},
         statusHistory: alert.statusHistory || [],
+        responderEscalation: alert.responderEscalation || {},
+        escalationLevel: alert.escalationLevel || 0,
       };
       if (idx >= 0) { incidents[idx] = formatted; } else { incidents.unshift(formatted); }
       showToast(`\ud83d\udccb Incident ${formatIncidentId(alert.id)} mis \u00e0 jour`, 'info');
@@ -204,6 +208,22 @@ function handleWsMessage(msg) {
       break;
     }
 
+    case 'escalationSoft': {
+      const respName = msg.responderName || msg.responderId;
+      const backup = msg.suggestedBackup;
+      const backupNote = backup ? ` — Suggestion: ${backup.name} (${backup.distanceLabel}${backup.etaLabel ? ', ETA ' + backup.etaLabel : ''})` : '';
+      showToast(`⚠️ ${respName} n'a pas encore accepté ${formatIncidentId(msg.alertId)} (2 min)${backupNote}`, 'warning');
+      sendBrowserNotification(
+        "Pas encore accepté (2 min)",
+        `${respName} — ${formatIncidentId(msg.alertId)}${backupNote}`,
+        'warning',
+        `esc-soft-${msg.alertId}-${msg.responderId}`
+      );
+      playAlertSound();
+      updateAll();
+      break;
+    }
+
     case 'patrolAlert': {
       const pr = msg.data;
       const sc = PATROL_STATUS_CONFIG[pr.status] || { label: pr.status, color: '#ef4444' };
@@ -227,6 +247,8 @@ function handleWsMessage(msg) {
             respondingDetails: alert.respondingDetails || [],
             responderStatuses: alert.responderStatuses || {},
             statusHistory: alert.statusHistory || [],
+            responderEscalation: alert.responderEscalation || {},
+            escalationLevel: alert.escalationLevel || 0,
           };
           if (idx >= 0) { incidents[idx] = formatted; } else { incidents.push(formatted); }
         });
@@ -692,7 +714,7 @@ function renderOverview() {
   const container = document.getElementById('overviewIncidents');
   const activeIncs = incidents
     .filter(i => i.status !== 'resolved')
-    .sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 3) - (SEVERITY_ORDER[b.severity] ?? 3) || b.timestamp - a.timestamp);
+    .sort((a, b) => ((b.escalationLevel || 0) - (a.escalationLevel || 0)) || ((SEVERITY_ORDER[a.severity] ?? 3) - (SEVERITY_ORDER[b.severity] ?? 3)) || (b.timestamp - a.timestamp));
 
   if (activeIncs.length === 0) {
     container.innerHTML = '<div class="ov-empty"><div class="ov-empty-icon">\u2705</div><div class="ov-empty-text">Aucun incident actif</div></div>';
@@ -700,8 +722,14 @@ function renderOverview() {
     container.innerHTML = activeIncs.map(inc => {
       const assignedCount = inc.assignedCount || (inc.respondingNames || []).length || 0;
       const assignedLabel = assignedCount > 0 ? `<span class="ov-inc-assigned">${assignedCount} unit\u00e9${assignedCount > 1 ? 's' : ''}</span>` : '<span class="ov-inc-unassigned">Non assign\u00e9</span>';
+      const escClass = inc.escalationLevel === 2 ? ' escalated-hard' : inc.escalationLevel === 1 ? ' escalated-soft' : '';
+      const escBadge = inc.escalationLevel === 2
+        ? '<span class="badge badge-escalated-hard">\u23f0 Escalade N2</span>'
+        : inc.escalationLevel === 1
+          ? '<span class="badge badge-escalated">\u23f0 Escalade N1</span>'
+          : '';
       return `
-      <div class="ov-inc-card sev-${inc.severity}" onclick="openDetailModal('${inc.id}')">
+      <div class="ov-inc-card sev-${inc.severity}${escClass}" onclick="openDetailModal('${inc.id}')">
         <div class="ov-inc-icon">${TYPE_ICONS[inc.type] || '\ud83d\udea8'}</div>
         <div class="ov-inc-body">
           <div class="ov-inc-top">
@@ -714,6 +742,7 @@ function renderOverview() {
             <div class="ov-inc-badges">
               <span class="badge badge-${inc.severity}">${sevLabel(inc.severity)}</span>
               <span class="badge badge-${inc.status}">${statusLabel(inc.status)}</span>
+              ${escBadge}
               ${assignedLabel}
             </div>
             <div class="ov-inc-actions">
@@ -767,7 +796,7 @@ function renderIncidents() {
   } else {
     filtered = incidents.filter(i => i.status === currentFilter);
   }
-  filtered.sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 3) - (SEVERITY_ORDER[b.severity] ?? 3) || b.timestamp - a.timestamp);
+  filtered.sort((a, b) => ((b.escalationLevel || 0) - (a.escalationLevel || 0)) || ((SEVERITY_ORDER[a.severity] ?? 3) - (SEVERITY_ORDER[b.severity] ?? 3)) || (b.timestamp - a.timestamp));
 
   if (filtered.length === 0) {
     container.innerHTML = '<div class="empty-state"><div class="empty-icon">✅</div><p>No incidents matching this filter</p></div>';
@@ -779,9 +808,15 @@ function renderIncidents() {
     const assignedChips = names.length > 0
       ? `<div class="inc-assigned"><span class="inc-assigned-label">Assign\u00e9s:</span>${names.map(n => `<span class="assigned-chip assigned-name-chip">${n}</span>`).join('')}</div>`
       : (inc.assignedCount > 0 ? `<div class="inc-assigned"><span class="inc-assigned-label">Assign\u00e9s:</span><span class="assigned-chip">${inc.assignedCount} responder(s)</span></div>` : '');
+    const escClass = inc.escalationLevel === 2 ? ' escalated-hard' : inc.escalationLevel === 1 ? ' escalated-soft' : '';
+    const escBadge = inc.escalationLevel === 2
+      ? '<span class="badge badge-escalated-hard">\u23f0 Escalade N2</span>'
+      : inc.escalationLevel === 1
+        ? '<span class="badge badge-escalated">\u23f0 Escalade N1</span>'
+        : '';
 
     return `
-      <div class="incident-card sev-${inc.severity}" style="cursor:pointer;" onclick="openDetailModal('${inc.id}')">
+      <div class="incident-card sev-${inc.severity}${escClass}" style="cursor:pointer;" onclick="openDetailModal('${inc.id}')">
         <div class="inc-header">
           <div class="inc-header-left">
             <span class="inc-type-icon">${TYPE_ICONS[inc.type] || '🚨'}</span>
@@ -792,6 +827,7 @@ function renderIncidents() {
           <div class="inc-badges">
             <span class="badge badge-${inc.severity}">${sevLabel(inc.severity)}</span>
             <span class="badge badge-${inc.status}">${statusLabel(inc.status)}</span>
+            ${escBadge}
           </div>
         </div>
         <div class="inc-desc">Signal\u00e9 par: ${inc.reportedBy}${(inc.photos && inc.photos.length > 0) ? ` \u00b7 \ud83d\udcf7 ${inc.photos.length} photo${inc.photos.length > 1 ? 's' : ''}` : ''}</div>
@@ -1178,6 +1214,17 @@ async function openAssignModal(incidentId) {
 
     if (notAssigned.length > 0) {
       html += '<div class="assign-section-label">Responders disponibles</div>';
+      const suggested = notAssigned.find(r => r.suggested);
+      if (suggested) {
+        html += `<div class="assign-suggested-banner">
+          <div class="assign-suggested-info">
+            <span class="assign-suggested-star">\u2B50</span>
+            <span class="assign-suggested-name">${suggested.name}</span>
+            <span class="assign-suggested-meta">\uD83D\uDCCD ${suggested.distanceLabel}${suggested.etaLabel ? ' \u00B7 \u23F1 ' + suggested.etaLabel : ''}</span>
+          </div>
+          <button class="btn btn-success btn-sm" onclick="event.stopPropagation(); assignResponder('${incidentId}', '${suggested.id}')">Assigner le plus proche \u2192</button>
+        </div>`;
+      }
       html += notAssigned.map(r => {
         const statusLabels = { available: 'Disponible', on_duty: 'En service', responding: 'En intervention', off_duty: 'Hors service' };
         const statusLabel = statusLabels[r.status] || r.status;
@@ -1186,13 +1233,16 @@ async function openAssignModal(incidentId) {
         const tagsHtml = (r.tags || []).slice(0, 3).map(t => `<span class="resp-tag">${t}</span>`).join('');
         const phoneHtml = r.phone ? `<span class="resp-phone">\uD83D\uDCF1 ${r.phone}</span>` : '';
         const distHtml = r.distanceLabel ? `<span class="resp-distance">\uD83D\uDCCD ${r.distanceLabel}</span>` : '';
+        const etaHtml = r.etaLabel ? `<span class="resp-eta">\u23F1 ${r.etaLabel}</span>` : '';
+        const suggestedBadge = r.suggested ? `<span class="resp-suggested-badge">\u2B50 Sugg\u00E9r\u00E9</span>` : '';
         const isAvailable = r.status === 'available' || r.status === 'on_duty' || r.status === 'responding';
         const clickAttr = isAvailable ? `onclick="assignResponder('${incidentId}', '${r.id}')"` : '';
         const disabledClass = isAvailable ? '' : ' disabled';
-        return `<div class="resp-option${disabledClass}" ${clickAttr}>
+        const rowClass = `resp-option${disabledClass}${r.suggested ? ' suggested' : ''}`;
+        return `<div class="${rowClass}" ${clickAttr}>
           <div class="resp-dot ${statusClass}"></div>
           <div class="resp-opt-info">
-            <div class="resp-opt-name">${connIcon} ${r.name} ${distHtml}</div>
+            <div class="resp-opt-name">${connIcon} ${r.name} ${distHtml} ${etaHtml} ${suggestedBadge}</div>
             <div class="resp-opt-detail">${statusLabel}${phoneHtml}</div>
             ${tagsHtml ? `<div class="resp-opt-tags">${tagsHtml}</div>` : ''}
           </div>
