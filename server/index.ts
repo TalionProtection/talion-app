@@ -7,7 +7,7 @@ import path from 'path';
 import bcrypt from 'bcryptjs';
 import multer from 'multer';
 import fs from 'fs';
-import { requireAuth, requireRole } from './auth-middleware';
+import { requireAuth, requireRole, optionalAuth } from './auth-middleware';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 
 // ─── Supabase Admin Client (singleton) ───────────────────────────────────
@@ -42,7 +42,12 @@ if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
 //                        stricter dispatcher/responder routes tightened below.
 app.use('/dispatch', requireAuth, requireRole('dispatcher'));
 app.use('/api/messaging', requireAuth, requireRole('dispatcher'));
-app.use('/api/patrol', requireAuth, requireRole('responder'));
+// TEMPORARY ROLLBACK (see patrol-report routes below for the matching fallback logic):
+// the mobile app's patrol.tsx never sent an Authorization header, so requireRole('responder')
+// here 401'd every real patrol submission as soon as this landed. Reverted to non-blocking
+// until the mobile app fix (auth header added) has shipped and propagated to field agents —
+// re-enable `requireAuth, requireRole('responder')` once confirmed.
+app.use('/api/patrol', optionalAuth);
 app.use('/api/conversations', requireAuth);
 app.use('/alerts', requireAuth);
 
@@ -3902,9 +3907,14 @@ app.post('/api/patrol/reports', (req, res) => {
     return res.status(400).json({ error: `Invalid status. Must be one of: ${Object.keys(PATROL_STATUS_CONFIG).join(', ')}` });
   }
 
-  // Author is derived from the authenticated session (requireRole('responder') already
-  // enforced above via the /api/patrol prefix) — never trust a client-supplied id here.
-  const createdBy = req.supabaseUser!.id;
+  // Author is derived from the authenticated session when present. TEMPORARY: the
+  // /api/patrol prefix is currently non-blocking (see app.use above) while the mobile
+  // app fix propagates, so fall back to the client-supplied id for old app versions
+  // that send no token — remove this fallback once requireAuth is re-enabled there.
+  const createdBy = req.supabaseUser?.id || req.body.createdBy;
+  if (!createdBy) {
+    return res.status(400).json({ error: 'createdBy is required' });
+  }
   const user = adminUsers.get(createdBy);
   if (!user) {
     return res.status(404).json({ error: 'User profile not found' });
@@ -3995,9 +4005,11 @@ app.get('/api/patrol/reports', (req, res) => {
   const statusFilter = req.query.status as string;
   const limit = Math.min(Number(req.query.limit) || 100, 500);
 
-  // Identity/role come from the authenticated session (requireRole('responder') already
-  // enforced above via the /api/patrol prefix) — never trust client-supplied query params here.
-  const { id: currentUserId, role: currentRole } = req.supabaseUser!;
+  // Identity/role come from the authenticated session when present. TEMPORARY: fall back
+  // to client-supplied query params for old app versions while /api/patrol is non-blocking
+  // (see app.use above) — remove this fallback once requireAuth is re-enabled there.
+  const currentUserId = req.supabaseUser?.id || (req.query.userId as string);
+  const currentRole = req.supabaseUser?.role || (req.query.role as string);
 
   let filtered = [...patrolReports];
   if (locationFilter) {

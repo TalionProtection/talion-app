@@ -17,6 +17,7 @@ import { TalionScreen, TalionBanner } from '@/components/talion-banner';
 import { useAuth } from '@/hooks/useAuth';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
+import { supabase } from '@/lib/auth-context';
 import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
 
@@ -80,8 +81,15 @@ const DEFAULT_TASKS = [
 
 // ─── API Helpers ────────────────────────────────────────────────────────────
 
+// /api/patrol/* requires a valid Supabase bearer token (requireAuth + requireRole('responder'))
+// — fetch a fresh one on every call rather than caching it, since it can expire.
+async function authHeader(): Promise<Record<string, string>> {
+  const { data: { session } } = await supabase.auth.getSession();
+  return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {};
+}
+
 async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetchWithTimeout(`${getApiBaseUrl()}${path}`, { timeout: 10000 });
+  const res = await fetchWithTimeout(`${getApiBaseUrl()}${path}`, { timeout: 10000, headers: await authHeader() });
   if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`);
   return res.json();
 }
@@ -89,7 +97,7 @@ async function apiGet<T>(path: string): Promise<T> {
 async function apiPost<T>(path: string, body: any): Promise<T> {
   const res = await fetchWithTimeout(`${getApiBaseUrl()}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
     body: JSON.stringify(body),
     timeout: 10000,
   });
@@ -116,6 +124,7 @@ async function uploadMediaToReport(reportId: string, media: LocalMedia): Promise
       method: 'POST',
       body: formData,
       // Don't set Content-Type header; fetch will set it with boundary for multipart
+      headers: await authHeader(),
     });
     if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
     const data = await res.json();
