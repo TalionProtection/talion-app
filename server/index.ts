@@ -74,6 +74,7 @@ const PROXIMITY_ALERTS_FILE = path.join(dataDir, 'proximity-alerts.json');
 const PATROL_REPORTS_FILE = path.join(dataDir, 'patrol-reports.json');
 const PTT_CHANNELS_FILE = path.join(dataDir, 'ptt-channels.json');
 const PTT_MESSAGES_FILE = path.join(dataDir, 'ptt-messages.json');
+const SECTORS_FILE = path.join(dataDir, 'sectors.json');
 
 function loadJsonFile<T>(filePath: string, defaultValue: T): T {
   try {
@@ -528,6 +529,23 @@ interface GeofenceZone {
   createdBy: string;
 }
 
+// ─── Sector types ───────────────────────────────────────────────────────
+// Admin-managed organizational zones shown on the dispatch console map
+// (e.g. "Champel", "Florissant") — purely for display/navigation/filtering,
+// distinct from GeofenceZone (which drives responder entry/exit alerts).
+interface Sector {
+  id: string;
+  name: string;
+  color: string; // hex, used for the map outline/label
+  shape: 'circle' | 'polygon';
+  center?: { latitude: number; longitude: number }; // circle only
+  radiusMeters?: number; // circle only
+  points?: { latitude: number; longitude: number }[]; // polygon only, ordered ring (not explicitly closed)
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 // ─── Family Perimeter types ────────────────────────────────────────────
 interface FamilyPerimeter {
   id: string;
@@ -668,6 +686,9 @@ const messages = new Map<string, ChatMessage[]>(); // conversationId -> messages
 const geofenceZones = new Map<string, GeofenceZone>();
 const geofenceEvents: GeofenceEvent[] = [];
 
+// Sector storage (persisted) — admin-managed display/navigation zones
+const sectors = new Map<string, Sector>();
+
 // Family perimeter storage (persisted)
 const familyPerimeters = new Map<string, FamilyPerimeter>();
 const proximityAlerts: ProximityAlert[] = [];
@@ -768,6 +789,13 @@ seedDemoData();
     console.log(`[Persist] Loaded ${savedPerimeters.length} family perimeters from disk`);
   }
 
+  // Load persisted sectors
+  const savedSectors = loadJsonFile<Sector[]>(SECTORS_FILE, []);
+  savedSectors.forEach(s => sectors.set(s.id, s));
+  if (savedSectors.length > 0) {
+    console.log(`[Persist] Loaded ${savedSectors.length} sectors from disk`);
+  }
+
   // Load persisted proximity alerts
   const savedProxAlerts = loadJsonFile<ProximityAlert[]>(PROXIMITY_ALERTS_FILE, []);
   proximityAlerts.push(...savedProxAlerts);
@@ -816,6 +844,12 @@ function persistPerimeters() {
 // Helper: persist curfew checks to disk (debounced)
 function persistCurfewChecks() {
   debouncedSave(CURFEW_CHECKS_FILE, Array.from(curfewChecks.values()));
+}
+
+// Helper: persist sectors to disk (debounced)
+function persistSectors() {
+  debouncedSave(SECTORS_FILE, Array.from(sectors.values()));
+  sectors.forEach(s => saveSectorToSupabase(s));
 }
 
 // Helper: persist proximity alerts to disk (debounced)
@@ -3528,6 +3562,87 @@ app.post('/dispatch/geofence/simulate-move', (req, res) => {
   res.json({ success: true, responderId, location: { latitude, longitude } });
 });
 
+// ─── Sectors (admin-managed organizational zones shown on the map) ──────
+// Viewable by anyone with console access (dispatcher+, enforced by the
+// app.use('/dispatch', ...) prefix middleware); mutations require admin.
+app.get('/dispatch/sectors', (req, res) => {
+  res.json(Array.from(sectors.values()));
+});
+
+app.post('/dispatch/sectors', requireRole('admin'), (req, res) => {
+  const { name, color, shape, center, radiusMeters, points } = req.body;
+  if (!name || !shape) {
+    return res.status(400).json({ error: 'name and shape required' });
+  }
+  if (shape === 'circle') {
+    if (!center?.latitude || !center?.longitude || !radiusMeters) {
+      return res.status(400).json({ error: 'center {latitude, longitude} and radiusMeters required for circle sectors' });
+    }
+  } else if (shape === 'polygon') {
+    if (!Array.isArray(points) || points.length < 3) {
+      return res.status(400).json({ error: 'points (at least 3) required for polygon sectors' });
+    }
+  } else {
+    return res.status(400).json({ error: "shape must be 'circle' or 'polygon'" });
+  }
+  const now = Date.now();
+  const sector: Sector = {
+    id: uuidv4(),
+    name,
+    color: color || '#3b82f6',
+    shape,
+    center: shape === 'circle' ? { latitude: center.latitude, longitude: center.longitude } : undefined,
+    radiusMeters: shape === 'circle' ? Number(radiusMeters) : undefined,
+    points: shape === 'polygon' ? points.map((p: any) => ({ latitude: p.latitude, longitude: p.longitude })) : undefined,
+    createdBy: req.supabaseUser!.id,
+    createdAt: now,
+    updatedAt: now,
+  };
+  sectors.set(sector.id, sector);
+  persistSectors();
+  broadcastToRole('dispatcher', { type: 'sectorCreated', sector });
+  broadcastToRole('admin', { type: 'sectorCreated', sector });
+  console.log(`[Sector] Created ${sector.id} "${sector.name}" (${shape}) by ${req.supabaseUser!.id}`);
+  res.json(sector);
+});
+
+app.put('/dispatch/sectors/:id', requireRole('admin'), (req, res) => {
+  const sectorId = req.params.id as string;
+  const sector = sectors.get(sectorId);
+  if (!sector) return res.status(404).json({ error: 'Sector not found' });
+  const { name, color, center, radiusMeters, points } = req.body;
+  if (name != null) sector.name = name;
+  if (color != null) sector.color = color;
+  if (sector.shape === 'circle') {
+    if (center?.latitude != null && center?.longitude != null) {
+      sector.center = { latitude: center.latitude, longitude: center.longitude };
+    }
+    if (radiusMeters != null) sector.radiusMeters = Number(radiusMeters);
+  } else if (sector.shape === 'polygon') {
+    if (Array.isArray(points) && points.length >= 3) {
+      sector.points = points.map((p: any) => ({ latitude: p.latitude, longitude: p.longitude }));
+    }
+  }
+  sector.updatedAt = Date.now();
+  sectors.set(sector.id, sector);
+  persistSectors();
+  broadcastToRole('dispatcher', { type: 'sectorUpdated', sector });
+  broadcastToRole('admin', { type: 'sectorUpdated', sector });
+  res.json(sector);
+});
+
+app.delete('/dispatch/sectors/:id', requireRole('admin'), (req, res) => {
+  const sectorId = req.params.id as string;
+  const existed = sectors.delete(sectorId);
+  if (existed) {
+    persistSectors();
+    deleteSectorFromSupabase(sectorId).catch(() => {});
+    broadcastToRole('dispatcher', { type: 'sectorDeleted', sectorId });
+    broadcastToRole('admin', { type: 'sectorDeleted', sectorId });
+  }
+  res.json({ success: existed });
+});
+
 // ─── Map REST API ───────────────────────────────────────────────────
 
 // Map: all users with locations (for map display)
@@ -4957,6 +5072,7 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
     loadPatrolReportsFromSupabase(),
     loadPTTChannelsFromSupabase(),
     loadFamilyPerimetersFromSupabase(),
+    loadSectorsFromSupabase(),
     loadPushTokensFromSupabase(),
     loadUserAddressesFromSupabase(),
     loadConversationsFromSupabase(),
@@ -5202,6 +5318,43 @@ async function deleteFamilyPerimeterFromSupabase(perimeterId: string): Promise<v
     const { error } = await supabaseAdmin.from('family_perimeters').delete().eq('id', perimeterId);
     if (error) console.error('[Supabase] deleteFamilyPerimeterFromSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] deleteFamilyPerimeterFromSupabase error:', e); }
+}
+
+// ─── Sectors ──────────────────────────────────────────────────────────────
+async function loadSectorsFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('sectors').select('*');
+    if (error) { console.error('[Supabase] Failed to load sectors:', error.message); return; }
+    if (data && data.length > 0) {
+      sectors.clear();
+      data.forEach((s: any) => sectors.set(s.id, {
+        id: s.id, name: s.name, color: s.color, shape: s.shape,
+        center: s.center || undefined, radiusMeters: s.radius_meters ?? undefined,
+        points: s.points || undefined,
+        createdBy: s.created_by, createdAt: s.created_at, updatedAt: s.updated_at,
+      }));
+      console.log(`[Supabase] Loaded ${data.length} sectors`);
+    }
+  } catch (e) { console.error('[Supabase] loadSectorsFromSupabase error:', e); }
+}
+
+async function saveSectorToSupabase(s: Sector): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('sectors').upsert({
+      id: s.id, name: s.name, color: s.color, shape: s.shape,
+      center: s.center || null, radius_meters: s.radiusMeters ?? null,
+      points: s.points || null,
+      created_by: s.createdBy, created_at: s.createdAt, updated_at: s.updatedAt,
+    });
+    if (error) console.error('[Supabase] saveSectorToSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] saveSectorToSupabase error:', e); }
+}
+
+async function deleteSectorFromSupabase(sectorId: string): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('sectors').delete().eq('id', sectorId);
+    if (error) console.error('[Supabase] deleteSectorFromSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] deleteSectorFromSupabase error:', e); }
 }
 
 // ─── Sync push_tokens from Supabase on startup ───────────────────────────

@@ -703,6 +703,62 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   background: linear-gradient(135deg, #f59e0b, #d97706);
   color: #000;
 }
+.gf-field input[type="text"],
+.gf-field input[type="color"] {
+  font-family: inherit;
+  font-size: 12px;
+}
+.gf-field input[type="text"] {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-hover);
+  background: var(--bg-panel-header);
+  color: var(--text-body);
+  outline: none;
+  box-sizing: border-box;
+}
+.gf-field input[type="text"]:focus { border-color: #3b82f6; }
+.gf-field input[type="color"] {
+  width: 100%;
+  height: 32px;
+  padding: 2px;
+  border-radius: 8px;
+  border: 1px solid var(--border-hover);
+  background: var(--bg-panel-header);
+  cursor: pointer;
+}
+
+/* Sector Management Panel */
+.sector-panel {
+  position: absolute;
+  top: 70px; /* clears Leaflet's default top-left zoom control */
+  left: 12px;
+  width: 320px;
+  max-height: calc(100% - 82px);
+  overflow-y: auto;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px var(--shadow-panel);
+  z-index: 1000;
+}
+.sector-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.sector-empty { font-size: 12px; color: var(--text-muted); text-align: center; padding: 16px 8px; }
+.sector-list-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg-panel-header);
+  border: 1px solid var(--border-subtle);
+}
+.sector-color-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+.sector-list-info { flex: 1; min-width: 0; }
+.sector-list-name { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.sector-list-meta { font-size: 11px; color: var(--text-muted); }
+.sector-edit-btn, .sector-delete-btn { padding: 5px 10px; font-size: 11px; flex-shrink: 0; }
 
 /* Active Zones Panel */
 .active-zones-panel {

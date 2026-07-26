@@ -46,6 +46,20 @@ let selectedBroadcastSeverity = 'medium';
 let selectedBroadcastRadius = '5';
 let resolveTargetId = null;
 
+// ─── Sectors (admin-managed organizational zones) ───────────────────────
+let sectorsList = [];
+let sectorLayers = {}; // id -> { shape: L.Layer, label: L.Marker }
+let sectorEditingId = null; // null while creating a new sector
+let sectorFormShape = 'circle';
+let sectorCircleCenter = null; // L.LatLng
+let sectorCircleRadius = 500; // meters
+let sectorCircleCenterMarker = null;
+let sectorCircleLayer = null;
+let sectorMapClickHandler = null;
+let sectorPolygonLayer = null; // editable L.Polygon while drawing/editing
+let sectorPolygonPoints = null; // [{latitude, longitude}, ...]
+let sectorPolygonDrawer = null; // active L.Draw.Polygon handler
+
 const TYPE_ICONS = { sos: '🆘', medical: '🏥', fire: '🔥', security: '🔒', hazard: '⚠️', accident: '💥', broadcast: '📢', home_jacking: '🏠', cambriolage: '🔓', animal_perdu: '🐾', evenement_climatique: '🌪️', rodage: '🏍️', vehicule_suspect: '🚙', fugue: '🏃', route_bloquee: '🚧', route_fermee: '⛔', other: '🚨' };
 const TYPE_LABELS = { sos: 'SOS', medical: 'Médical', fire: 'Feu', security: 'Sécurité', hazard: 'Danger', accident: 'Accident', broadcast: 'Broadcast', home_jacking: 'Home-Jacking', cambriolage: 'Cambriolage', animal_perdu: 'Animal perdu', evenement_climatique: 'Événement climatique', rodage: 'Rodage', vehicule_suspect: 'Véhicule suspect', fugue: 'Fugue', route_bloquee: 'Route bloquée', route_fermee: 'Route fermée', other: 'Autre' };
 const SEVERITY_ORDER= { critical: 0, high: 1, medium: 2, low: 3 };
@@ -396,6 +410,25 @@ function handleWsMessage(msg) {
         }
         showToast(`\uD83D\uDCCD ${msg.userId} stopped sharing location`, 'info');
         updateLiveUsersCounter();
+      }
+      break;
+    }
+
+    case 'sectorCreated':
+    case 'sectorUpdated': {
+      if (msg.sector) {
+        const idx = sectorsList.findIndex(s => s.id === msg.sector.id);
+        if (idx >= 0) sectorsList[idx] = msg.sector;
+        else sectorsList.push(msg.sector);
+        if (dispatchMap) { renderSectors(); renderSectorFilterButtons(); }
+      }
+      break;
+    }
+
+    case 'sectorDeleted': {
+      if (msg.sectorId) {
+        sectorsList = sectorsList.filter(s => s.id !== msg.sectorId);
+        if (dispatchMap) { renderSectors(); renderSectorFilterButtons(); }
       }
       break;
     }
@@ -1475,48 +1508,9 @@ function initMap() {
     maxZoom: 19,
   }).addTo(dispatchMap);
 
-  // ── Geneva Commune Boundaries (approximate polygons) ──
-  const COMMUNE_ZONES = {
-    'Champel': {
-      center: [46.1925, 6.1535],
-      color: '#8b5cf6',
-      bounds: [[46.1880, 6.1440], [46.1880, 6.1620], [46.1970, 6.1620], [46.1970, 6.1440]],
-    },
-    'Florissant': {
-      center: [46.1955, 6.1675],
-      color: '#06b6d4',
-      bounds: [[46.1910, 6.1620], [46.1910, 6.1780], [46.2000, 6.1780], [46.2000, 6.1620]],
-    },
-    'Malagnou': {
-      center: [46.2005, 6.1615],
-      color: '#f59e0b',
-      bounds: [[46.1970, 6.1540], [46.1970, 6.1700], [46.2050, 6.1700], [46.2050, 6.1540]],
-    },
-    'V\u00e9senaz': {
-      center: [46.2310, 6.2050],
-      color: '#22c55e',
-      bounds: [[46.2250, 6.1950], [46.2250, 6.2150], [46.2370, 6.2150], [46.2370, 6.1950]],
-    },
-  };
-  window._communeZoneLayers = {};
-  Object.entries(COMMUNE_ZONES).forEach(([name, zone]) => {
-    const poly = L.polygon(zone.bounds, {
-      color: zone.color,
-      weight: 2,
-      opacity: 0.5,
-      fillOpacity: 0.08,
-      dashArray: '6 4',
-    }).addTo(dispatchMap);
-    const label = L.marker(zone.center, {
-      icon: L.divIcon({
-        className: 'commune-label',
-        html: `<div style="font-size:11px;font-weight:700;color:${zone.color};text-shadow:0 1px 3px rgba(0,0,0,0.7);white-space:nowrap;">${name}</div>`,
-        iconSize: [80, 20],
-        iconAnchor: [40, 10],
-      }),
-    }).addTo(dispatchMap);
-    window._communeZoneLayers[name] = { poly, label };
-  });
+  // ── Sectors (admin-managed organizational zones) ──
+  loadSectors();
+  setupSectorAdminUI();
 
   // ── Geneva POIs (hospitals, fire stations, police) ──
   const GENEVA_POIS = [
@@ -4263,24 +4257,343 @@ document.addEventListener('click', (e) => {
 });
 
 // ── Zone Quick Filters ──
-const ZONE_CENTERS = {
-  'Champel': { center: [46.1925, 6.1535], zoom: 16 },
-  'Florissant': { center: [46.1955, 6.1675], zoom: 16 },
-  'Malagnou': { center: [46.2005, 6.1615], zoom: 16 },
-  'Vésenaz': { center: [46.2310, 6.2050], zoom: 15 },
-  'all': { center: [46.2125, 6.1795], zoom: 13 },
-};
-
-function zoomToZone(zoneName) {
+function zoomToZone(zoneId) {
   if (!dispatchMap) return;
-  const zone = ZONE_CENTERS[zoneName];
-  if (!zone) return;
-  dispatchMap.setView(zone.center, zone.zoom, { animate: true });
+  if (zoneId === 'all') {
+    dispatchMap.setView([46.2125, 6.1795], 13, { animate: true });
+  } else {
+    const layer = sectorLayers[zoneId];
+    if (!layer) return;
+    dispatchMap.fitBounds(layer.shape.getBounds(), { padding: [40, 40], maxZoom: 16 });
+  }
 
   // Highlight active button
   document.querySelectorAll('.btn-zone-filter').forEach(btn => {
-    btn.classList.toggle('zone-active', btn.getAttribute('data-zone') === zoneName);
+    btn.classList.toggle('zone-active', btn.getAttribute('data-zone') === zoneId);
   });
+}
+
+// ─── Sector CRUD (admin-managed organizational zones) ───────────────────
+
+async function loadSectors() {
+  try {
+    const res = await fetch(`${API_BASE}/dispatch/sectors`);
+    sectorsList = res.ok ? await res.json() : [];
+  } catch (e) {
+    console.error('[Sectors] Load error:', e);
+    sectorsList = [];
+  }
+  renderSectors();
+  renderSectorFilterButtons();
+}
+
+function renderSectors() {
+  Object.values(sectorLayers).forEach(l => {
+    if (dispatchMap.hasLayer(l.shape)) dispatchMap.removeLayer(l.shape);
+    if (dispatchMap.hasLayer(l.label)) dispatchMap.removeLayer(l.label);
+  });
+  sectorLayers = {};
+  sectorsList.forEach(sector => {
+    let shapeLayer;
+    let labelCenter;
+    if (sector.shape === 'circle' && sector.center && sector.radiusMeters) {
+      shapeLayer = L.circle([sector.center.latitude, sector.center.longitude], {
+        radius: sector.radiusMeters,
+        color: sector.color, weight: 2, opacity: 0.5, fillOpacity: 0.08, dashArray: '6 4',
+      });
+      labelCenter = [sector.center.latitude, sector.center.longitude];
+    } else if (sector.shape === 'polygon' && sector.points && sector.points.length >= 3) {
+      shapeLayer = L.polygon(sector.points.map(p => [p.latitude, p.longitude]), {
+        color: sector.color, weight: 2, opacity: 0.5, fillOpacity: 0.08, dashArray: '6 4',
+      });
+      labelCenter = shapeLayer.getBounds().getCenter();
+    } else {
+      return;
+    }
+    shapeLayer.addTo(dispatchMap);
+    const label = L.marker(labelCenter, {
+      icon: L.divIcon({
+        className: 'commune-label',
+        html: `<div style="font-size:11px;font-weight:700;color:${sector.color};text-shadow:0 1px 3px rgba(0,0,0,0.7);white-space:nowrap;">${escapeHtml(sector.name)}</div>`,
+        iconSize: [80, 20],
+        iconAnchor: [40, 10],
+      }),
+    }).addTo(dispatchMap);
+    sectorLayers[sector.id] = { shape: shapeLayer, label };
+  });
+}
+
+function renderSectorFilterButtons() {
+  const container = document.getElementById('sectorFilterButtons');
+  if (!container) return;
+  container.innerHTML = sectorsList.map(sector => `
+    <button class="btn btn-zone-filter" data-zone="${sector.id}" onclick="zoomToZone('${sector.id}')" style="border-color:${sector.color};color:${sector.color};">${escapeHtml(sector.name)}</button>
+  `).join('');
+}
+
+// ── Admin-only management UI ──
+
+function setupSectorAdminUI() {
+  const isAdmin = localStorage.getItem('talion_role') === 'admin';
+  const btn = document.getElementById('btnManageSectors');
+  if (btn) btn.style.display = isAdmin ? 'inline-flex' : 'none';
+}
+
+function openSectorModal() {
+  const modal = document.getElementById('sectorModal');
+  if (modal) modal.style.display = 'flex';
+  renderSectorManageList();
+  showSectorList();
+}
+
+function closeSectorModal() {
+  cancelSectorForm();
+  const modal = document.getElementById('sectorModal');
+  if (modal) modal.style.display = 'none';
+}
+
+function showSectorList() {
+  document.getElementById('sectorListView').style.display = 'block';
+  document.getElementById('sectorFormView').style.display = 'none';
+}
+
+function renderSectorManageList() {
+  const list = document.getElementById('sectorList');
+  if (!list) return;
+  if (sectorsList.length === 0) {
+    list.innerHTML = '<div class="sector-empty">Aucun secteur défini pour le moment.</div>';
+    return;
+  }
+  list.innerHTML = sectorsList.map(sector => `
+    <div class="sector-list-item">
+      <span class="sector-color-dot" style="background:${sector.color};"></span>
+      <div class="sector-list-info">
+        <div class="sector-list-name">${escapeHtml(sector.name)}</div>
+        <div class="sector-list-meta">${sector.shape === 'circle' ? `Cercle · ${sector.radiusMeters}m de rayon` : `Tracé libre · ${sector.points?.length || 0} points`}</div>
+      </div>
+      <button class="btn btn-secondary sector-edit-btn" onclick="editSector('${sector.id}')">Modifier</button>
+      <button class="btn btn-danger sector-delete-btn" onclick="deleteSectorConfirm('${sector.id}')">Supprimer</button>
+    </div>
+  `).join('');
+}
+
+function showSectorForm() {
+  sectorEditingId = null;
+  document.getElementById('sectorFormTitle').textContent = 'Nouveau secteur';
+  document.getElementById('sectorName').value = '';
+  document.getElementById('sectorColor').value = '#3b82f6';
+  document.getElementById('sectorShapeToggle').style.display = 'flex';
+  selectSectorShape('circle');
+  document.getElementById('sectorListView').style.display = 'none';
+  document.getElementById('sectorFormView').style.display = 'block';
+}
+
+function editSector(sectorId) {
+  const sector = sectorsList.find(s => s.id === sectorId);
+  if (!sector) return;
+  sectorEditingId = sectorId;
+  document.getElementById('sectorFormTitle').textContent = `Modifier « ${sector.name} »`;
+  document.getElementById('sectorName').value = sector.name;
+  document.getElementById('sectorColor').value = sector.color;
+  // Shape is fixed once a sector is created — editing only adjusts geometry/name/color.
+  document.getElementById('sectorShapeToggle').style.display = 'none';
+  document.getElementById('sectorListView').style.display = 'none';
+  document.getElementById('sectorFormView').style.display = 'block';
+
+  cleanupSectorDrawingLayers();
+  if (sector.shape === 'circle') {
+    sectorFormShape = 'circle';
+    document.getElementById('sectorCircleFields').style.display = 'block';
+    document.getElementById('sectorPolygonFields').style.display = 'none';
+    sectorCircleCenter = L.latLng(sector.center.latitude, sector.center.longitude);
+    sectorCircleRadius = sector.radiusMeters;
+    document.getElementById('sectorRadiusSlider').value = sectorCircleRadius;
+    document.getElementById('sectorRadiusValue').textContent = sectorCircleRadius;
+    document.getElementById('sectorRadiusField').style.display = 'block';
+    document.getElementById('sectorCircleHint').textContent = 'Glissez le repère pour déplacer le centre, ajustez le rayon ci-dessous.';
+    placeSectorCircleCenter(sectorCircleCenter, true);
+  } else {
+    sectorFormShape = 'polygon';
+    document.getElementById('sectorCircleFields').style.display = 'none';
+    document.getElementById('sectorPolygonFields').style.display = 'block';
+    sectorPolygonPoints = sector.points.slice();
+    sectorPolygonLayer = L.polygon(sector.points.map(p => [p.latitude, p.longitude]), {
+      color: sector.color, weight: 2, fillOpacity: 0.1,
+    }).addTo(dispatchMap);
+    sectorPolygonLayer.editing.enable();
+    sectorPolygonLayer.on('edit', () => {
+      sectorPolygonPoints = sectorPolygonLayer.getLatLngs()[0].map(ll => ({ latitude: ll.lat, longitude: ll.lng }));
+    });
+    dispatchMap.fitBounds(sectorPolygonLayer.getBounds(), { padding: [40, 40] });
+    document.getElementById('sectorPolygonHint').textContent = 'Faites glisser les sommets pour ajuster le tracé.';
+    document.getElementById('sectorDrawPolygonBtn').style.display = 'none';
+  }
+}
+
+function selectSectorShape(shape) {
+  sectorFormShape = shape;
+  document.getElementById('sectorShapeCircleBtn').classList.toggle('active', shape === 'circle');
+  document.getElementById('sectorShapePolygonBtn').classList.toggle('active', shape === 'polygon');
+  document.getElementById('sectorCircleFields').style.display = shape === 'circle' ? 'block' : 'none';
+  document.getElementById('sectorPolygonFields').style.display = shape === 'polygon' ? 'block' : 'none';
+  cleanupSectorDrawingLayers();
+  if (shape === 'circle') {
+    document.getElementById('sectorCircleHint').textContent = 'Cliquez sur la carte pour placer le centre, puis ajustez le rayon.';
+    document.getElementById('sectorRadiusField').style.display = 'none';
+    startSectorCircleDraw();
+  } else {
+    document.getElementById('sectorPolygonHint').textContent = 'Cliquez « Dessiner » puis posez les points du contour sur la carte (double-clic pour terminer).';
+    document.getElementById('sectorDrawPolygonBtn').style.display = 'inline-block';
+    document.getElementById('sectorDrawPolygonBtn').textContent = '✏️ Dessiner sur la carte';
+  }
+}
+
+function cleanupSectorDrawingLayers() {
+  if (sectorCircleCenterMarker) { dispatchMap.removeLayer(sectorCircleCenterMarker); sectorCircleCenterMarker = null; }
+  if (sectorCircleLayer) { dispatchMap.removeLayer(sectorCircleLayer); sectorCircleLayer = null; }
+  if (sectorPolygonLayer) { dispatchMap.removeLayer(sectorPolygonLayer); sectorPolygonLayer = null; }
+  if (sectorMapClickHandler) { dispatchMap.off('click', sectorMapClickHandler); sectorMapClickHandler = null; }
+  if (sectorPolygonDrawer) { sectorPolygonDrawer.disable(); sectorPolygonDrawer = null; }
+  sectorCircleCenter = null;
+  sectorPolygonPoints = null;
+  dispatchMap?.getContainer().classList.remove('geofence-drawing');
+}
+
+function startSectorCircleDraw() {
+  if (!dispatchMap) return;
+  switchTab('map');
+  dispatchMap.getContainer().classList.add('geofence-drawing');
+  sectorMapClickHandler = function(e) { placeSectorCircleCenter(e.latlng); };
+  dispatchMap.on('click', sectorMapClickHandler);
+}
+
+function placeSectorCircleCenter(latlng, keepListening) {
+  sectorCircleCenter = latlng;
+  if (sectorCircleCenterMarker) dispatchMap.removeLayer(sectorCircleCenterMarker);
+  if (sectorCircleLayer) dispatchMap.removeLayer(sectorCircleLayer);
+
+  sectorCircleCenterMarker = L.marker(latlng, {
+    icon: L.divIcon({
+      className: 'gf-center-icon',
+      html: `<div style="width:20px;height:20px;border-radius:50%;background:${document.getElementById('sectorColor').value};border:3px solid #fff;box-shadow:0 0 12px rgba(0,0,0,0.4);"></div>`,
+      iconSize: [20, 20], iconAnchor: [10, 10],
+    }),
+    draggable: true,
+    zIndexOffset: 2000,
+  }).addTo(dispatchMap);
+  sectorCircleCenterMarker.on('drag', e => { sectorCircleCenter = e.target.getLatLng(); updateSectorCircle(); });
+
+  updateSectorCircle();
+  document.getElementById('sectorRadiusField').style.display = 'block';
+  document.getElementById('sectorCircleHint').textContent = `Centre : ${latlng.lat.toFixed(4)}, ${latlng.lng.toFixed(4)}`;
+  dispatchMap.getContainer().classList.remove('geofence-drawing');
+  if (!keepListening && sectorMapClickHandler) { dispatchMap.off('click', sectorMapClickHandler); sectorMapClickHandler = null; }
+}
+
+function updateSectorCircle() {
+  if (!sectorCircleCenter) return;
+  if (sectorCircleLayer) dispatchMap.removeLayer(sectorCircleLayer);
+  sectorCircleLayer = L.circle(sectorCircleCenter, {
+    radius: sectorCircleRadius,
+    color: document.getElementById('sectorColor').value,
+    weight: 2, fillOpacity: 0.1, dashArray: '8 6',
+  }).addTo(dispatchMap);
+  dispatchMap.fitBounds(sectorCircleLayer.getBounds(), { padding: [40, 40], maxZoom: 16 });
+}
+
+function updateSectorRadius(value) {
+  sectorCircleRadius = parseFloat(value);
+  document.getElementById('sectorRadiusValue').textContent = value;
+  updateSectorCircle();
+}
+
+function startSectorPolygonDraw() {
+  if (!dispatchMap || !window.L?.Draw) return;
+  switchTab('map');
+  if (sectorPolygonLayer) { dispatchMap.removeLayer(sectorPolygonLayer); sectorPolygonLayer = null; }
+  if (sectorPolygonDrawer) sectorPolygonDrawer.disable();
+  sectorPolygonDrawer = new L.Draw.Polygon(dispatchMap, {
+    shapeOptions: { color: document.getElementById('sectorColor').value, weight: 2 },
+  });
+  sectorPolygonDrawer.enable();
+  document.getElementById('sectorPolygonHint').textContent = 'Cliquez pour poser chaque point, double-cliquez pour terminer le tracé.';
+
+  const onCreated = (e) => {
+    sectorPolygonLayer = e.layer;
+    sectorPolygonLayer.addTo(dispatchMap);
+    sectorPolygonLayer.editing.enable();
+    sectorPolygonPoints = sectorPolygonLayer.getLatLngs()[0].map(ll => ({ latitude: ll.lat, longitude: ll.lng }));
+    sectorPolygonLayer.on('edit', () => {
+      sectorPolygonPoints = sectorPolygonLayer.getLatLngs()[0].map(ll => ({ latitude: ll.lat, longitude: ll.lng }));
+    });
+    document.getElementById('sectorPolygonHint').textContent = 'Faites glisser les sommets pour ajuster le tracé.';
+    document.getElementById('sectorDrawPolygonBtn').textContent = '✏️ Recommencer le tracé';
+    dispatchMap.off(L.Draw.Event.CREATED, onCreated);
+  };
+  dispatchMap.on(L.Draw.Event.CREATED, onCreated);
+}
+
+function cancelSectorForm() {
+  cleanupSectorDrawingLayers();
+  sectorEditingId = null;
+  showSectorList();
+}
+
+async function saveSector() {
+  const name = document.getElementById('sectorName').value.trim();
+  const color = document.getElementById('sectorColor').value;
+  if (!name) { showToast('Le nom du secteur est requis', 'error'); return; }
+
+  let body;
+  if (sectorFormShape === 'circle') {
+    if (!sectorCircleCenter) { showToast('Placez le centre du secteur sur la carte', 'error'); return; }
+    body = { name, color, shape: 'circle', center: { latitude: sectorCircleCenter.lat, longitude: sectorCircleCenter.lng }, radiusMeters: sectorCircleRadius };
+  } else {
+    if (!sectorPolygonPoints || sectorPolygonPoints.length < 3) { showToast('Dessinez un tracé avec au moins 3 points', 'error'); return; }
+    body = { name, color, shape: 'polygon', points: sectorPolygonPoints };
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/dispatch/sectors${sectorEditingId ? '/' + sectorEditingId : ''}`, {
+      method: sectorEditingId ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || "Erreur lors de l'enregistrement du secteur", 'error');
+      return;
+    }
+    showToast(`Secteur "${name}" enregistré`, 'success');
+    cleanupSectorDrawingLayers();
+    sectorEditingId = null;
+    await loadSectors();
+    renderSectorManageList();
+    showSectorList();
+  } catch (e) {
+    console.error('[Sectors] Save error:', e);
+    showToast('Erreur réseau', 'error');
+  }
+}
+
+async function deleteSectorConfirm(sectorId) {
+  const sector = sectorsList.find(s => s.id === sectorId);
+  if (!sector) return;
+  if (!confirm(`Supprimer le secteur "${sector.name}" ?`)) return;
+  try {
+    const res = await fetch(`${API_BASE}/dispatch/sectors/${sectorId}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors de la suppression', 'error');
+      return;
+    }
+    showToast(`Secteur "${sector.name}" supprimé`, 'success');
+    await loadSectors();
+    renderSectorManageList();
+  } catch (e) {
+    console.error('[Sectors] Delete error:', e);
+    showToast('Erreur réseau', 'error');
+  }
 }
 
 // ── POI Toggle ──

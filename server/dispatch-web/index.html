@@ -7,6 +7,8 @@
   <link rel="stylesheet" href="styles.v2.css">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
 </head>
 <body>
   <!-- Sidebar -->
@@ -359,11 +361,9 @@
         <div class="zone-quick-filters">
           <span style="font-size:11px;color:var(--text-muted);margin-right:4px;">Zones:</span>
           <button class="btn btn-zone-filter" data-zone="all" onclick="zoomToZone('all')" title="Vue d'ensemble Genève">&#x1F30D; Tout</button>
-          <button class="btn btn-zone-filter" data-zone="Champel" onclick="zoomToZone('Champel')" style="border-color:#8b5cf6;color:#8b5cf6;">Champel</button>
-          <button class="btn btn-zone-filter" data-zone="Florissant" onclick="zoomToZone('Florissant')" style="border-color:#06b6d4;color:#06b6d4;">Florissant</button>
-          <button class="btn btn-zone-filter" data-zone="Malagnou" onclick="zoomToZone('Malagnou')" style="border-color:#f59e0b;color:#f59e0b;">Malagnou</button>
-          <button class="btn btn-zone-filter" data-zone="V\u00e9senaz" onclick="zoomToZone('V\u00e9senaz')" style="border-color:#22c55e;color:#22c55e;">Vésenaz</button>
+          <span id="sectorFilterButtons"></span>
           <button class="btn btn-zone-filter" id="btnTogglePoi" onclick="togglePOIs()" title="Afficher/masquer les points d'intérêt">&#x1F3E5; POI</button>
+          <button class="btn btn-zone-filter" id="btnManageSectors" onclick="openSectorModal()" title="Créer, modifier ou supprimer des secteurs" style="display:none;">&#x2699;&#xFE0F; Gérer les secteurs</button>
         </div>
         <button class="btn btn-geofence" id="btnDrawZone" onclick="toggleGeofenceMode()">&#x1F4CD; Draw Zone</button>
         <button class="btn btn-sound" id="btnSoundToggle" onclick="toggleGeofenceSounds()" title="Toggle geofence alert sounds">&#x1F50A; Sound ON</button>
@@ -405,6 +405,57 @@
             <div class="gf-actions" id="gfActions" style="display:none;">
               <button class="btn btn-secondary" onclick="cancelGeofence()">Cancel</button>
               <button class="btn btn-broadcast" onclick="sendGeofenceBroadcast()">&#x1F4E1; Send Broadcast</button>
+            </div>
+          </div>
+        </div>
+        <!-- Sector Management Panel (admin only) -->
+        <div class="sector-panel" id="sectorModal" style="display:none;">
+          <div id="sectorListView">
+            <div class="gf-header">
+              <h4>&#x1F5FA;&#xFE0F; Secteurs</h4>
+              <button class="gf-close" onclick="closeSectorModal()">&times;</button>
+            </div>
+            <div class="gf-body">
+              <div class="sector-list" id="sectorList"></div>
+              <button class="btn btn-primary" onclick="showSectorForm()">+ Nouveau secteur</button>
+            </div>
+          </div>
+          <div id="sectorFormView" style="display:none;">
+            <div class="gf-header">
+              <h4 id="sectorFormTitle">Nouveau secteur</h4>
+              <button class="gf-close" onclick="cancelSectorForm()">&times;</button>
+            </div>
+            <div class="gf-body">
+              <div class="gf-field">
+                <label>Nom</label>
+                <input type="text" id="sectorName" class="form-control" placeholder="Ex: Champel">
+              </div>
+              <div class="gf-field">
+                <label>Couleur</label>
+                <input type="color" id="sectorColor" value="#3b82f6">
+              </div>
+              <div class="gf-field" id="sectorShapeToggle" style="display:flex;gap:6px;">
+                <button type="button" class="gf-sev-btn active" id="sectorShapeCircleBtn" onclick="selectSectorShape('circle')">&#x2B55; Cercle</button>
+                <button type="button" class="gf-sev-btn" id="sectorShapePolygonBtn" onclick="selectSectorShape('polygon')">&#x270F;&#xFE0F; Tracé libre</button>
+              </div>
+
+              <div id="sectorCircleFields">
+                <div class="gf-info" id="sectorCircleHint">Cliquez sur la carte pour placer le centre, puis ajustez le rayon.</div>
+                <div class="gf-field" id="sectorRadiusField" style="display:none;">
+                  <label>Rayon : <strong id="sectorRadiusValue">500</strong> m</label>
+                  <input type="range" id="sectorRadiusSlider" min="50" max="5000" step="50" value="500" oninput="updateSectorRadius(this.value)">
+                </div>
+              </div>
+
+              <div id="sectorPolygonFields" style="display:none;">
+                <div class="gf-info" id="sectorPolygonHint">Cliquez « Dessiner » puis posez les points du contour sur la carte (double-clic pour terminer).</div>
+                <button type="button" class="btn btn-secondary" id="sectorDrawPolygonBtn" onclick="startSectorPolygonDraw()">&#x270F;&#xFE0F; Dessiner sur la carte</button>
+              </div>
+
+              <div class="gf-actions" style="display:flex;">
+                <button class="btn btn-secondary" onclick="cancelSectorForm()">Annuler</button>
+                <button class="btn btn-broadcast" onclick="saveSector()">Enregistrer</button>
+              </div>
             </div>
           </div>
         </div>
