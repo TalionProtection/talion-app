@@ -151,6 +151,13 @@ export default function DispatcherScreen() {
   const [profileUserId, setProfileUserId] = useState<string | null>(null);
   const [profileUser, setProfileUser] = useState<any>(null);
   const [profileLoading, setProfileLoading] = useState(false);
+  // Only populated when the profile was opened from an incident (reporter
+  // context: their own live presence, their family's, known addresses, and
+  // whether the incident's reported location matched a known address).
+  const [profileReporterPresence, setProfileReporterPresence] = useState<any>(null);
+  const [profileFamily, setProfileFamily] = useState<any[]>([]);
+  const [profileAddresses, setProfileAddresses] = useState<any[]>([]);
+  const [profileLocationContext, setProfileLocationContext] = useState<any>(null);
 
   // Fetch responders from server
   const fetchResponders = useCallback(async () => {
@@ -331,12 +338,47 @@ export default function DispatcherScreen() {
     setProfileUserId(userId);
     setShowUserProfile(true);
     setProfileLoading(true);
+    setProfileReporterPresence(null);
+    setProfileFamily([]);
+    setProfileAddresses([]);
+    setProfileLocationContext(null);
     try {
       const baseUrl = getApiBaseUrl();
       const res = await fetchWithTimeout(`${baseUrl}/admin/users/${userId}`, { timeout: 10000 });
       if (res.ok) {
         const data = await res.json();
         setProfileUser(data);
+      }
+    } catch (e) {
+      setProfileUser(null);
+    }
+    setProfileLoading(false);
+  };
+
+  // Opened from an incident card — reuses the same "context" endpoint the
+  // dispatch console uses, which resolves the reporter from alert.createdBy
+  // (id or display name) and adds their own live presence, their family's,
+  // known addresses, and whether the incident's reported location matched one.
+  const openIncidentReporterProfile = async (alertId: string) => {
+    setProfileUserId(alertId);
+    setShowUserProfile(true);
+    setProfileLoading(true);
+    setProfileReporterPresence(null);
+    setProfileFamily([]);
+    setProfileAddresses([]);
+    setProfileLocationContext(null);
+    try {
+      const baseUrl = getApiBaseUrl();
+      const res = await fetchWithTimeout(`${baseUrl}/api/alerts/${alertId}/context`, { timeout: 10000 });
+      if (res.ok) {
+        const data = await res.json();
+        setProfileUser(data.user || null);
+        setProfileReporterPresence(data.reporterPresence || null);
+        setProfileFamily(data.family || []);
+        setProfileAddresses(data.addresses || []);
+        setProfileLocationContext(data.locationContext || null);
+      } else {
+        setProfileUser(null);
       }
     } catch (e) {
       setProfileUser(null);
@@ -447,12 +489,15 @@ export default function DispatcherScreen() {
                   <View style={styles.incidentHeaderLeft}>
                     <Text style={styles.incidentTypeIcon}>{TYPE_ICONS[incident.type] || '\u{1F6A8}'}</Text>
                     <View style={{ flex: 1 }}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                        <Text style={styles.incidentUserName}>{incident.userName}</Text>
+                      <TouchableOpacity
+                        style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}
+                        onPress={() => openIncidentReporterProfile(incident.id)}
+                      >
+                        <Text style={[styles.incidentUserName, { textDecorationLine: 'underline' }]}>{incident.userName}</Text>
                         <View style={{ backgroundColor: '#f3f4f6', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 4 }}>
                           <Text style={{ fontSize: 9, fontWeight: '700', color: '#6b7280', fontFamily: 'monospace' }}>{formatIncidentId(incident.id)}</Text>
                         </View>
-                      </View>
+                      </TouchableOpacity>
                       <Text style={styles.incidentAddress} numberOfLines={1}>{'\u{1F4CD}'} {incident.address}</Text>
                     </View>
                   </View>
@@ -834,6 +879,92 @@ export default function DispatcherScreen() {
                       <View key={tag} style={{ backgroundColor: '#e0e7ff', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10 }}>
                         <Text style={{ fontSize: 11, color: '#4338ca', fontWeight: '600' }}>{tag}</Text>
                       </View>
+                    ))}
+                  </View>
+                )}
+
+                {/* Location context — where the incident was reported FROM, at report time */}
+                {profileLocationContext && (
+                  <View style={{
+                    backgroundColor: profileLocationContext.isHomeJacking ? '#fef2f2' : '#f0fdf4',
+                    borderRadius: 10, padding: 12, marginBottom: 12,
+                    borderWidth: 1, borderColor: profileLocationContext.isHomeJacking ? '#fecaca' : '#bbf7d0',
+                  }}>
+                    <Text style={{ fontSize: 12, fontWeight: '700', color: profileLocationContext.isHomeJacking ? '#dc2626' : '#16a34a' }}>
+                      {profileLocationContext.isHomeJacking ? '⚠️ ALERTE POSSIBLE HOME-JACKING' : '\u{1F4CD} SIGNALÉ HORS DOMICILE'}
+                      <Text style={{ fontSize: 9, fontWeight: '500', color: '#6b7280' }}> (au moment du signalement)</Text>
+                    </Text>
+                    <Text style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>
+                      {profileLocationContext.label} · {profileLocationContext.distanceMeters}m
+                      {profileLocationContext.alarmCode ? ` · Code alarme: ${profileLocationContext.alarmCode}` : ''}
+                    </Text>
+                  </View>
+                )}
+
+                {/* Reporter's current live presence — may differ from where they reported from, they could have moved since */}
+                {profileReporterPresence && (
+                  <View style={{
+                    backgroundColor: profileReporterPresence.status === 'inside' ? '#f0fdf4' : profileReporterPresence.status === 'outside' ? '#fffbeb' : '#f9fafb',
+                    borderRadius: 10, padding: 12, marginBottom: 12,
+                  }}>
+                    <Text style={{ fontSize: 11, color: '#6b7280', fontWeight: '600', marginBottom: 4 }}>
+                      STATUT ACTUEL <Text style={{ fontWeight: '500' }}>(en direct maintenant)</Text>
+                    </Text>
+                    <Text style={{
+                      fontSize: 14, fontWeight: '700',
+                      color: profileReporterPresence.status === 'inside' ? '#16a34a' : profileReporterPresence.status === 'outside' ? '#d97706' : '#6b7280',
+                    }}>
+                      {profileReporterPresence.status === 'inside'
+                        ? `\u{1F3E0} Présent${profileReporterPresence.matchedLabel ? ` — ${profileReporterPresence.matchedLabel}` : ''}`
+                        : profileReporterPresence.status === 'outside'
+                          ? `\u{1F6B6} Sorti${profileReporterPresence.matchedLabel ? ` de ${profileReporterPresence.matchedLabel}` : ''}`
+                          : '❓ Statut inconnu'}
+                    </Text>
+                    {!!profileReporterPresence.setAt && (
+                      <Text style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>
+                        depuis {formatTimeAgo(profileReporterPresence.setAt)}
+                      </Text>
+                    )}
+                  </View>
+                )}
+
+                {/* Registered addresses — from incident context */}
+                {profileAddresses.length > 0 && (
+                  <View style={{ backgroundColor: '#f9fafb', borderRadius: 10, padding: 12, marginBottom: 12 }}>
+                    <Text style={{ fontSize: 13, fontWeight: '600', color: '#374151', marginBottom: 8 }}>Lieux enregistrés</Text>
+                    {profileAddresses.map((a: any, idx: number) => (
+                      <Text key={a.id || idx} style={{ fontSize: 12, color: '#6b7280', marginBottom: 4 }}>
+                        {a.isPrimary ? '\u{1F3E0} ' : '\u{1F4CD} '}{a.label}: {a.address}
+                      </Text>
+                    ))}
+                  </View>
+                )}
+
+                {/* Family, with each member's own live presence — from incident context */}
+                {profileFamily.length > 0 && (
+                  <View style={{ backgroundColor: '#f9fafb', borderRadius: 10, padding: 12, marginBottom: 12 }}>
+                    <Text style={{ fontSize: 13, fontWeight: '600', color: '#374151', marginBottom: 8 }}>Famille (statut en direct)</Text>
+                    {profileFamily.map((f: any) => (
+                      <TouchableOpacity
+                        key={f.id}
+                        style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' }}
+                        onPress={() => openUserProfile(f.id)}
+                      >
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ fontSize: 13, fontWeight: '600', color: '#1f2937' }}>{f.name}</Text>
+                          <Text style={{ fontSize: 11, color: '#6b7280' }}>{f.role}{f.phone ? ` · ${f.phone}` : ''}</Text>
+                          <Text style={{
+                            fontSize: 11, fontWeight: '700', marginTop: 2,
+                            color: f.presence?.status === 'inside' ? '#16a34a' : f.presence?.status === 'outside' ? '#d97706' : '#9ca3af',
+                          }}>
+                            {f.presence?.status === 'inside'
+                              ? `\u{1F3E0} Présent${f.presence.matchedLabel ? ` — ${f.presence.matchedLabel}` : ''}`
+                              : f.presence?.status === 'outside'
+                                ? `\u{1F6B6} Sorti${f.presence.matchedLabel ? ` de ${f.presence.matchedLabel}` : ''}`
+                                : '❓ Inconnu'}
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
                     ))}
                   </View>
                 )}
