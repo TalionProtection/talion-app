@@ -9,6 +9,7 @@ import { IconSymbol } from '@/components/ui/icon-symbol';
 import { useAuth } from '@/hooks/useAuth';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
+import { authHeader } from '@/lib/auth-fetch';
 import { useLocation } from '@/lib/location-context';
 import NativeMapView, { Marker, Circle, isNativeMap } from '@/components/map-view';
 import { websocketService } from '@/services/websocket';
@@ -122,7 +123,24 @@ function relationLabel(type: string): string {
 
 // ─── Tabs ───────────────────────────────────────────────────────────────────
 
-type TabKey = 'members' | 'perimeters' | 'alerts';
+type TabKey = 'members' | 'perimeters' | 'alerts' | 'allFamilies';
+
+interface FamilyGroupMember {
+  id: string;
+  name: string;
+  ghostMode: boolean;
+  status: 'inside' | 'outside' | 'unknown';
+  source: 'auto' | 'manual';
+  matchedLabel?: string;
+  setBy?: string;
+  setAt?: number;
+  addresses: { label: string; address: string; isPrimary: boolean }[];
+}
+
+interface FamilyGroup {
+  id: string;
+  members: FamilyGroupMember[];
+}
 
 // ─── Main Component ─────────────────────────────────────────────────────────
 
@@ -140,6 +158,11 @@ export default function FamilyScreen() {
   const [myPresenceStatus, setMyPresenceStatus] = useState<'inside' | 'outside' | 'unknown'>('unknown');
   const [myPresenceLabel, setMyPresenceLabel] = useState<string | undefined>(undefined);
   const [myPresenceSaving, setMyPresenceSaving] = useState<'inside' | 'outside' | null>(null);
+
+  // Staff (responder/dispatcher/admin): can view and manually set presence
+  // for every family, not just their own — mirrors the console's Familles tab.
+  const [allFamilyGroups, setAllFamilyGroups] = useState<FamilyGroup[]>([]);
+  const [allFamiliesSavingId, setAllFamiliesSavingId] = useState<string | null>(null);
 
   // Modals
   const [selectedMember, setSelectedMember] = useState<FamilyMember | null>(null);
@@ -174,6 +197,7 @@ export default function FamilyScreen() {
 
   const BASE = getApiBaseUrl();
   const userId = user?.id;
+  const isStaff = user?.role === 'responder' || user?.role === 'dispatcher' || user?.role === 'admin';
 
   // Location context for "Use my position" button
   const locationCtx = useLocation();
@@ -312,6 +336,42 @@ export default function FamilyScreen() {
     setMyPresenceSaving(null);
   }, [BASE, userId]);
 
+  const fetchAllFamilyGroups = useCallback(async () => {
+    if (!isStaff) return;
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family-groups`, {
+        headers: { Accept: 'application/json', ...(await authHeader()) },
+        timeout: 10000,
+      });
+      const data = await res.json();
+      setAllFamilyGroups(Array.isArray(data) ? data : []);
+    } catch (e) {
+      console.error('[Family] Error fetching all family groups:', e);
+    }
+  }, [BASE, isStaff]);
+
+  const setMemberPresence = useCallback(async (targetUserId: string, status: 'inside' | 'outside') => {
+    setAllFamiliesSavingId(targetUserId);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family/presence/${targetUserId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({ status }),
+        timeout: 10000,
+      });
+      if (res.ok) {
+        if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        fetchAllFamilyGroups();
+      } else {
+        Alert.alert('Erreur', 'Impossible de mettre à jour le statut');
+      }
+    } catch (e) {
+      console.error('[Family] Error setting member presence:', e);
+      Alert.alert('Erreur', 'Erreur réseau');
+    }
+    setAllFamiliesSavingId(null);
+  }, [BASE, fetchAllFamilyGroups]);
+
   const fetchPerimeters = useCallback(async () => {
     if (!userId) return;
     try {
@@ -347,15 +407,15 @@ export default function FamilyScreen() {
 
   const loadAll = useCallback(async () => {
     setLoading(true);
-    await Promise.all([fetchMembers(), fetchPerimeters(), fetchProxAlerts(), fetchCurfewChecks(), fetchMyPresence()]);
+    await Promise.all([fetchMembers(), fetchPerimeters(), fetchProxAlerts(), fetchCurfewChecks(), fetchMyPresence(), fetchAllFamilyGroups()]);
     setLoading(false);
-  }, [fetchMembers, fetchPerimeters, fetchProxAlerts, fetchCurfewChecks, fetchMyPresence]);
+  }, [fetchMembers, fetchPerimeters, fetchProxAlerts, fetchCurfewChecks, fetchMyPresence, fetchAllFamilyGroups]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await Promise.all([fetchMembers(), fetchPerimeters(), fetchProxAlerts(), fetchCurfewChecks(), fetchMyPresence()]);
+    await Promise.all([fetchMembers(), fetchPerimeters(), fetchProxAlerts(), fetchCurfewChecks(), fetchMyPresence(), fetchAllFamilyGroups()]);
     setRefreshing(false);
-  }, [fetchMembers, fetchPerimeters, fetchProxAlerts, fetchCurfewChecks, fetchMyPresence]);
+  }, [fetchMembers, fetchPerimeters, fetchProxAlerts, fetchCurfewChecks, fetchMyPresence, fetchAllFamilyGroups]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
@@ -391,10 +451,11 @@ export default function FamilyScreen() {
     const handlePresenceUpdated = () => {
       fetchMembers();
       fetchMyPresence();
+      fetchAllFamilyGroups();
     };
     websocketService.on('presenceUpdated', handlePresenceUpdated);
     return () => websocketService.off('presenceUpdated', handlePresenceUpdated);
-  }, [fetchMembers, fetchMyPresence]);
+  }, [fetchMembers, fetchMyPresence, fetchAllFamilyGroups]);
 
   // ─── Location History ───────────────────────────────────────────────────
 
@@ -856,6 +917,63 @@ export default function FamilyScreen() {
     </View>
   );
 
+  const PRESENCE_STATUS_LABELS: Record<string, string> = { inside: 'Présent', outside: 'Sorti', unknown: 'Statut inconnu' };
+  const PRESENCE_STATUS_ICONS: Record<string, string> = { inside: '🏠', outside: '🚶', unknown: '❓' };
+  const PRESENCE_STATUS_COLORS: Record<string, string> = { inside: '#22C55E', outside: '#F59E0B', unknown: '#9CA3AF' };
+
+  const renderFamilyGroupCard = ({ item }: { item: FamilyGroup }) => (
+    <View style={styles.familyGroupCard}>
+      {item.members.map(m => (
+        <View key={m.id} style={styles.familyGroupMemberRow}>
+          <View style={{ flex: 1 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Text style={styles.familyGroupMemberName}>{m.name}</Text>
+              {m.ghostMode && (
+                <View style={styles.ghostBadge}>
+                  <Text style={styles.ghostBadgeText}>👻 Ghost</Text>
+                </View>
+              )}
+            </View>
+            <Text style={[styles.familyGroupMemberStatus, { color: PRESENCE_STATUS_COLORS[m.status] }]}>
+              {PRESENCE_STATUS_ICONS[m.status]} {PRESENCE_STATUS_LABELS[m.status]}{m.matchedLabel ? ` — ${m.matchedLabel}` : ''}
+            </Text>
+            <Text style={styles.familyGroupMemberMeta}>
+              {m.source === 'manual'
+                ? `Statut manuel${m.setBy ? ` par ${m.setBy}` : ''}${m.setAt ? ` · ${timeAgo(m.setAt)}` : ''}`
+                : 'Statut automatique (position live)'}
+            </Text>
+          </View>
+          <View style={{ flexDirection: 'row', gap: 6 }}>
+            <TouchableOpacity
+              style={styles.familyGroupActionBtn}
+              onPress={() => setMemberPresence(m.id, 'inside')}
+              disabled={allFamiliesSavingId === m.id}
+            >
+              {allFamiliesSavingId === m.id ? <ActivityIndicator size="small" color="#1e3a5f" /> : <Text style={styles.familyGroupActionBtnText}>Présent</Text>}
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.familyGroupActionBtn}
+              onPress={() => setMemberPresence(m.id, 'outside')}
+              disabled={allFamiliesSavingId === m.id}
+            >
+              <Text style={styles.familyGroupActionBtnText}>Sorti</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+
+  const EmptyAllFamilies = () => (
+    <View style={styles.emptyState}>
+      <IconSymbol name="person.2.fill" size={48} color="#D1D5DB" />
+      <Text style={styles.emptyTitle}>Aucune famille enregistrée</Text>
+      <Text style={styles.emptySubtitle}>
+        Les foyers (relations parent/enfant/conjoint) apparaîtront ici une fois configurés.
+      </Text>
+    </View>
+  );
+
   // ─── Unread alerts count ────────────────────────────────────────────────
 
   const unreadAlerts = proxAlerts.filter(a => a.eventType === 'exit' && !a.acknowledged).length;
@@ -927,6 +1045,7 @@ export default function FamilyScreen() {
           { key: 'members' as TabKey, label: 'Membres', icon: 'heart.fill' as const },
           { key: 'perimeters' as TabKey, label: 'Périmètres', icon: 'location.fill' as const },
           { key: 'alerts' as TabKey, label: 'Alertes', icon: 'bell.fill' as const },
+          ...(isStaff ? [{ key: 'allFamilies' as TabKey, label: 'Toutes familles', icon: 'person.2.fill' as const }] : []),
         ]).map(tab => (
           <TouchableOpacity
             key={tab.key}
@@ -989,6 +1108,16 @@ export default function FamilyScreen() {
               contentContainerStyle={styles.listContent}
               ListEmptyComponent={EmptyAlerts}
               ListHeaderComponent={renderActiveCurfewChecks}
+              refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#1e3a5f" />}
+            />
+          )}
+          {activeTab === 'allFamilies' && isStaff && (
+            <FlatList
+              data={allFamilyGroups}
+              keyExtractor={item => item.id}
+              renderItem={renderFamilyGroupCard}
+              contentContainerStyle={styles.listContent}
+              ListEmptyComponent={EmptyAllFamilies}
               refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#1e3a5f" />}
             />
           )}
@@ -1493,6 +1622,61 @@ const styles = StyleSheet.create({
     borderColor: '#EF4444',
     borderWidth: 1.5,
     backgroundColor: '#FEF2F2',
+  },
+  familyGroupCard: {
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    marginBottom: 12,
+  },
+  familyGroupMemberRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+    padding: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F3F4F6',
+  },
+  familyGroupMemberName: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  ghostBadge: {
+    paddingVertical: 2,
+    paddingHorizontal: 7,
+    borderRadius: 10,
+    backgroundColor: 'rgba(139,92,246,0.15)',
+  },
+  ghostBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#8b5cf6',
+  },
+  familyGroupMemberStatus: {
+    fontSize: 13,
+    fontWeight: '700',
+    marginTop: 4,
+  },
+  familyGroupMemberMeta: {
+    fontSize: 11,
+    color: '#9CA3AF',
+    marginTop: 2,
+  },
+  familyGroupActionBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    backgroundColor: '#F9FAFB',
+  },
+  familyGroupActionBtnText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#1e3a5f',
   },
   cardHeader: {
     flexDirection: 'row',

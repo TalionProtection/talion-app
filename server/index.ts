@@ -2870,6 +2870,7 @@ app.put('/api/family/presence/:targetUserId', requireAuth, (req, res) => {
   const payload = { type: 'presenceUpdated', targetUserId, status: entry.status, setBy: entry.setBy, setAt: entry.setAt };
   broadcastToRole('dispatcher', payload);
   broadcastToRole('admin', payload);
+  broadcastToRole('responder', payload);
   broadcastToUsers(getFamilyMemberIds(targetUserId), payload);
   res.json({ success: true });
 });
@@ -3365,9 +3366,9 @@ app.get('/dispatch', (req, res) => {
 // Family groups overview: every family unit (connected component over the
 // parent/child/sibling/spouse graph, across ALL admin users — not scoped to
 // one owner), each member's residences and effective presence status.
-app.get('/dispatch/family-groups', (req, res) => {
+function buildFamilyGroupsOverview() {
   const groups = computeFamilyGroups();
-  const result = groups.map((memberIds, i) => ({
+  return groups.map((memberIds, i) => ({
     id: `family-${i}`,
     members: memberIds.map(uid => {
       const u = adminUsers.get(uid);
@@ -3385,7 +3386,21 @@ app.get('/dispatch/family-groups', (req, res) => {
       };
     }),
   }));
-  res.json(result);
+}
+
+app.get('/dispatch/family-groups', (req, res) => {
+  res.json(buildFamilyGroupsOverview());
+});
+
+// Same overview, reachable from the mobile app for staff roles (responders
+// included — they sit below 'dispatcher' in the role hierarchy so the
+// /dispatch prefix's requireRole('dispatcher') would otherwise block them).
+app.get('/api/family-groups', requireAuth, (req, res) => {
+  const role = req.supabaseUser!.role;
+  if (role !== 'responder' && role !== 'dispatcher' && role !== 'admin') {
+    return res.status(403).json({ error: 'Not authorized' });
+  }
+  res.json(buildFamilyGroupsOverview());
 });
 
 // Dispatch responders list (with location and assignment info)
