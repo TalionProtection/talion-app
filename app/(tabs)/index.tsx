@@ -143,12 +143,11 @@ export default function HomeScreen() {
   const [userStatus, setUserStatus] = useState<UserStatus>('available');
   const [showAlertModal, setShowAlertModal] = useState(false);
   const [incidentFilter, setIncidentFilter] = useState<'all' | 'assigned'>('all');
-  const [isSharingLocation, setIsSharingLocation] = useState(false);
   const { sendLocation, isConnected: wsConnected } = useWebSocketProvider();
   const sharingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const locationRef = useRef(location);
   const userRef = useRef(user);
-  const sharingUserIdRef = useRef<string>('');
+  const hasStartedSharingRef = useRef(false);
 
   // Keep refs always up-to-date
   useEffect(() => {
@@ -292,11 +291,7 @@ export default function HomeScreen() {
         timeout: 10000,
       });
       const data = await res.json();
-      // Track the resolved userId from server (may differ from what we sent, e.g. anon-xxx)
-      if (data.userId) {
-        sharingUserIdRef.current = data.userId;
-      }
-      console.log(`[ShareLocation] REST OK: ${JSON.stringify(data)}, tracked userId: ${sharingUserIdRef.current}`);
+      console.log(`[ShareLocation] REST OK: ${JSON.stringify(data)}`);
     } catch (err: any) {
       console.warn(`[ShareLocation] REST FAILED (${url}): ${err?.message || err}`);
     }
@@ -309,67 +304,30 @@ export default function HomeScreen() {
     }
   };
 
-  const handleShareLocation = () => {
-    if (isSharingLocation) {
-      // Stop sharing
-      if (sharingIntervalRef.current) {
-        clearInterval(sharingIntervalRef.current);
-        sharingIntervalRef.current = null;
-      }
-      setIsSharingLocation(false);
-      console.log('[ShareLocation] Stopped sharing location');
-      // Notify server to remove location from dispatch map
-      // Use the tracked userId from the server response (guaranteed to match)
-      const stopUserId = sharingUserIdRef.current;
-      console.log(`[ShareLocation] Sending stop for userId: ${stopUserId}`);
-      if (stopUserId) {
-        const apiBase = getApiBaseUrl();
-        fetchWithTimeout(`${apiBase}/api/location/stop`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId: stopUserId }),
-          timeout: 10000,
-        })
-          .then(r => r.json())
-          .then(data => {
-            console.log(`[ShareLocation] Stop REST OK: ${JSON.stringify(data)}`);
-            sharingUserIdRef.current = '';
-          })
-          .catch(err => console.warn(`[ShareLocation] Stop REST failed: ${err?.message || err}`));
-      } else {
-        console.warn('[ShareLocation] No tracked userId to stop - TTL will clean up automatically');
-      }
-      Alert.alert('Location Sharing Stopped', 'Your location is no longer being shared.');
-      return;
-    }
-    if (!locationState.hasPermission) {
-      Alert.alert('Location Permission Required', 'Please enable location permissions in your device settings.');
-      return;
-    }
-    // Send location immediately using current ref value
+  // Location sharing is on by default — no user toggle. Privacy is controlled solely
+  // via Ghost mode (profile screen), which hides the user from dispatch's live view
+  // without stopping the underlying location feed (still needed so a Ghost user can
+  // be revealed during an incident, and so family visibility — unaffected by Ghost
+  // mode — keeps working).
+  useEffect(() => {
+    if (!locationState.hasPermission || hasStartedSharingRef.current) return;
+    hasStartedSharingRef.current = true;
+
     const loc = locationRef.current;
-    console.log(`[ShareLocation] Starting share. location: ${loc.latitude.toFixed(6)}, ${loc.longitude.toFixed(6)}, user: ${user?.id || user?.email || 'none'}`);
+    console.log(`[ShareLocation] Auto-starting. location: ${loc.latitude.toFixed(6)}, ${loc.longitude.toFixed(6)}, user: ${user?.id || user?.email || 'none'}`);
     sendLocationToServerRef.current(loc.latitude, loc.longitude);
-    // Send location every 10 seconds using ref (always fresh data)
     sharingIntervalRef.current = setInterval(() => {
       const freshLoc = locationRef.current;
-      console.log(`[ShareLocation] Periodic send: ${freshLoc.latitude.toFixed(6)}, ${freshLoc.longitude.toFixed(6)}`);
       sendLocationToServerRef.current(freshLoc.latitude, freshLoc.longitude);
     }, 10000);
-    setIsSharingLocation(true);
-    Alert.alert(
-      'Location Shared',
-      `Your GPS location (${loc.latitude.toFixed(4)}, ${loc.longitude.toFixed(4)}) is now being shared with dispatch.`
-    );
-  };
+  }, [locationState.hasPermission]);
 
-  // Also send location whenever GPS position changes while sharing is active
+  // Also send location whenever GPS position changes
   useEffect(() => {
-    if (isSharingLocation) {
-      console.log(`[ShareLocation] Location changed while sharing: ${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}`);
+    if (hasStartedSharingRef.current) {
       sendLocationToServerRef.current(location.latitude, location.longitude);
     }
-  }, [location.latitude, location.longitude, isSharingLocation]);
+  }, [location.latitude, location.longitude]);
 
   // Clean up sharing interval on unmount
   useEffect(() => {
@@ -609,13 +567,6 @@ export default function HomeScreen() {
                 <Text style={styles.quickActionLabel}>Create Alert</Text>
               </TouchableOpacity>
             )}
-            <TouchableOpacity
-              style={[styles.quickActionButton, isSharingLocation && styles.quickActionActive]}
-              onPress={handleShareLocation}
-            >
-              <Text style={styles.quickActionIcon}>{isSharingLocation ? '✅' : '📍'}</Text>
-              <Text style={styles.quickActionLabel}>{isSharingLocation ? 'Sharing...' : 'Share Location'}</Text>
-            </TouchableOpacity>
             <TouchableOpacity style={styles.quickActionButton} onPress={() => router.push('/(tabs)/messages')}>
               <Text style={styles.quickActionIcon}>💬</Text>
               <Text style={styles.quickActionLabel}>Messages</Text>
