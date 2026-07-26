@@ -2146,6 +2146,36 @@ app.delete('/alerts/:id/duplicate-suggestion/:otherId', requireRole('dispatcher'
   res.json({ success: true });
 });
 
+// Permanently deletes an incident record. Unlike resolve (a status change,
+// meant to be part of the normal workflow), this is a hard delete — reserved
+// for admins, intended for cleaning up test/duplicate/junk data rather than
+// day-to-day dispatch use. Scrubs the deleted id out of any other incident's
+// possibleDuplicates/linkedIncidentIds so no dangling references remain.
+app.delete('/alerts/:id', requireRole('admin'), async (req, res) => {
+  const id = req.params.id as string;
+  const alert = alerts.get(id);
+  if (!alert) return res.status(404).json({ error: 'Incident not found' });
+
+  alerts.delete(id);
+  for (const other of alerts.values()) {
+    let changed = false;
+    if (other.possibleDuplicates?.some(d => d.id === id)) {
+      other.possibleDuplicates = other.possibleDuplicates.filter(d => d.id !== id);
+      changed = true;
+    }
+    if (other.linkedIncidentIds?.includes(id)) {
+      other.linkedIncidentIds = other.linkedIncidentIds.filter(otherId => otherId !== id);
+      changed = true;
+    }
+    if (changed) alerts.set(other.id, other);
+  }
+  persistAlerts();
+  await deleteAlertFromSupabase(id);
+  addAuditEntry('incident', 'Incident Deleted', req.supabaseUser?.id || 'Dispatch Console', `Deleted ${id}: ${alert.type} at ${alert.location?.address || 'unknown'}`);
+  broadcastMessage({ type: 'alertDeleted', alertId: id });
+  res.json({ success: true });
+});
+
 app.get('/responders', (req, res) => {
   const responders = Array.from(users.values()).filter(u => u.role === 'responder');
   res.json(responders);

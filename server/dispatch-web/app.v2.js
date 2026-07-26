@@ -234,6 +234,14 @@ function handleWsMessage(msg) {
       break;
     }
 
+    case 'alertDeleted': {
+      incidents = incidents.filter(i => i.id !== msg.alertId);
+      if (document.getElementById('detailModal')?.classList.contains('active')) closeDetailModal();
+      showToast(`🗑️ Incident ${formatIncidentId(msg.alertId)} supprimé`, 'info');
+      updateAll();
+      break;
+    }
+
     case 'acceptanceTimeout': {
       const respName = msg.responderName || msg.responderId;
       showToast(`\u23F0 ${respName} n'a pas accept\u00e9 l'incident ${formatIncidentId(msg.alertId)} dans les 5 min`, 'warning');
@@ -1042,6 +1050,7 @@ function renderIncidentsCards(container, filtered) {
           ${inc.status === 'active' ? `<button class="btn btn-warning btn-sm" onclick="event.stopPropagation(); acknowledgeIncident('${inc.id}')">Acquitter</button>` : ''}
           ${inc.status !== 'resolved' ? `<button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); openAssignModal('${inc.id}')">Assigner Unité</button>` : ''}
           ${inc.status !== 'resolved' ? `<button class="btn btn-success btn-sm" onclick="event.stopPropagation(); openResolveModal('${inc.id}')">Résoudre</button>` : ''}
+          <button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteIncident('${inc.id}')">Supprimer</button>
         </div>
       </div>
     `;
@@ -1068,6 +1077,7 @@ function renderIncidentsTable(container, filtered) {
         <td class="it-actions">
           ${inc.status === 'active' ? `<button class="btn btn-warning btn-sm" onclick="event.stopPropagation(); acknowledgeIncident('${inc.id}')">Acquitter</button>` : ''}
           ${inc.status !== 'resolved' ? `<button class="btn btn-success btn-sm" onclick="event.stopPropagation(); openResolveModal('${inc.id}')">Résoudre</button>` : ''}
+          <button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteIncident('${inc.id}')">Supprimer</button>
         </td>
       </tr>
     `;
@@ -1406,6 +1416,28 @@ async function acknowledgeIncident(id) {
   } catch (err) {
     console.error('Acknowledge failed:', err);
     alert('Failed to acknowledge incident.');
+  }
+}
+
+// Permanent, hard delete — for cleaning up test/junk incidents, not part of
+// the normal resolve workflow. Admin-only server-side; confirm before firing.
+async function deleteIncident(id) {
+  if (!confirm(`Supprimer définitivement l'incident ${formatIncidentId(id)} ?\n\nCette action est irréversible.`)) return;
+  try {
+    const res = await fetch(`${API_BASE}/alerts/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (res.ok) {
+      showToast(`Incident ${formatIncidentId(id)} supprimé`, 'success');
+      incidents = incidents.filter(i => i.id !== id);
+      if (document.getElementById('detailModal')?.classList.contains('active')) closeDetailModal();
+      refreshData();
+      if (dispatchMap) refreshMapData();
+    } else {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors de la suppression', 'error');
+    }
+  } catch (e) {
+    console.error('[Incidents] Delete error:', e);
+    showToast('Erreur réseau', 'error');
   }
 }
 
@@ -1827,7 +1859,10 @@ function updateIncidentMarkers(incidentData) {
       <div class="popup-detail">⏱ ${formatTimeAgo(inc.timestamp)}</div>
       ${inc.assignedCount > 0 ? `<div class="popup-detail">👮 ${inc.assignedCount} intervenant(s) assigné(s)</div>` : ''}
       ${correlationLine}
-      <div class="popup-actions"><button class="popup-btn assign" onclick="openDetailModal('${inc.id}')">Détails</button></div>
+      <div class="popup-actions">
+        <button class="popup-btn assign" onclick="openDetailModal('${inc.id}')">Détails</button>
+        <button class="popup-btn delete" onclick="deleteIncident('${inc.id}')">Supprimer</button>
+      </div>
       ${actions}
     `, { maxWidth: 280 });
 
@@ -2037,7 +2072,7 @@ handleWsMessage = function(msg) {
   // that update mapUsers and call updateUserMarkers() without a full refresh.
   // Including them here would cause a race condition where refreshMapData re-fetches
   // stale data and re-adds markers that were just removed.
-  if (dispatchMap && ['newAlert', 'alertAcknowledged', 'alertUpdate', 'alertResolved', 'alertsSnapshot', 'alertsList', 'responderLocationUpdate', 'responderStatusUpdate', 'userStatusChange'].includes(msg.type)) {
+  if (dispatchMap && ['newAlert', 'alertAcknowledged', 'alertUpdate', 'alertResolved', 'alertDeleted', 'alertsSnapshot', 'alertsList', 'responderLocationUpdate', 'responderStatusUpdate', 'userStatusChange'].includes(msg.type)) {
     refreshMapData();
   }
 };
@@ -3452,6 +3487,7 @@ async function openDetailModal(incidentId) {
   if (status === 'resolved') {
     actionsHtml.push(`<button class="btn btn-secondary" onclick="closeDetailModal()">Close</button>`);
   }
+  actionsHtml.push(`<button class="btn btn-danger" onclick="deleteIncident('${inc.id}')">🗑️ Supprimer</button>`);
   document.getElementById('detailActions').innerHTML = actionsHtml.join('');
   
   // Show modal
