@@ -6305,8 +6305,9 @@ app.post('/api/users/:id/addresses', async (req, res) => {
   }
   if (!userAddresses.has(userId)) userAddresses.set(userId, []);
   userAddresses.get(userId)!.push(newAddr);
-  // Save to Supabase
-  await supabaseAdmin.from('user_addresses').insert({
+  // Save to Supabase — this is the ONLY persistence for addresses (no JSON fallback),
+  // so a failed insert here means the address silently vanishes on the next restart.
+  const { error: insertAddrError } = await supabaseAdmin.from('user_addresses').insert({
     id: newAddr.id, user_id: userId, label, address,
     latitude: newAddr.latitude, longitude: newAddr.longitude,
     place_id: newAddr.placeId, is_primary: newAddr.isPrimary,
@@ -6316,6 +6317,7 @@ app.post('/api/users/:id/addresses', async (req, res) => {
     expires_at: newAddr.expiresAt || null,
     created_at: now, updated_at: now,
   });
+  if (insertAddrError) console.error('[Supabase] Failed to persist new address (will be lost on restart):', insertAddrError.message);
   res.status(201).json(newAddr);
 });
 
@@ -6346,13 +6348,14 @@ app.put('/api/users/:id/addresses/:addressId', async (req, res) => {
     expiresAt: expiresAt != null ? Number(expiresAt) : addresses[idx].expiresAt,
     updatedAt: Date.now() };
   addresses[idx] = updated;
-  await supabaseAdmin.from('user_addresses').update({
+  const { error: updateAddrError } = await supabaseAdmin.from('user_addresses').update({
     label: updated.label, address: updated.address, latitude: updated.latitude,
     longitude: updated.longitude, is_primary: updated.isPrimary,
     alarm_code: updated.alarmCode, notes: updated.notes, radius_meters: updated.radiusMeters || null,
     temporary: updated.temporary || false, expires_at: updated.expiresAt || null,
     updated_at: updated.updatedAt,
   }).eq('id', updated.id);
+  if (updateAddrError) console.error('[Supabase] Failed to persist address update (will revert on restart):', updateAddrError.message);
   res.json(updated);
 });
 
@@ -6363,7 +6366,8 @@ app.delete('/api/users/:id/addresses/:addressId', async (req, res) => {
   const idx = addresses.findIndex(a => a.id === req.params.addressId);
   if (idx === -1) return res.status(404).json({ error: 'Address not found' });
   addresses.splice(idx, 1);
-  await supabaseAdmin.from('user_addresses').delete().eq('id', req.params.addressId);
+  const { error: deleteAddrError } = await supabaseAdmin.from('user_addresses').delete().eq('id', req.params.addressId);
+  if (deleteAddrError) console.error('[Supabase] Failed to persist address deletion:', deleteAddrError.message);
   res.json({ success: true });
 });
 
