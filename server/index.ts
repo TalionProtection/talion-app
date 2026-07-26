@@ -560,6 +560,11 @@ interface CurfewCheck {
   hour: number; // 0-23, wall-clock — needed to recompute the next occurrence if recurring
   minute: number; // 0-59
   recurrence: 'once' | 'daily';
+  // Which direction of crossing should raise an alert at check time:
+  // 'exit'  → zone is where the target is expected to be (e.g. home); alert if OUTSIDE.
+  // 'entry' → zone is somewhere the target shouldn't be (e.g. off-limits); alert if INSIDE.
+  // 'both'  → always notify the owner of the status, regardless of inside/outside.
+  alertWhen: 'exit' | 'entry' | 'both';
   nextCheckAt: number; // epoch ms of the next scheduled fire
   active: boolean; // false once a 'once' check has fired, or either kind is cancelled
   createdAt: number;
@@ -612,6 +617,8 @@ interface ProximityAlert {
   location: { latitude: number; longitude: number };
   timestamp: number;
   acknowledged: boolean;
+  /** Only set for eventType 'curfew_violation' — the target's zone status at check time */
+  curfewResult?: 'inside' | 'outside';
 }
 
 // ─── Location History type ──────────────────────────────────────────────
@@ -1343,13 +1350,32 @@ async function fireCurfewCheck(id: string) {
   check.lastFiredAt = Date.now();
   check.lastResult = result;
 
-  if (result === 'outside') {
-    sendPushToUser(
-      check.ownerId,
-      '⏰ Couvre-feu non respecté',
-      `${check.targetUserName} n'est pas dans la zone attendue${check.center.address ? ' (' + check.center.address + ')' : ''}.`,
-      { type: 'curfew_check', curfewCheckId: check.id }
-    ).catch(() => {});
+  const alertWhen = check.alertWhen || 'exit'; // legacy checks predating this field default to prior behavior
+  const shouldAlert =
+    alertWhen === 'both' ||
+    (alertWhen === 'exit' && result === 'outside') ||
+    (alertWhen === 'entry' && result === 'inside');
+
+  if (shouldAlert) {
+    const address = check.center.address ? ` (${check.center.address})` : '';
+    let title: string;
+    let body: string;
+    if (alertWhen === 'entry') {
+      title = result === 'inside' ? '⚠️ Présence signalée' : '⏰ Vérification couvre-feu';
+      body = result === 'inside'
+        ? `${check.targetUserName} est dans la zone surveillée${address}.`
+        : `${check.targetUserName} n'est pas dans la zone surveillée${address}.`;
+    } else if (alertWhen === 'both') {
+      title = '⏰ Vérification couvre-feu';
+      body = result === 'inside'
+        ? `${check.targetUserName} est dans la zone attendue${address}.`
+        : `${check.targetUserName} n'est pas dans la zone attendue${address}.`;
+    } else {
+      title = '⏰ Couvre-feu non respecté';
+      body = `${check.targetUserName} n'est pas dans la zone attendue${address}.`;
+    }
+
+    sendPushToUser(check.ownerId, title, body, { type: 'curfew_check', curfewCheckId: check.id }).catch(() => {});
 
     const alert: ProximityAlert = {
       id: uuidv4(),
@@ -1364,12 +1390,12 @@ async function fireCurfewCheck(id: string) {
       location: target?.location || check.center,
       timestamp: Date.now(),
       acknowledged: false,
+      curfewResult: result,
     };
     proximityAlerts.unshift(alert);
     if (proximityAlerts.length > 500) proximityAlerts.length = 500;
     persistProximityAlerts();
   }
-  // result === 'inside' → satisfied, stay silent (alert only if NOT arrived)
 
   if (check.recurrence === 'once') {
     check.active = false;
@@ -2554,7 +2580,7 @@ app.get('/api/family/curfew-checks', (req, res) => {
 
 // POST /api/family/curfew-checks - create a one-off or daily curfew check
 app.post('/api/family/curfew-checks', (req, res) => {
-  const { ownerId, targetUserId, center, radiusMeters, hour, minute, recurrence } = req.body;
+  const { ownerId, targetUserId, center, radiusMeters, hour, minute, recurrence, alertWhen } = req.body;
   if (!ownerId || !targetUserId || !center?.latitude || !center?.longitude || !radiusMeters) {
     return res.status(400).json({ error: 'ownerId, targetUserId, center {latitude, longitude}, and radiusMeters required' });
   }
@@ -2563,6 +2589,9 @@ app.post('/api/family/curfew-checks', (req, res) => {
   }
   if (recurrence !== 'once' && recurrence !== 'daily') {
     return res.status(400).json({ error: "recurrence must be 'once' or 'daily'" });
+  }
+  if (alertWhen != null && !['exit', 'entry', 'both'].includes(alertWhen)) {
+    return res.status(400).json({ error: "alertWhen must be 'exit', 'entry', or 'both'" });
   }
   const familyIds = getFamilyMemberIds(ownerId);
   if (!familyIds.includes(targetUserId)) {
@@ -2579,6 +2608,7 @@ app.post('/api/family/curfew-checks', (req, res) => {
     hour: Number(hour),
     minute: Number(minute),
     recurrence,
+    alertWhen: alertWhen || 'exit',
     nextCheckAt: computeNextOccurrence(Number(hour), Number(minute)),
     active: true,
     createdAt: Date.now(),

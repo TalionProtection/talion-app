@@ -49,6 +49,7 @@ interface ProximityAlert {
   location: { latitude: number; longitude: number };
   timestamp: number;
   acknowledged: boolean;
+  curfewResult?: 'inside' | 'outside';
 }
 
 interface CurfewCheck {
@@ -61,6 +62,7 @@ interface CurfewCheck {
   hour: number;
   minute: number;
   recurrence: 'once' | 'daily';
+  alertWhen: 'exit' | 'entry' | 'both';
   nextCheckAt: number;
   active: boolean;
   lastFiredAt?: number;
@@ -153,6 +155,7 @@ export default function FamilyScreen() {
   const [curfewHour, setCurfewHour] = useState('21');
   const [curfewMinute, setCurfewMinute] = useState('00');
   const [curfewRecurrence, setCurfewRecurrence] = useState<'once' | 'daily'>('once');
+  const [curfewAlertWhen, setCurfewAlertWhen] = useState<'exit' | 'entry' | 'both'>('exit');
   const [curfewSaving, setCurfewSaving] = useState(false);
 
   // Address autocomplete
@@ -471,6 +474,7 @@ export default function FamilyScreen() {
           radiusMeters: radius,
           hour, minute,
           recurrence: curfewRecurrence,
+          alertWhen: curfewAlertWhen,
         }),
         timeout: 10000,
       });
@@ -490,7 +494,7 @@ export default function FamilyScreen() {
       Alert.alert('Erreur', 'Erreur réseau');
     }
     setCurfewSaving(false);
-  }, [BASE, userId, curfewTarget, perimeterRadius, perimeterCenter, perimeterAddress, curfewHour, curfewMinute, curfewRecurrence, fetchCurfewChecks]);
+  }, [BASE, userId, curfewTarget, perimeterRadius, perimeterCenter, perimeterAddress, curfewHour, curfewMinute, curfewRecurrence, curfewAlertWhen, fetchCurfewChecks]);
 
   const cancelCurfewCheck = useCallback(async (check: CurfewCheck) => {
     try {
@@ -628,6 +632,7 @@ export default function FamilyScreen() {
             setCurfewHour('21');
             setCurfewMinute('00');
             setCurfewRecurrence('once');
+            setCurfewAlertWhen('exit');
             setShowCreateCurfew(true);
           }}
         >
@@ -682,7 +687,7 @@ export default function FamilyScreen() {
     const isCurfew = item.eventType === 'curfew_violation';
     const needsAck = isExit || isCurfew;
     const title = isCurfew
-      ? `${item.targetUserName} n'était pas dans la zone attendue à l'heure du couvre-feu`
+      ? `${item.targetUserName} ${item.curfewResult === 'inside' ? 'était' : 'n\'était pas'} dans la zone surveillée à l'heure du couvre-feu`
       : `${item.targetUserName} ${isExit ? 'a quitté' : 'est revenu(e) dans'} le périmètre`;
     return (
       <View style={[styles.card, needsAck && !item.acknowledged && styles.cardAlert]}>
@@ -713,6 +718,12 @@ export default function FamilyScreen() {
     );
   };
 
+  const alertWhenLabel = (alertWhen: CurfewCheck['alertWhen'] | undefined): string => {
+    if (alertWhen === 'entry') return 'Alerte si présent(e) dans la zone';
+    if (alertWhen === 'both') return 'Alerte dans tous les cas';
+    return 'Alerte si absent(e) de la zone';
+  };
+
   const renderActiveCurfewChecks = () => {
     const active = curfewChecksList.filter(c => c.active);
     if (active.length === 0) return null;
@@ -727,6 +738,7 @@ export default function FamilyScreen() {
                 {c.recurrence === 'daily' ? 'Tous les jours' : 'Aujourd\'hui'} à {String(c.hour).padStart(2, '0')}:{String(c.minute).padStart(2, '0')}
                 {'  •  '}Prochain contrôle: {formatDate(c.nextCheckAt)}
               </Text>
+              <Text style={styles.curfewListDetail}>{alertWhenLabel(c.alertWhen)}</Text>
             </View>
             <TouchableOpacity onPress={() => cancelCurfewCheck(c)}>
               <IconSymbol name="trash.fill" size={18} color="#EF4444" />
@@ -1107,10 +1119,14 @@ export default function FamilyScreen() {
             {curfewTarget && (
               <>
                 <Text style={styles.formHint}>
-                  Sois alerté si {curfewTarget.name} n'est pas dans la zone attendue à l'heure choisie.
+                  {curfewAlertWhen === 'entry'
+                    ? `Sois alerté si ${curfewTarget.name} est dans la zone surveillée à l'heure choisie.`
+                    : curfewAlertWhen === 'both'
+                      ? `Sois notifié de la position de ${curfewTarget.name} (dans ou hors zone) à l'heure choisie.`
+                      : `Sois alerté si ${curfewTarget.name} n'est pas dans la zone attendue à l'heure choisie.`}
                 </Text>
 
-                <Text style={styles.formLabel}>Zone attendue</Text>
+                <Text style={styles.formLabel}>Zone {curfewAlertWhen === 'entry' ? 'surveillée' : 'attendue'}</Text>
                 <TouchableOpacity
                   style={styles.gpsBtn}
                   onPress={useMyPosition}
@@ -1209,6 +1225,28 @@ export default function FamilyScreen() {
                     onPress={() => setCurfewRecurrence('daily')}
                   >
                     <Text style={[styles.memberChipText, curfewRecurrence === 'daily' && styles.memberChipTextActive]}>Tous les jours</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <Text style={styles.formLabel}>Type d'alerte</Text>
+                <View style={styles.memberSelector}>
+                  <TouchableOpacity
+                    style={[styles.memberChip, curfewAlertWhen === 'exit' && styles.memberChipActive]}
+                    onPress={() => setCurfewAlertWhen('exit')}
+                  >
+                    <Text style={[styles.memberChipText, curfewAlertWhen === 'exit' && styles.memberChipTextActive]}>Sortie de la zone</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.memberChip, curfewAlertWhen === 'entry' && styles.memberChipActive]}
+                    onPress={() => setCurfewAlertWhen('entry')}
+                  >
+                    <Text style={[styles.memberChipText, curfewAlertWhen === 'entry' && styles.memberChipTextActive]}>Entrée dans la zone</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.memberChip, curfewAlertWhen === 'both' && styles.memberChipActive]}
+                    onPress={() => setCurfewAlertWhen('both')}
+                  >
+                    <Text style={[styles.memberChipText, curfewAlertWhen === 'both' && styles.memberChipTextActive]}>Les deux</Text>
                   </TouchableOpacity>
                 </View>
 
