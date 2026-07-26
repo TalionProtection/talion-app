@@ -157,7 +157,8 @@ export default function FamilyScreen() {
   // My own presence status (home/away) — manual toggle, always available
   const [myPresenceStatus, setMyPresenceStatus] = useState<'inside' | 'outside' | 'unknown'>('unknown');
   const [myPresenceLabel, setMyPresenceLabel] = useState<string | undefined>(undefined);
-  const [myPresenceSaving, setMyPresenceSaving] = useState<'inside' | 'outside' | null>(null);
+  const [myPresenceSource, setMyPresenceSource] = useState<'auto' | 'manual'>('auto');
+  const [myPresenceSaving, setMyPresenceSaving] = useState<'inside' | 'outside' | 'auto' | null>(null);
 
   // Staff (responder/dispatcher/admin): can view and manually set presence
   // for every family, not just their own — mirrors the console's Familles tab.
@@ -308,12 +309,13 @@ export default function FamilyScreen() {
       const data = await res.json();
       setMyPresenceStatus(data.status || 'unknown');
       setMyPresenceLabel(data.matchedLabel);
+      setMyPresenceSource(data.source || 'auto');
     } catch (e) {
       console.error('[Family] Error fetching my presence:', e);
     }
   }, [BASE, userId]);
 
-  const setMyPresence = useCallback(async (status: 'inside' | 'outside') => {
+  const setMyPresence = useCallback(async (status: 'inside' | 'outside' | 'auto') => {
     if (!userId) return;
     setMyPresenceSaving(status);
     try {
@@ -325,7 +327,7 @@ export default function FamilyScreen() {
       });
       if (res.ok) {
         if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        setMyPresenceStatus(status);
+        fetchMyPresence();
       } else {
         Alert.alert('Erreur', 'Impossible de mettre à jour votre statut');
       }
@@ -334,7 +336,7 @@ export default function FamilyScreen() {
       Alert.alert('Erreur', 'Erreur réseau');
     }
     setMyPresenceSaving(null);
-  }, [BASE, userId]);
+  }, [BASE, userId, fetchMyPresence]);
 
   const fetchAllFamilyGroups = useCallback(async () => {
     if (!isStaff) return;
@@ -350,7 +352,7 @@ export default function FamilyScreen() {
     }
   }, [BASE, isStaff]);
 
-  const setMemberPresence = useCallback(async (targetUserId: string, status: 'inside' | 'outside') => {
+  const setMemberPresence = useCallback(async (targetUserId: string, status: 'inside' | 'outside' | 'auto') => {
     setAllFamiliesSavingId(targetUserId);
     try {
       const res = await fetchWithTimeout(`${BASE}/api/family/presence/${targetUserId}`, {
@@ -958,6 +960,15 @@ export default function FamilyScreen() {
             >
               <Text style={styles.familyGroupActionBtnText}>Sorti</Text>
             </TouchableOpacity>
+            {m.source === 'manual' && (
+              <TouchableOpacity
+                style={styles.familyGroupActionBtn}
+                onPress={() => setMemberPresence(m.id, 'auto')}
+                disabled={allFamiliesSavingId === m.id}
+              >
+                <Text style={styles.familyGroupActionBtnText}>Auto</Text>
+              </TouchableOpacity>
+            )}
           </View>
         </View>
       ))}
@@ -1036,6 +1047,19 @@ export default function FamilyScreen() {
               <Text style={[styles.myPresenceBtnText, myPresenceStatus === 'outside' && styles.myPresenceBtnTextActive]}>Sorti</Text>
             )}
           </TouchableOpacity>
+          {myPresenceSource === 'manual' && (
+            <TouchableOpacity
+              style={styles.myPresenceBtn}
+              onPress={() => setMyPresence('auto')}
+              disabled={myPresenceSaving !== null}
+            >
+              {myPresenceSaving === 'auto' ? (
+                <ActivityIndicator size="small" color="#1e3a5f" />
+              ) : (
+                <Text style={styles.myPresenceBtnText}>Auto</Text>
+              )}
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 

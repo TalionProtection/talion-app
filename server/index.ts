@@ -1304,11 +1304,20 @@ function computeEffectivePresence(userId: string, forDispatch: boolean): {
   setBy?: string;
   setAt?: number;
 } {
-  if (forDispatch && adminUsers.get(userId)?.ghostMode) {
+  if (forDispatch) {
+    // A manual entry is an explicit human declaration (self, family, or
+    // dispatch/admin/responder) — it always wins over the live automatic
+    // computation once set, regardless of Ghost mode, until it's changed
+    // again or explicitly cleared back to automatic.
     const manual = manualPresence.get(userId);
-    return manual
-      ? { status: manual.status, source: 'manual', setBy: manual.setBy, setAt: manual.setAt }
-      : { status: 'unknown', source: 'manual' };
+    if (manual) {
+      return { status: manual.status, source: 'manual', setBy: manual.setBy, setAt: manual.setAt };
+    }
+    // No manual override on file: respect Ghost mode by not surfacing the
+    // live automatic value to dispatch.
+    if (adminUsers.get(userId)?.ghostMode) {
+      return { status: 'unknown', source: 'auto' };
+    }
   }
   const auto = computeAutoPresence(userId);
   return { ...auto, source: 'auto' };
@@ -2854,8 +2863,8 @@ app.get('/api/family/presence/:userId', (req, res) => {
 app.put('/api/family/presence/:targetUserId', requireAuth, (req, res) => {
   const targetUserId = req.params.targetUserId as string;
   const { status } = req.body;
-  if (status !== 'inside' && status !== 'outside') {
-    return res.status(400).json({ error: "status must be 'inside' or 'outside'" });
+  if (status !== 'inside' && status !== 'outside' && status !== 'auto') {
+    return res.status(400).json({ error: "status must be 'inside', 'outside', or 'auto'" });
   }
   const caller = req.supabaseUser!;
   const isSelf = caller.id === targetUserId;
@@ -2864,6 +2873,20 @@ app.put('/api/family/presence/:targetUserId', requireAuth, (req, res) => {
   if (!isSelf && !isFamilyOwner && !isStaff) {
     return res.status(403).json({ error: 'Not authorized to set this presence status' });
   }
+
+  if (status === 'auto') {
+    // Clear the manual override, handing control back to the live automatic computation.
+    manualPresence.delete(targetUserId);
+    persistManualPresence();
+    deleteManualPresenceFromSupabase(targetUserId).catch(() => {});
+    const payload = { type: 'presenceUpdated', targetUserId, status: 'auto', setBy: caller.id, setAt: Date.now() };
+    broadcastToRole('dispatcher', payload);
+    broadcastToRole('admin', payload);
+    broadcastToRole('responder', payload);
+    broadcastToUsers(getFamilyMemberIds(targetUserId), payload);
+    return res.json({ success: true });
+  }
+
   const entry: PresenceManualStatus = { status, setBy: caller.id, setAt: Date.now() };
   manualPresence.set(targetUserId, entry);
   persistManualPresence();
@@ -5792,6 +5815,13 @@ async function saveManualPresenceToSupabase(targetUserId: string, p: PresenceMan
     });
     if (error) console.error('[Supabase] saveManualPresenceToSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] saveManualPresenceToSupabase error:', e); }
+}
+
+async function deleteManualPresenceFromSupabase(targetUserId: string): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('presence_status').delete().eq('target_user_id', targetUserId);
+    if (error) console.error('[Supabase] deleteManualPresenceFromSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] deleteManualPresenceFromSupabase error:', e); }
 }
 
 // ─── Sync push_tokens from Supabase on startup ───────────────────────────

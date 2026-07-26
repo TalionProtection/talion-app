@@ -1269,6 +1269,7 @@ function renderFamilyGroups() {
             <div class="family-member-actions">
               <button class="btn btn-secondary btn-sm" onclick="setPresence('${m.id}', 'inside')">Marquer présent</button>
               <button class="btn btn-secondary btn-sm" onclick="setPresence('${m.id}', 'outside')">Marquer sorti</button>
+              ${m.source === 'manual' ? `<button class="btn btn-secondary btn-sm" onclick="setPresence('${m.id}', 'auto')">Revenir en auto</button>` : ''}
             </div>
           </div>
         `).join('')}
