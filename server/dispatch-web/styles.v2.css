@@ -176,6 +176,51 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .badge-resolved { background: #22c55e; }
 .badge-escalated { background: #f59e0b; }
 .badge-escalated-hard { background: #ef4444; }
+.badge-aging-warning { background: #f59e0b; }
+.badge-aging-critical { background: #ef4444; animation: aging-pulse 1.4s infinite; }
+@keyframes aging-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+.incident-card.aging-critical, .ov-inc-card.aging-critical { border-left: 3px solid #ef4444; }
+.incident-card.aging-warning, .ov-inc-card.aging-warning { border-left: 3px solid #f59e0b; }
+
+/* ─── Duplicate suggestions ──────────────────────────────── */
+.inc-duplicates { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.dup-suggestion {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 10px; border-radius: 8px; font-size: 12px;
+  background: var(--bg-panel-header); border: 1px solid var(--border-subtle);
+}
+.dup-suggestion .dup-label { flex: 1; min-width: 0; color: var(--text-secondary); }
+.dup-badge { padding: 2px 7px; border-radius: 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; color: #fff; flex-shrink: 0; }
+.dup-badge.same-reporter { background: #dc2626; }
+.dup-badge.family { background: #8b5cf6; }
+.dup-badge.proximity { background: #6b7280; }
+.dup-suggestion .btn-sm { padding: 3px 8px; font-size: 11px; }
+.inc-linked { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; font-size: 12px; color: var(--text-muted); }
+.inc-linked .linked-chip { padding: 2px 8px; border-radius: 10px; background: var(--bg-active); color: var(--text-primary); cursor: pointer; font-weight: 600; }
+
+/* ─── Incident search + view toggle ──────────────────────── */
+.toolbar-secondary { padding-top: 0; }
+.incident-search-box { flex: 1; min-width: 220px; }
+.incident-search-box input {
+  width: 100%; padding: 8px 12px; border-radius: 8px;
+  border: 1px solid var(--border-main); background: var(--bg-input, var(--bg-panel-header));
+  color: var(--text-body); font-size: 13px; outline: none; box-sizing: border-box;
+}
+.incident-search-box input:focus { border-color: #3b82f6; }
+.incident-view-toggle { display: flex; gap: 6px; }
+.btn-view-toggle { padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border-main); background: transparent; color: var(--text-muted); font-size: 12px; cursor: pointer; }
+.btn-view-toggle.active { background: var(--bg-active); border-color: #3b82f6; color: var(--text-primary); }
+
+/* ─── Incident table view ────────────────────────────────── */
+.incident-table-wrapper { padding: 0 24px 24px; overflow-x: auto; }
+.incident-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.incident-table th { text-align: left; padding: 8px 10px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); border-bottom: 1px solid var(--border-main); }
+.incident-table td { padding: 8px 10px; border-bottom: 1px solid var(--border-subtle); vertical-align: middle; }
+.incident-table tr.aging-critical td:first-child { border-left: 3px solid #ef4444; }
+.incident-table tr.aging-warning td:first-child { border-left: 3px solid #f59e0b; }
+.incident-table tr:hover { background: var(--bg-hover); cursor: pointer; }
+.incident-table .it-actions { display: flex; gap: 4px; white-space: nowrap; }
+.incident-table .it-actions .btn-sm { padding: 3px 8px; font-size: 11px; }
 .inc-desc { font-size: 13px; color: var(--text-secondary); margin-bottom: 8px; line-height: 1.4; }
 .inc-meta { font-size: 12px; color: var(--text-faint); margin-bottom: 10px; }
 .inc-assigned { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }

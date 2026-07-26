@@ -450,7 +450,8 @@ interface Alert {
   severity: 'low' | 'medium' | 'high' | 'critical';
   location: { latitude: number; longitude: number; address: string };
   description: string;
-  createdBy: string;
+  createdBy: string; // display name/label shown in the UI — not reliably a user id (varies by creation route)
+  reporterId?: string; // actual reporting user's id when known; used for duplicate-detection matching
   createdAt: number;
   status: 'active' | 'acknowledged' | 'resolved' | 'cancelled';
   respondingUsers: string[];
@@ -461,6 +462,8 @@ interface Alert {
   escalationLevel?: 0 | 1 | 2; // max of responderEscalation, drives dispatch UI sort/style
   visibilityRadiusMeters?: number; // Ghost-mode users within this radius get a reveal-request push
   revealedUserIds?: string[]; // Ghost-mode users who confirmed becoming visible for this incident
+  possibleDuplicates?: { id: string; confidence: 'same-reporter' | 'family' | 'proximity' }[]; // auto-suggested correlations, dispatcher confirms or dismisses
+  linkedIncidentIds?: string[]; // dispatcher-confirmed links to other incidents (bidirectional)
 }
 
 interface AdminIncident {
@@ -470,9 +473,19 @@ interface AdminIncident {
   status: string;
   reportedBy: string;
   address: string;
+  description?: string;
   timestamp: number;
   resolvedAt?: number;
   assignedCount: number;
+  respondingUsers?: string[];
+  respondingNames?: string[];
+  responderStatuses?: Record<string, ResponderStatus>;
+  statusHistory?: StatusHistoryEntry[];
+  responderEscalation?: Record<string, 0 | 1 | 2>;
+  escalationLevel?: 0 | 1 | 2;
+  photos?: string[];
+  possibleDuplicates?: { id: string; confidence: 'same-reporter' | 'family' | 'proximity' }[];
+  linkedIncidentIds?: string[];
 }
 
 interface AuditEntry {
@@ -1106,6 +1119,7 @@ async function handleCreateAlert(ws: any, userId: string, userRole: string, aler
     location: alertData.location || { latitude: 0, longitude: 0, address: 'Unknown' },
     description: alertData.description || '',
     createdBy: userId,
+    reporterId: userId,
     createdAt: Date.now(),
     status: 'active',
     respondingUsers: [],
@@ -1113,6 +1127,7 @@ async function handleCreateAlert(ws: any, userId: string, userRole: string, aler
   };
 
   alerts.set(alert.id, alert);
+  linkPossibleDuplicates(alert);
   persistAlerts();
   console.log(`New alert created: ${alert.id} by ${userId}`);
 
@@ -1228,6 +1243,55 @@ function getFamilyMemberIds(userId: string): string[] {
   return adminUser.relationships
     .filter(r => familyTypes.includes(r.type))
     .map(r => r.userId);
+}
+
+// ─── Duplicate incident detection ────────────────────────────────────────
+// Same real-world event reported more than once — most often several family
+// members each hitting SOS/reporting the same break-in, fire, etc. Never
+// auto-merges or changes status; only surfaces a confidence-tiered suggestion
+// for the dispatcher to confirm (link) or dismiss.
+const DUPLICATE_TIME_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
+const DUPLICATE_DISTANCE_METERS = 300;
+
+function findPossibleDuplicates(alert: Alert): { id: string; confidence: 'same-reporter' | 'family' | 'proximity' }[] {
+  if (!alert.location) return [];
+  const reporterId = alert.reporterId || alert.createdBy;
+  const reporterFamilyIds = new Set(getFamilyMemberIds(reporterId));
+  const matches: { id: string; confidence: 'same-reporter' | 'family' | 'proximity' }[] = [];
+  for (const other of alerts.values()) {
+    if (other.id === alert.id) continue;
+    if (other.status === 'resolved' || other.status === 'cancelled') continue;
+    if (!other.location) continue;
+    if (Math.abs(other.createdAt - alert.createdAt) > DUPLICATE_TIME_WINDOW_MS) continue;
+    const dist = haversineDistance(alert.location.latitude, alert.location.longitude, other.location.latitude, other.location.longitude);
+    if (dist > DUPLICATE_DISTANCE_METERS) continue;
+    const otherReporterId = other.reporterId || other.createdBy;
+    let confidence: 'same-reporter' | 'family' | 'proximity';
+    if (otherReporterId === reporterId) confidence = 'same-reporter';
+    else if (reporterFamilyIds.has(otherReporterId)) confidence = 'family';
+    else confidence = 'proximity';
+    matches.push({ id: other.id, confidence });
+  }
+  return matches;
+}
+
+// Computes matches for a newly created alert and retroactively updates the
+// matched (already-existing) alerts too, since they don't yet know about this
+// new one. Caller is responsible for persistAlerts() afterwards.
+function linkPossibleDuplicates(alert: Alert): void {
+  const matches = findPossibleDuplicates(alert);
+  if (matches.length === 0) return;
+  alert.possibleDuplicates = matches;
+  for (const match of matches) {
+    const other = alerts.get(match.id);
+    if (!other) continue;
+    other.possibleDuplicates = other.possibleDuplicates || [];
+    if (!other.possibleDuplicates.some(d => d.id === alert.id)) {
+      other.possibleDuplicates.push({ id: alert.id, confidence: match.confidence });
+      alerts.set(other.id, other);
+      broadcastMessage({ type: 'alertUpdate', data: { ...other, respondingNames: (other.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
+    }
+  }
 }
 
 // Broadcast a message to specific user IDs (for family location sharing)
@@ -2037,6 +2101,50 @@ app.put('/alerts/:id/resolve', requireRole('dispatcher'), (req, res) => {
   res.json({ success: true });
 });
 
+// Dispatcher confirms two incidents are reports of the same real-world event.
+// Bidirectional link; drops the pair from possibleDuplicates on both sides
+// since it's now a confirmed correlation rather than a suggestion.
+app.post('/alerts/:id/link/:otherId', requireRole('dispatcher'), (req, res) => {
+  const id = req.params.id as string;
+  const otherId = req.params.otherId as string;
+  const alert = alerts.get(id);
+  const other = alerts.get(otherId);
+  if (!alert || !other) return res.status(404).json({ error: 'Incident not found' });
+  alert.linkedIncidentIds = alert.linkedIncidentIds || [];
+  other.linkedIncidentIds = other.linkedIncidentIds || [];
+  if (!alert.linkedIncidentIds.includes(otherId)) alert.linkedIncidentIds.push(otherId);
+  if (!other.linkedIncidentIds.includes(id)) other.linkedIncidentIds.push(id);
+  alert.possibleDuplicates = (alert.possibleDuplicates || []).filter(d => d.id !== otherId);
+  other.possibleDuplicates = (other.possibleDuplicates || []).filter(d => d.id !== id);
+  alerts.set(alert.id, alert);
+  alerts.set(other.id, other);
+  persistAlerts();
+  addAuditEntry('incident', 'Incidents Linked', req.supabaseUser?.id || 'Dispatch Console', `Linked ${alert.id} and ${other.id} as the same event`);
+  broadcastMessage({ type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
+  broadcastMessage({ type: 'alertUpdate', data: { ...other, respondingNames: (other.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
+  res.json({ success: true });
+});
+
+// Dispatcher dismisses a suggested correlation (not the same event) — hides it
+// from both sides without touching either incident's status or data.
+app.delete('/alerts/:id/duplicate-suggestion/:otherId', requireRole('dispatcher'), (req, res) => {
+  const id = req.params.id as string;
+  const otherId = req.params.otherId as string;
+  const alert = alerts.get(id);
+  if (!alert) return res.status(404).json({ error: 'Incident not found' });
+  alert.possibleDuplicates = (alert.possibleDuplicates || []).filter(d => d.id !== otherId);
+  alerts.set(alert.id, alert);
+  const other = alerts.get(otherId);
+  if (other) {
+    other.possibleDuplicates = (other.possibleDuplicates || []).filter(d => d.id !== id);
+    alerts.set(other.id, other);
+  }
+  persistAlerts();
+  broadcastMessage({ type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
+  if (other) broadcastMessage({ type: 'alertUpdate', data: { ...other, respondingNames: (other.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
+  res.json({ success: true });
+});
+
 app.get('/responders', (req, res) => {
   const responders = Array.from(users.values()).filter(u => u.role === 'responder');
   res.json(responders);
@@ -2059,6 +2167,7 @@ app.post('/dispatch/incidents', async (req, res) => {
     revealedUserIds: [],
   };
   alerts.set(alert.id, alert);
+  linkPossibleDuplicates(alert);
   persistAlerts();
   saveAlertToSupabase(alert).catch(() => {});
   broadcastMessage({ type: 'newAlert', data: alert });
@@ -2097,11 +2206,13 @@ app.post('/alerts', requireAuth, async (req, res) => {
     location: location || { latitude: 0, longitude: 0, address: 'Unknown' },
     description: description || '',
     createdBy: createdBy || 'system',
+    reporterId: req.supabaseUser?.id || createdBy || undefined,
     createdAt: Date.now(),
     status: 'active',
     respondingUsers: [],
   };
   alerts.set(alert.id, alert);
+  linkPossibleDuplicates(alert);
   persistAlerts();
   broadcastMessage({ type: 'newAlert', data: alert });
 
@@ -2348,13 +2459,15 @@ app.post('/api/sos', async (req, res) => {
     location: location || { latitude: 0, longitude: 0, address: 'Unknown' },
     description: description || `SOS Alert from ${userName || 'Unknown'}`,
     createdBy: userName || userId || 'mobile-user',
+    reporterId: userId || undefined,
     createdAt: Date.now(),
     status: 'active',
     respondingUsers: [],
     photos: [],
   };
-  
+
   alerts.set(alert.id, alert);
+  linkPossibleDuplicates(alert);
   persistAlerts();
   addAuditEntry('incident', 'SOS Alert Created (REST)', userId || 'unknown', `SOS ${alert.id}: ${alert.location.address}`);
   
@@ -2973,6 +3086,10 @@ function getReciprocalRelType(type: string): string {
 
 // Admin incidents list (formatted for dashboard)
 app.get('/admin/incidents', (req, res) => {
+  // NOTE: this list is also what the 30s polling refresh replaces `incidents` with
+  // client-side — it must carry every field the card/table rendering and the
+  // duplicate-suggestion UI read, or those otherwise-live-updated fields flicker
+  // away on the next poll.
   const incidents: AdminIncident[] = Array.from(alerts.values()).map(a => ({
     id: a.id,
     type: a.type,
@@ -2980,9 +3097,19 @@ app.get('/admin/incidents', (req, res) => {
     status: a.status,
     reportedBy: a.createdBy,
     address: a.location.address,
+    description: a.description,
     timestamp: a.createdAt,
     resolvedAt: a.status === 'resolved' ? a.createdAt + Math.floor(Math.random() * 3600000) : undefined,
     assignedCount: a.respondingUsers.length,
+    respondingUsers: a.respondingUsers || [],
+    respondingNames: (a.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid),
+    responderStatuses: a.responderStatuses || {},
+    statusHistory: a.statusHistory || [],
+    responderEscalation: a.responderEscalation || {},
+    escalationLevel: a.escalationLevel || 0,
+    photos: a.photos || [],
+    possibleDuplicates: a.possibleDuplicates || [],
+    linkedIncidentIds: a.linkedIncidentIds || [],
   }));
   res.json(incidents);
 });
@@ -4525,11 +4652,13 @@ app.post('/api/patrol/reports/:id/escalate-to-incident', async (req, res) => {
     location,
     description: `Ronde escaladée — ${severityConfig.label} (rapport ${report.id})`,
     createdBy: report.createdByName,
+    reporterId: report.createdBy,
     createdAt: Date.now(),
     status: 'active',
     respondingUsers: [],
   };
   alerts.set(alert.id, alert);
+  linkPossibleDuplicates(alert);
   persistAlerts();
   saveAlertToSupabase(alert).catch(() => {});
   broadcastMessage({ type: 'newAlert', data: alert });
@@ -5170,6 +5299,7 @@ async function loadAlertsFromSupabase(): Promise<void> {
           status: a.status,
           description: a.description || '',
           createdBy: a.created_by,
+          reporterId: a.reporter_id || undefined,
           createdAt: a.created_at,
           location: a.location || { latitude: 0, longitude: 0, address: 'Unknown' },
           respondingUsers: a.responding_users || [],
@@ -5180,6 +5310,8 @@ async function loadAlertsFromSupabase(): Promise<void> {
           escalationLevel: a.escalation_level || 0,
           visibilityRadiusMeters: a.visibility_radius_meters || undefined,
           revealedUserIds: a.revealed_user_ids || [],
+          possibleDuplicates: a.possible_duplicates || [],
+          linkedIncidentIds: a.linked_incident_ids || [],
         });
       });
       console.log(`[Supabase] Loaded ${data.length} alerts`);
@@ -5196,6 +5328,7 @@ async function saveAlertToSupabase(alert: Alert): Promise<void> {
       status: alert.status,
       description: alert.description,
       created_by: alert.createdBy,
+      reporter_id: alert.reporterId || null,
       created_at: alert.createdAt,
       location: alert.location,
       responding_users: alert.respondingUsers || [],
@@ -5206,6 +5339,8 @@ async function saveAlertToSupabase(alert: Alert): Promise<void> {
       escalation_level: alert.escalationLevel || 0,
       visibility_radius_meters: alert.visibilityRadiusMeters || null,
       revealed_user_ids: alert.revealedUserIds || [],
+      possible_duplicates: alert.possibleDuplicates || [],
+      linked_incident_ids: alert.linkedIncidentIds || [],
     });
     if (error) console.error('[Supabase] saveAlertToSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] saveAlertToSupabase error:', e); }

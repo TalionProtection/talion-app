@@ -774,9 +774,17 @@ function formatDateTime(ts) {
 function renderOverview() {
   // Active incidents
   const container = document.getElementById('overviewIncidents');
+  const OV_AGING_RANK = { critical: 0, warning: 1 };
   const activeIncs = incidents
     .filter(i => i.status !== 'resolved')
-    .sort((a, b) => ((b.escalationLevel || 0) - (a.escalationLevel || 0)) || ((SEVERITY_ORDER[a.severity] ?? 3) - (SEVERITY_ORDER[b.severity] ?? 3)) || (b.timestamp - a.timestamp));
+    .sort((a, b) => {
+      const aRank = OV_AGING_RANK[incidentAgingTier(a)] ?? 2;
+      const bRank = OV_AGING_RANK[incidentAgingTier(b)] ?? 2;
+      return (aRank - bRank)
+        || ((b.escalationLevel || 0) - (a.escalationLevel || 0))
+        || ((SEVERITY_ORDER[a.severity] ?? 3) - (SEVERITY_ORDER[b.severity] ?? 3))
+        || (b.timestamp - a.timestamp);
+    });
 
   if (activeIncs.length === 0) {
     container.innerHTML = '<div class="ov-empty"><div class="ov-empty-icon">\u2705</div><div class="ov-empty-text">Aucun incident actif</div></div>';
@@ -790,8 +798,11 @@ function renderOverview() {
         : inc.escalationLevel === 1
           ? '<span class="badge badge-escalated">\u23f0 Escalade N1</span>'
           : '';
+      const ovAgingTier = incidentAgingTier(inc);
+      const ovAgingClass = ovAgingTier ? ` aging-${ovAgingTier}` : '';
+      const ovAgingBadge = ovAgingTier ? `<span class="badge badge-aging-${ovAgingTier}">\u23f3 ${formatAgeMinutes(inc)}</span>` : '';
       return `
-      <div class="ov-inc-card sev-${inc.severity}${escClass}" onclick="openDetailModal('${inc.id}')">
+      <div class="ov-inc-card sev-${inc.severity}${escClass}${ovAgingClass}" onclick="openDetailModal('${inc.id}')">
         <div class="ov-inc-icon">${TYPE_ICONS[inc.type] || '\ud83d\udea8'}</div>
         <div class="ov-inc-body">
           <div class="ov-inc-top">
@@ -805,6 +816,7 @@ function renderOverview() {
               <span class="badge badge-${inc.severity}">${sevLabel(inc.severity)}</span>
               <span class="badge badge-${inc.status}">${statusLabel(inc.status)}</span>
               ${escBadge}
+              ${ovAgingBadge}
               ${assignedLabel}
             </div>
             <div class="ov-inc-actions">
@@ -850,6 +862,99 @@ function renderOverview() {
 }
 
 // ─── Incidents Rendering ─────────────────────────────────────
+// ─── Unacknowledged-aging (triage SLA) ────────────────────────
+const INCIDENT_ACK_WARNING_MINUTES = 5;
+const INCIDENT_ACK_CRITICAL_MINUTES = 15;
+
+function incidentAgeMinutes(inc) {
+  return (Date.now() - inc.timestamp) / 60000;
+}
+
+function incidentAgingTier(inc) {
+  if (inc.status !== 'active') return null;
+  const mins = incidentAgeMinutes(inc);
+  if (mins >= INCIDENT_ACK_CRITICAL_MINUTES) return 'critical';
+  if (mins >= INCIDENT_ACK_WARNING_MINUTES) return 'warning';
+  return null;
+}
+
+function formatAgeMinutes(inc) {
+  const mins = Math.floor(incidentAgeMinutes(inc));
+  if (mins < 60) return `${mins} min`;
+  return `${Math.floor(mins / 60)}h${String(mins % 60).padStart(2, '0')}`;
+}
+
+// ─── Duplicate-suggestion rendering + actions ─────────────────
+const DUP_CONFIDENCE_LABELS = { 'same-reporter': 'Même rapporteur', family: 'Famille', proximity: 'À proximité' };
+
+function renderDuplicateSuggestions(inc) {
+  const dups = inc.possibleDuplicates || [];
+  if (dups.length === 0) return '';
+  return `<div class="inc-duplicates">${dups.map(d => {
+    const other = incidents.find(i => i.id === d.id);
+    const otherLabel = formatIncidentId(d.id);
+    return `
+      <div class="dup-suggestion">
+        <span class="dup-badge ${d.confidence}">${DUP_CONFIDENCE_LABELS[d.confidence] || d.confidence}</span>
+        <span class="dup-label">Possible doublon avec ${otherLabel}${other ? ' — ' + escapeHtml(other.address || '') : ''}</span>
+        <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); linkIncidents('${inc.id}','${d.id}')">Lier</button>
+        <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); dismissDuplicateSuggestion('${inc.id}','${d.id}')">Ignorer</button>
+      </div>
+    `;
+  }).join('')}</div>`;
+}
+
+function renderLinkedIncidents(inc) {
+  const linked = inc.linkedIncidentIds || [];
+  if (linked.length === 0) return '';
+  return `<div class="inc-linked">🔗 Lié à: ${linked.map(id => `<span class="linked-chip" onclick="event.stopPropagation(); openDetailModal('${id}')">${formatIncidentId(id)}</span>`).join('')}</div>`;
+}
+
+function refreshOpenDetailModal(id) {
+  if (document.getElementById('detailModal')?.classList.contains('active')) {
+    openDetailModal(id);
+  }
+}
+
+async function linkIncidents(id, otherId) {
+  try {
+    const res = await fetch(`${API_BASE}/alerts/${encodeURIComponent(id)}/link/${encodeURIComponent(otherId)}`, { method: 'POST' });
+    if (res.ok) { showToast('Incidents liés', 'success'); await refreshData(); refreshOpenDetailModal(id); }
+    else { const err = await res.json().catch(() => ({})); showToast(err.error || 'Erreur lors de la liaison', 'error'); }
+  } catch (e) {
+    console.error('[Incidents] Link error:', e);
+    showToast('Erreur réseau', 'error');
+  }
+}
+
+async function dismissDuplicateSuggestion(id, otherId) {
+  try {
+    const res = await fetch(`${API_BASE}/alerts/${encodeURIComponent(id)}/duplicate-suggestion/${encodeURIComponent(otherId)}`, { method: 'DELETE' });
+    if (res.ok) { showToast('Suggestion ignorée', 'info'); await refreshData(); refreshOpenDetailModal(id); }
+    else { const err = await res.json().catch(() => ({})); showToast(err.error || 'Erreur', 'error'); }
+  } catch (e) {
+    console.error('[Incidents] Dismiss error:', e);
+    showToast('Erreur réseau', 'error');
+  }
+}
+
+// ─── Incidents list: filter, search, sort, cards/table ────────
+let currentIncidentSearch = '';
+let incidentViewMode = localStorage.getItem('talion_incident_view') || 'cards';
+
+function onIncidentSearchInput(value) {
+  currentIncidentSearch = (value || '').trim().toLowerCase();
+  renderIncidents();
+}
+
+function setIncidentViewMode(mode) {
+  incidentViewMode = mode;
+  localStorage.setItem('talion_incident_view', mode);
+  document.getElementById('btnViewCards')?.classList.toggle('active', mode === 'cards');
+  document.getElementById('btnViewTable')?.classList.toggle('active', mode === 'table');
+  renderIncidents();
+}
+
 function renderIncidents() {
   const container = document.getElementById('incidentsList');
   let filtered = incidents;
@@ -858,52 +963,124 @@ function renderIncidents() {
   } else {
     filtered = incidents.filter(i => i.status === currentFilter);
   }
-  filtered.sort((a, b) => ((b.escalationLevel || 0) - (a.escalationLevel || 0)) || ((SEVERITY_ORDER[a.severity] ?? 3) - (SEVERITY_ORDER[b.severity] ?? 3)) || (b.timestamp - a.timestamp));
+  if (currentIncidentSearch) {
+    const q = currentIncidentSearch;
+    filtered = filtered.filter(i =>
+      (i.address || '').toLowerCase().includes(q) ||
+      (i.description || '').toLowerCase().includes(q) ||
+      (i.reportedBy || '').toLowerCase().includes(q) ||
+      (i.id || '').toLowerCase().includes(q) ||
+      typeLabel(i.type).toLowerCase().includes(q)
+    );
+  }
+
+  const AGING_RANK = { critical: 0, warning: 1 };
+  filtered.sort((a, b) => {
+    const aRank = AGING_RANK[incidentAgingTier(a)] ?? 2;
+    const bRank = AGING_RANK[incidentAgingTier(b)] ?? 2;
+    return (aRank - bRank)
+      || ((b.escalationLevel || 0) - (a.escalationLevel || 0))
+      || ((SEVERITY_ORDER[a.severity] ?? 3) - (SEVERITY_ORDER[b.severity] ?? 3))
+      || (b.timestamp - a.timestamp);
+  });
+
+  container.className = incidentViewMode === 'table' ? 'incident-table-wrapper' : 'incident-cards';
 
   if (filtered.length === 0) {
     container.innerHTML = '<div class="empty-state"><div class="empty-icon">✅</div><p>No incidents matching this filter</p></div>';
     return;
   }
 
+  if (incidentViewMode === 'table') {
+    renderIncidentsTable(container, filtered);
+  } else {
+    renderIncidentsCards(container, filtered);
+  }
+}
+
+function renderIncidentsCards(container, filtered) {
   container.innerHTML = filtered.map(inc => {
     const names = inc.respondingNames || [];
     const assignedChips = names.length > 0
-      ? `<div class="inc-assigned"><span class="inc-assigned-label">Assign\u00e9s:</span>${names.map(n => `<span class="assigned-chip assigned-name-chip">${n}</span>`).join('')}</div>`
-      : (inc.assignedCount > 0 ? `<div class="inc-assigned"><span class="inc-assigned-label">Assign\u00e9s:</span><span class="assigned-chip">${inc.assignedCount} responder(s)</span></div>` : '');
+      ? `<div class="inc-assigned"><span class="inc-assigned-label">Assignés:</span>${names.map(n => `<span class="assigned-chip assigned-name-chip">${n}</span>`).join('')}</div>`
+      : (inc.assignedCount > 0 ? `<div class="inc-assigned"><span class="inc-assigned-label">Assignés:</span><span class="assigned-chip">${inc.assignedCount} responder(s)</span></div>` : '');
     const escClass = inc.escalationLevel === 2 ? ' escalated-hard' : inc.escalationLevel === 1 ? ' escalated-soft' : '';
     const escBadge = inc.escalationLevel === 2
-      ? '<span class="badge badge-escalated-hard">\u23f0 Escalade N2</span>'
+      ? '<span class="badge badge-escalated-hard">⏰ Escalade N2</span>'
       : inc.escalationLevel === 1
-        ? '<span class="badge badge-escalated">\u23f0 Escalade N1</span>'
+        ? '<span class="badge badge-escalated">⏰ Escalade N1</span>'
         : '';
+    const agingTier = incidentAgingTier(inc);
+    const agingClass = agingTier ? ` aging-${agingTier}` : '';
+    const agingBadge = agingTier
+      ? `<span class="badge badge-aging-${agingTier}">⏳ ${formatAgeMinutes(inc)} sans acquittement</span>`
+      : '';
 
     return `
-      <div class="incident-card sev-${inc.severity}${escClass}" style="cursor:pointer;" onclick="openDetailModal('${inc.id}')">
+      <div class="incident-card sev-${inc.severity}${escClass}${agingClass}" style="cursor:pointer;" onclick="openDetailModal('${inc.id}')">
         <div class="inc-header">
           <div class="inc-header-left">
             <span class="inc-type-icon">${TYPE_ICONS[inc.type] || '🚨'}</span>
             <div class="inc-info">
-        <h4>${inc.id.includes(' \u2014 ') ? inc.id : formatIncidentId(inc.id) + ' \u2014 ' + typeLabel(inc.type)}</h4>
-              <span class="inc-address">\ud83d\udccd ${inc.address}</span>         </div>
+        <h4>${inc.id.includes(' — ') ? inc.id : formatIncidentId(inc.id) + ' — ' + typeLabel(inc.type)}</h4>
+              <span class="inc-address">📍 ${inc.address}</span>         </div>
           </div>
           <div class="inc-badges">
             <span class="badge badge-${inc.severity}">${sevLabel(inc.severity)}</span>
             <span class="badge badge-${inc.status}">${statusLabel(inc.status)}</span>
             ${escBadge}
+            ${agingBadge}
           </div>
         </div>
-        <div class="inc-desc">Signal\u00e9 par: ${inc.reportedBy}${(inc.photos && inc.photos.length > 0) ? ` \u00b7 \ud83d\udcf7 ${inc.photos.length} photo${inc.photos.length > 1 ? 's' : ''}` : ''}</div>
-        <div class="inc-meta">\u23f1 ${formatTimeAgo(inc.timestamp)} \u00b7 ${formatDateTime(inc.timestamp)}</div>
+        <div class="inc-desc">Signalé par: ${inc.reportedBy}${(inc.photos && inc.photos.length > 0) ? ` · 📷 ${inc.photos.length} photo${inc.photos.length > 1 ? 's' : ''}` : ''}</div>
+        <div class="inc-meta">⏱ ${formatTimeAgo(inc.timestamp)} · ${formatDateTime(inc.timestamp)}</div>
         ${assignedChips}
+        ${renderLinkedIncidents(inc)}
+        ${renderDuplicateSuggestions(inc)}
         <div class="inc-actions">
-          <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); openDetailModal('${inc.id}')">D\u00e9tails</button>
+          <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); openDetailModal('${inc.id}')">Détails</button>
           ${inc.status === 'active' ? `<button class="btn btn-warning btn-sm" onclick="event.stopPropagation(); acknowledgeIncident('${inc.id}')">Acquitter</button>` : ''}
-          ${inc.status !== 'resolved' ? `<button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); openAssignModal('${inc.id}')">Assigner Unit\u00e9</button>` : ''}
-          ${inc.status !== 'resolved' ? `<button class="btn btn-success btn-sm" onclick="event.stopPropagation(); openResolveModal('${inc.id}')">R\u00e9soudre</button>` : ''}
+          ${inc.status !== 'resolved' ? `<button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); openAssignModal('${inc.id}')">Assigner Unité</button>` : ''}
+          ${inc.status !== 'resolved' ? `<button class="btn btn-success btn-sm" onclick="event.stopPropagation(); openResolveModal('${inc.id}')">Résoudre</button>` : ''}
         </div>
       </div>
     `;
   }).join('');
+}
+
+function renderIncidentsTable(container, filtered) {
+  const rows = filtered.map(inc => {
+    const agingTier = incidentAgingTier(inc);
+    const rowClass = agingTier ? ` class="aging-${agingTier}"` : '';
+    const ageLabel = agingTier ? `⏳ ${formatAgeMinutes(inc)}` : formatTimeAgo(inc.timestamp);
+    const dupCount = (inc.possibleDuplicates || []).length;
+    const dupBadge = dupCount > 0 ? ` <span class="dup-badge proximity" title="Doublons possibles">${dupCount}×🔗</span>` : '';
+    return `
+      <tr${rowClass} onclick="openDetailModal('${inc.id}')">
+        <td>${formatIncidentId(inc.id)}${dupBadge}</td>
+        <td>${TYPE_ICONS[inc.type] || '🚨'} ${typeLabel(inc.type)}</td>
+        <td><span class="badge badge-${inc.severity}">${sevLabel(inc.severity)}</span></td>
+        <td><span class="badge badge-${inc.status}">${statusLabel(inc.status)}</span></td>
+        <td>${escapeHtml(inc.address || '')}</td>
+        <td>${escapeHtml(inc.reportedBy || '')}</td>
+        <td>${(inc.respondingNames || []).join(', ') || (inc.assignedCount ? `${inc.assignedCount} responder(s)` : '—')}</td>
+        <td>${ageLabel}</td>
+        <td class="it-actions">
+          ${inc.status === 'active' ? `<button class="btn btn-warning btn-sm" onclick="event.stopPropagation(); acknowledgeIncident('${inc.id}')">Acquitter</button>` : ''}
+          ${inc.status !== 'resolved' ? `<button class="btn btn-success btn-sm" onclick="event.stopPropagation(); openResolveModal('${inc.id}')">Résoudre</button>` : ''}
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  container.innerHTML = `
+    <table class="incident-table">
+      <thead><tr>
+        <th>ID</th><th>Type</th><th>Sévérité</th><th>Statut</th><th>Adresse</th><th>Rapporté par</th><th>Assignés</th><th>Âge</th><th></th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
 }
 
 function filterIncidents(filter) {
@@ -2996,7 +3173,23 @@ async function openDetailModal(incidentId) {
     <span class="badge badge-${status}">${statusLabel(status)}</span>
     ${inc.type === 'sos' ? '<span class="badge badge-critical">SOS URGENCE</span>' : ''}
   `;
-  
+
+  // Duplicate suggestions / confirmed links
+  const dupSection = document.getElementById('detailDuplicatesSection');
+  const dupContent = document.getElementById('detailDuplicatesContent');
+  const dups = inc.possibleDuplicates || [];
+  const linked = inc.linkedIncidentIds || [];
+  if (dups.length > 0 || linked.length > 0) {
+    dupSection.style.display = 'block';
+    dupContent.innerHTML = `
+      ${linked.length > 0 ? `<div class="inc-linked">🔗 Lié à: ${linked.map(id => `<span class="linked-chip" onclick="openDetailModal('${id}')">${formatIncidentId(id)}</span>`).join('')}</div>` : ''}
+      ${renderDuplicateSuggestions(inc)}
+    `;
+  } else {
+    dupSection.style.display = 'none';
+    dupContent.innerHTML = '';
+  }
+
   // Location info
   const lat = inc.location?.latitude || inc.latitude || 0;
   const lng = inc.location?.longitude || inc.longitude || 0;
