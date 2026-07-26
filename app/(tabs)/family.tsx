@@ -24,6 +24,8 @@ interface FamilyMember {
   location: { latitude: number; longitude: number } | null;
   isSharing: boolean;
   lastSeen: number | null;
+  presenceStatus?: 'inside' | 'outside' | 'unknown';
+  presenceLabel?: string;
 }
 
 interface FamilyPerimeter {
@@ -133,6 +135,11 @@ export default function FamilyScreen() {
   const [proxAlerts, setProxAlerts] = useState<ProximityAlert[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+
+  // My own presence status (home/away) — manual toggle, always available
+  const [myPresenceStatus, setMyPresenceStatus] = useState<'inside' | 'outside' | 'unknown'>('unknown');
+  const [myPresenceLabel, setMyPresenceLabel] = useState<string | undefined>(undefined);
+  const [myPresenceSaving, setMyPresenceSaving] = useState<'inside' | 'outside' | null>(null);
 
   // Modals
   const [selectedMember, setSelectedMember] = useState<FamilyMember | null>(null);
@@ -270,6 +277,41 @@ export default function FamilyScreen() {
     }
   }, [BASE, userId]);
 
+  const fetchMyPresence = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family/presence/${userId}`, { timeout: 10000 });
+      const data = await res.json();
+      setMyPresenceStatus(data.status || 'unknown');
+      setMyPresenceLabel(data.matchedLabel);
+    } catch (e) {
+      console.error('[Family] Error fetching my presence:', e);
+    }
+  }, [BASE, userId]);
+
+  const setMyPresence = useCallback(async (status: 'inside' | 'outside') => {
+    if (!userId) return;
+    setMyPresenceSaving(status);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family/presence/${userId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status }),
+        timeout: 10000,
+      });
+      if (res.ok) {
+        if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        setMyPresenceStatus(status);
+      } else {
+        Alert.alert('Erreur', 'Impossible de mettre à jour votre statut');
+      }
+    } catch (e) {
+      console.error('[Family] Error setting my presence:', e);
+      Alert.alert('Erreur', 'Erreur réseau');
+    }
+    setMyPresenceSaving(null);
+  }, [BASE, userId]);
+
   const fetchPerimeters = useCallback(async () => {
     if (!userId) return;
     try {
@@ -305,15 +347,15 @@ export default function FamilyScreen() {
 
   const loadAll = useCallback(async () => {
     setLoading(true);
-    await Promise.all([fetchMembers(), fetchPerimeters(), fetchProxAlerts(), fetchCurfewChecks()]);
+    await Promise.all([fetchMembers(), fetchPerimeters(), fetchProxAlerts(), fetchCurfewChecks(), fetchMyPresence()]);
     setLoading(false);
-  }, [fetchMembers, fetchPerimeters, fetchProxAlerts, fetchCurfewChecks]);
+  }, [fetchMembers, fetchPerimeters, fetchProxAlerts, fetchCurfewChecks, fetchMyPresence]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await Promise.all([fetchMembers(), fetchPerimeters(), fetchProxAlerts(), fetchCurfewChecks()]);
+    await Promise.all([fetchMembers(), fetchPerimeters(), fetchProxAlerts(), fetchCurfewChecks(), fetchMyPresence()]);
     setRefreshing(false);
-  }, [fetchMembers, fetchPerimeters, fetchProxAlerts, fetchCurfewChecks]);
+  }, [fetchMembers, fetchPerimeters, fetchProxAlerts, fetchCurfewChecks, fetchMyPresence]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
@@ -343,6 +385,16 @@ export default function FamilyScreen() {
     websocketService.on('familyLocation', handleFamilyLocation);
     return () => websocketService.off('familyLocation', handleFamilyLocation);
   }, []);
+
+  // Live presence updates (manual status changes — own or a family member's)
+  useEffect(() => {
+    const handlePresenceUpdated = () => {
+      fetchMembers();
+      fetchMyPresence();
+    };
+    websocketService.on('presenceUpdated', handlePresenceUpdated);
+    return () => websocketService.off('presenceUpdated', handlePresenceUpdated);
+  }, [fetchMembers, fetchMyPresence]);
 
   // ─── Location History ───────────────────────────────────────────────────
 
@@ -593,6 +645,17 @@ export default function FamilyScreen() {
         </View>
       </View>
 
+      {item.presenceStatus && item.presenceStatus !== 'unknown' && (
+        <View style={styles.presenceRow}>
+          <Text style={styles.presenceIcon}>{item.presenceStatus === 'inside' ? '🏠' : '🚶'}</Text>
+          <Text style={[styles.presenceText, { color: item.presenceStatus === 'inside' ? '#22C55E' : '#F59E0B' }]}>
+            {item.presenceStatus === 'inside'
+              ? `Présent${item.presenceLabel ? ` — ${item.presenceLabel}` : ''}`
+              : 'Sorti'}
+          </Text>
+        </View>
+      )}
+
       {item.location && (
         <View style={styles.locationRow}>
           <IconSymbol name="location.fill" size={14} color={stalenessColor} />
@@ -818,6 +881,44 @@ export default function FamilyScreen() {
         <Text style={styles.headerSubtitle}>
           {members.length} membre{members.length !== 1 ? 's' : ''}
         </Text>
+      </View>
+
+      {/* My presence status — always visible, manual toggle */}
+      <View style={styles.myPresenceBar}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.myPresenceLabel}>Mon statut</Text>
+          <Text style={[styles.myPresenceValue, { color: myPresenceStatus === 'inside' ? '#22C55E' : myPresenceStatus === 'outside' ? '#F59E0B' : '#9CA3AF' }]}>
+            {myPresenceStatus === 'inside'
+              ? `🏠 Présent${myPresenceLabel ? ` — ${myPresenceLabel}` : ''}`
+              : myPresenceStatus === 'outside'
+                ? '🚶 Sorti'
+                : '❓ Statut inconnu'}
+          </Text>
+        </View>
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          <TouchableOpacity
+            style={[styles.myPresenceBtn, myPresenceStatus === 'inside' && styles.myPresenceBtnActive]}
+            onPress={() => setMyPresence('inside')}
+            disabled={myPresenceSaving !== null}
+          >
+            {myPresenceSaving === 'inside' ? (
+              <ActivityIndicator size="small" color={myPresenceStatus === 'inside' ? '#fff' : '#1e3a5f'} />
+            ) : (
+              <Text style={[styles.myPresenceBtnText, myPresenceStatus === 'inside' && styles.myPresenceBtnTextActive]}>Présent</Text>
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.myPresenceBtn, myPresenceStatus === 'outside' && styles.myPresenceBtnActive]}
+            onPress={() => setMyPresence('outside')}
+            disabled={myPresenceSaving !== null}
+          >
+            {myPresenceSaving === 'outside' ? (
+              <ActivityIndicator size="small" color={myPresenceStatus === 'outside' ? '#fff' : '#1e3a5f'} />
+            ) : (
+              <Text style={[styles.myPresenceBtnText, myPresenceStatus === 'outside' && styles.myPresenceBtnTextActive]}>Sorti</Text>
+            )}
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* Tab Bar */}
@@ -1288,6 +1389,49 @@ const styles = StyleSheet.create({
     color: '#6B7280',
     marginTop: 2,
   },
+  myPresenceBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 16,
+    marginBottom: 12,
+    padding: 12,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  myPresenceLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#9CA3AF',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  myPresenceValue: {
+    fontSize: 14,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  myPresenceBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    backgroundColor: '#F9FAFB',
+  },
+  myPresenceBtnActive: {
+    backgroundColor: '#1e3a5f',
+    borderColor: '#1e3a5f',
+  },
+  myPresenceBtnText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#1e3a5f',
+  },
+  myPresenceBtnTextActive: {
+    color: '#ffffff',
+  },
   tabBar: {
     flexDirection: 'row',
     paddingHorizontal: 16,
@@ -1394,6 +1538,22 @@ const styles = StyleSheet.create({
   statusText: {
     fontSize: 12,
     fontWeight: '500',
+  },
+  presenceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#F3F4F6',
+  },
+  presenceIcon: {
+    fontSize: 14,
+  },
+  presenceText: {
+    fontSize: 13,
+    fontWeight: '700',
   },
   locationRow: {
     flexDirection: 'row',

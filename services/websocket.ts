@@ -290,7 +290,11 @@ class WebSocketService {
         // Handle pong response
         break;
       default:
-        console.warn('Unknown message type:', message.type);
+        // Pass through any other server-pushed event type (e.g. familyLocation,
+        // presenceUpdated) using its own type as the event name, so listeners
+        // can subscribe via websocketService.on(<type>, ...) without this file
+        // needing a named case for every message type the server ever adds.
+        this.emit(message.type, message.data);
     }
   }
 

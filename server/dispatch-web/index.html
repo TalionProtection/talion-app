@@ -48,6 +48,9 @@
       <a href="#" class="nav-item" data-tab="archives">
         <span class="nav-icon">&#x1F5C4;&#xFE0F;</span> Archives
       </a>
+      <a href="#" class="nav-item" data-tab="families">
+        <span class="nav-icon">&#x1F3E0;</span> Familles
+      </a>
     </nav>
     <div class="sidebar-footer">
       <a href="/admin-console/" class="console-link">&#x1F6E1; Admin Console</a>
@@ -640,6 +643,17 @@
         </div>
       </div>
       <div id="archivesList" class="incident-cards"></div>
+    </section>
+
+    <!-- Families Tab -->
+    <section class="tab-content" id="tab-families">
+      <div class="toolbar">
+        <div class="toolbar-stats">
+          <span class="stat-badge stat-blue" id="familyGroupsCount">0 famille(s)</span>
+          <button class="btn btn-sm" onclick="loadFamilyGroups()">&#x21BB; Rafraîchir</button>
+        </div>
+      </div>
+      <div id="familyGroupsList" class="family-groups-list"></div>
     </section>
   </main>
 

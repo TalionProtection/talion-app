@@ -454,6 +454,13 @@ function handleWsMessage(msg) {
       break;
     }
 
+    case 'presenceUpdated': {
+      if (document.getElementById('tab-families')?.classList.contains('active')) {
+        loadFamilyGroups();
+      }
+      break;
+    }
+
     case 'userStatusChange': {
       // A user came online/offline
       showToast(`👤 User ${msg.userId} is now ${msg.status}`, 'info');
@@ -700,7 +707,7 @@ function switchTab(tab) {
   document.querySelector(`.nav-item[data-tab="${tab}"]`)?.classList.add('active');
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.getElementById(`tab-${tab}`)?.classList.add('active');
-  const titles = { overview: "Vue d'ensemble", incidents: "Gestion des incidents", responders: "Unités d'intervention", broadcast: "Diffusion", map: "Carte en direct", messages: "Messages", patrol: "Rapports de Ronde", ptt: "Push-to-Talk", archives: "Archives" };
+  const titles = { overview: "Vue d'ensemble", incidents: "Gestion des incidents", responders: "Unités d'intervention", broadcast: "Diffusion", map: "Carte en direct", messages: "Messages", patrol: "Rapports de Ronde", ptt: "Push-to-Talk", archives: "Archives", families: "Familles" };
   document.getElementById('pageTitle').textContent = titles[tab] || tab;
   if (tab === 'map') {
     setTimeout(() => { if (dispatchMap) { dispatchMap.invalidateSize(); } else { initMap(); } }, 100);
@@ -710,6 +717,9 @@ function switchTab(tab) {
   }
   if (tab === 'archives') {
     renderArchives();
+  }
+  if (tab === 'families') {
+    loadFamilyGroups();
   }
 }
 
@@ -1205,6 +1215,84 @@ async function unarchiveIncident(id) {
     }
   } catch (e) {
     console.error('[Incidents] Unarchive error:', e);
+    showToast('Erreur réseau', 'error');
+  }
+}
+
+// ─── Family Groups (presence: home/away per residence) ────────────────
+let familyGroups = [];
+
+async function loadFamilyGroups() {
+  try {
+    const res = await fetch(`${API_BASE}/dispatch/family-groups`);
+    familyGroups = res.ok ? await res.json() : [];
+  } catch (e) {
+    console.error('[Families] Load error:', e);
+    familyGroups = [];
+  }
+  renderFamilyGroups();
+}
+
+function renderFamilyGroups() {
+  const container = document.getElementById('familyGroupsList');
+  if (!container) return;
+  document.getElementById('familyGroupsCount').textContent = `${familyGroups.length} famille${familyGroups.length !== 1 ? 's' : ''}`;
+
+  if (familyGroups.length === 0) {
+    container.innerHTML = '<div class="empty-state"><div class="empty-icon">🏠</div><p>Aucune famille (relations parent/enfant/conjoint) enregistrée</p></div>';
+    return;
+  }
+
+  const STATUS_LABELS = { inside: 'Présent', outside: 'Sorti', unknown: 'Statut inconnu' };
+  const STATUS_ICONS = { inside: '🏠', outside: '🚶', unknown: '❓' };
+
+  container.innerHTML = familyGroups.map(group => `
+    <div class="family-card">
+      <div class="family-card-members">
+        ${group.members.map(m => `
+          <div class="family-member-row">
+            <div class="family-member-info">
+              <div class="family-member-name">
+                ${m.name}
+                ${m.ghostMode ? '<span class="ghost-badge" title="Mode Ghost actif">👻 Ghost</span>' : ''}
+              </div>
+              <div class="family-member-status status-${m.status}">
+                ${STATUS_ICONS[m.status] || '❓'} ${STATUS_LABELS[m.status] || m.status}${m.matchedLabel ? ` — ${escapeHtml(m.matchedLabel)}` : ''}
+              </div>
+              <div class="family-member-meta">
+                ${m.source === 'manual'
+                  ? `Statut manuel${m.setBy ? ' par ' + escapeHtml(m.setBy) : ''}${m.setAt ? ' · ' + formatTimeAgo(m.setAt) : ''}`
+                  : 'Statut automatique (position live)'}
+              </div>
+              ${m.addresses.length > 0 ? `<div class="family-member-addresses">${m.addresses.map(a => `<span class="addr-chip">${a.isPrimary ? '⭐ ' : ''}${escapeHtml(a.label)}</span>`).join('')}</div>` : ''}
+            </div>
+            <div class="family-member-actions">
+              <button class="btn btn-secondary btn-sm" onclick="setPresence('${m.id}', 'inside')">Marquer présent</button>
+              <button class="btn btn-secondary btn-sm" onclick="setPresence('${m.id}', 'outside')">Marquer sorti</button>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `).join('');
+}
+
+async function setPresence(userId, status) {
+  try {
+    const res = await fetch(`${API_BASE}/api/family/presence/${encodeURIComponent(userId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    });
+    if (res.ok) {
+      showToast('Statut mis à jour', 'success');
+      loadFamilyGroups();
+    } else {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors de la mise à jour du statut', 'error');
+    }
+  } catch (e) {
+    console.error('[Families] setPresence error:', e);
     showToast('Erreur réseau', 'error');
   }
 }

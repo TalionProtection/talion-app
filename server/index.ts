@@ -75,6 +75,7 @@ const PATROL_REPORTS_FILE = path.join(dataDir, 'patrol-reports.json');
 const PTT_CHANNELS_FILE = path.join(dataDir, 'ptt-channels.json');
 const PTT_MESSAGES_FILE = path.join(dataDir, 'ptt-messages.json');
 const SECTORS_FILE = path.join(dataDir, 'sectors.json');
+const PRESENCE_FILE = path.join(dataDir, 'presence-status.json');
 
 function loadJsonFile<T>(filePath: string, defaultValue: T): T {
   try {
@@ -709,6 +710,14 @@ const geofenceEvents: GeofenceEvent[] = [];
 // Sector storage (persisted) — admin-managed display/navigation zones
 const sectors = new Map<string, Sector>();
 
+// Manual presence override storage (persisted) — see computeEffectivePresence below
+interface PresenceManualStatus {
+  status: 'inside' | 'outside';
+  setBy: string;
+  setAt: number;
+}
+const manualPresence = new Map<string, PresenceManualStatus>(); // targetUserId -> manual status
+
 // Family perimeter storage (persisted)
 const familyPerimeters = new Map<string, FamilyPerimeter>();
 const proximityAlerts: ProximityAlert[] = [];
@@ -814,6 +823,13 @@ seedDemoData();
   savedSectors.forEach(s => sectors.set(s.id, s));
   if (savedSectors.length > 0) {
     console.log(`[Persist] Loaded ${savedSectors.length} sectors from disk`);
+  }
+
+  // Load persisted manual presence status
+  const savedPresence = loadJsonFile<({ targetUserId: string } & PresenceManualStatus)[]>(PRESENCE_FILE, []);
+  savedPresence.forEach(p => manualPresence.set(p.targetUserId, { status: p.status, setBy: p.setBy, setAt: p.setAt }));
+  if (savedPresence.length > 0) {
+    console.log(`[Persist] Loaded ${savedPresence.length} manual presence statuses from disk`);
   }
 
   // Load persisted proximity alerts
@@ -1251,6 +1267,81 @@ function getFamilyMemberIds(userId: string): string[] {
   return adminUser.relationships
     .filter(r => familyTypes.includes(r.type))
     .map(r => r.userId);
+}
+
+// ─── Presence status (in/out of a known residence) ───────────────────────
+// Automatic: computed live from the user's last known location against
+// every address on their profile (home, secondary residence, hotel while
+// travelling, etc. — anything in userAddresses). Never cached — always
+// derived from the current `users` location on request.
+// Manual: an explicit override the target, a family owner, or dispatch
+// staff can set at any time; it's what dispatch sees in place of the
+// automatic value while the target is in Ghost mode (family always sees
+// the automatic value regardless of Ghost — Ghost only hides from dispatch).
+// (PresenceManualStatus + manualPresence are declared earlier, alongside the
+// other storage maps, so the boot-time persisted-data loader can use them.)
+
+function computeAutoPresence(userId: string): { status: 'inside' | 'outside' | 'unknown'; matchedLabel?: string } {
+  const loc = users.get(userId)?.location;
+  const addresses = userAddresses.get(userId) || [];
+  if (!loc || addresses.length === 0) return { status: 'unknown' };
+  for (const addr of addresses) {
+    if (addr.latitude == null || addr.longitude == null) continue;
+    const dist = haversineDistance(loc.latitude, loc.longitude, addr.latitude, addr.longitude);
+    if (dist <= (addr.radiusMeters || 150)) {
+      return { status: 'inside', matchedLabel: addr.label };
+    }
+  }
+  return { status: 'outside' };
+}
+
+// forDispatch=true applies the Ghost-mode rule; family-facing callers should
+// pass false to always get the live automatic value.
+function computeEffectivePresence(userId: string, forDispatch: boolean): {
+  status: 'inside' | 'outside' | 'unknown';
+  source: 'auto' | 'manual';
+  matchedLabel?: string;
+  setBy?: string;
+  setAt?: number;
+} {
+  if (forDispatch && adminUsers.get(userId)?.ghostMode) {
+    const manual = manualPresence.get(userId);
+    return manual
+      ? { status: manual.status, source: 'manual', setBy: manual.setBy, setAt: manual.setAt }
+      : { status: 'unknown', source: 'manual' };
+  }
+  const auto = computeAutoPresence(userId);
+  return { ...auto, source: 'auto' };
+}
+
+// Connected components over the parent/child/sibling/spouse relationship
+// graph across ALL admin users — a "family group" for the dispatch overview,
+// not scoped to any single owner's perspective.
+function computeFamilyGroups(): string[][] {
+  const familyTypes = ['parent', 'child', 'sibling', 'spouse'];
+  const visited = new Set<string>();
+  const groups: string[][] = [];
+  for (const user of adminUsers.values()) {
+    if (visited.has(user.id) || !user.relationships?.some(r => familyTypes.includes(r.type))) continue;
+    const stack = [user.id];
+    const group = new Set<string>();
+    while (stack.length) {
+      const id = stack.pop()!;
+      if (group.has(id)) continue;
+      group.add(id);
+      visited.add(id);
+      (adminUsers.get(id)?.relationships || [])
+        .filter(r => familyTypes.includes(r.type))
+        .forEach(r => { if (!group.has(r.userId)) stack.push(r.userId); });
+    }
+    groups.push(Array.from(group));
+  }
+  return groups;
+}
+
+function persistManualPresence() {
+  debouncedSave(PRESENCE_FILE, Array.from(manualPresence.entries()).map(([targetUserId, p]) => ({ targetUserId, ...p })));
+  manualPresence.forEach((p, targetUserId) => saveManualPresenceToSupabase(targetUserId, p));
 }
 
 // ─── Duplicate incident detection ────────────────────────────────────────
@@ -2727,6 +2818,9 @@ app.get('/api/family/members', (req, res) => {
       const relUser = adminUsers.get(r.userId);
       const isSharing = sharingUsers.has(r.userId);
       const runtimeUser = users.get(r.userId);
+      // Family always sees the live automatic status regardless of Ghost mode
+      // — Ghost only hides a user from dispatch's live map, never from family.
+      const presence = computeEffectivePresence(r.userId, false);
       return {
         userId: r.userId,
         name: relUser?.name || 'Unknown',
@@ -2734,9 +2828,50 @@ app.get('/api/family/members', (req, res) => {
         isSharing,
         lastSeen: runtimeUser?.lastSeen || null,
         location: runtimeUser?.location || null,
+        presenceStatus: presence.status,
+        presenceLabel: presence.matchedLabel,
       };
     });
   res.json(members);
+});
+
+// GET /api/family/presence/:userId - this is the "what is currently being
+// communicated externally" view (i.e. what dispatch would see: automatic
+// unless Ghost mode is on, in which case the manual override). Used by the
+// mobile app to show the caller their OWN effective status so the manual
+// toggle makes sense — pressing it only matters while in Ghost, and this
+// tells them whether it currently does. The family member list uses
+// computeEffectivePresence(id, false) instead, since family always sees the
+// live automatic value regardless of Ghost.
+app.get('/api/family/presence/:userId', (req, res) => {
+  const presence = computeEffectivePresence(req.params.userId as string, true);
+  res.json(presence);
+});
+
+// PUT /api/family/presence/:targetUserId - set a manual presence override.
+// Allowed for the target themselves, a family owner (reciprocal relation),
+// or dispatch/admin/responder staff.
+app.put('/api/family/presence/:targetUserId', requireAuth, (req, res) => {
+  const targetUserId = req.params.targetUserId as string;
+  const { status } = req.body;
+  if (status !== 'inside' && status !== 'outside') {
+    return res.status(400).json({ error: "status must be 'inside' or 'outside'" });
+  }
+  const caller = req.supabaseUser!;
+  const isSelf = caller.id === targetUserId;
+  const isFamilyOwner = getFamilyMemberIds(targetUserId).includes(caller.id);
+  const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder';
+  if (!isSelf && !isFamilyOwner && !isStaff) {
+    return res.status(403).json({ error: 'Not authorized to set this presence status' });
+  }
+  const entry: PresenceManualStatus = { status, setBy: caller.id, setAt: Date.now() };
+  manualPresence.set(targetUserId, entry);
+  persistManualPresence();
+  const payload = { type: 'presenceUpdated', targetUserId, status: entry.status, setBy: entry.setBy, setAt: entry.setAt };
+  broadcastToRole('dispatcher', payload);
+  broadcastToRole('admin', payload);
+  broadcastToUsers(getFamilyMemberIds(targetUserId), payload);
+  res.json({ success: true });
 });
 
 // ─── Family Perimeter CRUD ───────────────────────────────────────────
@@ -3226,6 +3361,32 @@ app.get('/dispatch', (req, res) => {
 });
 
 // ─── Dispatch REST API ──────────────────────────────────────────────
+
+// Family groups overview: every family unit (connected component over the
+// parent/child/sibling/spouse graph, across ALL admin users — not scoped to
+// one owner), each member's residences and effective presence status.
+app.get('/dispatch/family-groups', (req, res) => {
+  const groups = computeFamilyGroups();
+  const result = groups.map((memberIds, i) => ({
+    id: `family-${i}`,
+    members: memberIds.map(uid => {
+      const u = adminUsers.get(uid);
+      const presence = computeEffectivePresence(uid, true);
+      return {
+        id: uid,
+        name: u?.name || uid,
+        ghostMode: u?.ghostMode || false,
+        status: presence.status,
+        source: presence.source,
+        matchedLabel: presence.matchedLabel,
+        setBy: presence.setBy ? (adminUsers.get(presence.setBy)?.name || presence.setBy) : undefined,
+        setAt: presence.setAt,
+        addresses: (userAddresses.get(uid) || []).map(a => ({ label: a.label, address: a.address, isPrimary: a.isPrimary })),
+      };
+    }),
+  }));
+  res.json(result);
+});
 
 // Dispatch responders list (with location and assignment info)
 app.get('/dispatch/responders', (req, res) => {
@@ -5300,6 +5461,7 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
     loadPTTChannelsFromSupabase(),
     loadFamilyPerimetersFromSupabase(),
     loadSectorsFromSupabase(),
+    loadManualPresenceFromSupabase(),
     loadPushTokensFromSupabase(),
     loadUserAddressesFromSupabase(),
     loadConversationsFromSupabase(),
@@ -5596,6 +5758,27 @@ async function deleteSectorFromSupabase(sectorId: string): Promise<void> {
   } catch (e) { console.error('[Supabase] deleteSectorFromSupabase error:', e); }
 }
 
+async function loadManualPresenceFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('presence_status').select('*');
+    if (error) { console.error('[Supabase] Failed to load presence_status:', error.message); return; }
+    if (data && data.length > 0) {
+      manualPresence.clear();
+      data.forEach((p: any) => manualPresence.set(p.target_user_id, { status: p.status, setBy: p.set_by, setAt: p.set_at }));
+      console.log(`[Supabase] Loaded ${data.length} manual presence statuses`);
+    }
+  } catch (e) { console.error('[Supabase] loadManualPresenceFromSupabase error:', e); }
+}
+
+async function saveManualPresenceToSupabase(targetUserId: string, p: PresenceManualStatus): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('presence_status').upsert({
+      target_user_id: targetUserId, status: p.status, set_by: p.setBy, set_at: p.setAt,
+    });
+    if (error) console.error('[Supabase] saveManualPresenceToSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] saveManualPresenceToSupabase error:', e); }
+}
+
 // ─── Sync push_tokens from Supabase on startup ───────────────────────────
 async function loadPushTokensFromSupabase(): Promise<void> {
   try {
@@ -5848,6 +6031,7 @@ interface UserAddress {
   isPrimary: boolean;
   alarmCode?: string;
   notes?: string;
+  radiusMeters?: number; // "at this address" proximity radius for presence detection; defaults to 150m
   createdAt: number;
   updatedAt: number;
 }
@@ -5865,6 +6049,7 @@ async function loadUserAddressesFromSupabase(): Promise<void> {
           id: a.id, userId: a.user_id, label: a.label, address: a.address,
           latitude: a.latitude, longitude: a.longitude, placeId: a.place_id,
           isPrimary: a.is_primary, alarmCode: a.alarm_code, notes: a.notes,
+          radiusMeters: a.radius_meters || undefined,
           createdAt: a.created_at, updatedAt: a.updated_at,
         };
         if (!userAddresses.has(addr.userId)) userAddresses.set(addr.userId, []);
@@ -5885,7 +6070,7 @@ app.get('/api/users/:id/addresses', (req, res) => {
 
 // POST /api/users/:id/addresses
 app.post('/api/users/:id/addresses', async (req, res) => {
-  const { label, address, latitude, longitude, placeId, isPrimary, alarmCode, notes } = req.body;
+  const { label, address, latitude, longitude, placeId, isPrimary, alarmCode, notes, radiusMeters } = req.body;
   if (!label || !address) return res.status(400).json({ error: 'label and address are required' });
   const userId = req.params.id;
   const now = Date.now();
@@ -5908,6 +6093,7 @@ app.post('/api/users/:id/addresses', async (req, res) => {
     isPrimary: isPrimary || false,
     alarmCode: alarmCode || null,
     notes: notes || null,
+    radiusMeters: radiusMeters ? Number(radiusMeters) : undefined,
     createdAt: now, updatedAt: now,
   };
   // If primary, unset other primary addresses
@@ -5923,6 +6109,7 @@ app.post('/api/users/:id/addresses', async (req, res) => {
     latitude: newAddr.latitude, longitude: newAddr.longitude,
     place_id: newAddr.placeId, is_primary: newAddr.isPrimary,
     alarm_code: newAddr.alarmCode, notes: newAddr.notes,
+    radius_meters: newAddr.radiusMeters || null,
     created_at: now, updated_at: now,
   });
   res.status(201).json(newAddr);
@@ -5930,7 +6117,7 @@ app.post('/api/users/:id/addresses', async (req, res) => {
 
 // PUT /api/users/:id/addresses/:addressId
 app.put('/api/users/:id/addresses/:addressId', async (req, res) => {
-  const { label, address, latitude, longitude, placeId, isPrimary, alarmCode, notes } = req.body;
+  const { label, address, latitude, longitude, placeId, isPrimary, alarmCode, notes, radiusMeters } = req.body;
   const userId = req.params.id;
   const addresses = userAddresses.get(userId) || [];
   const idx = addresses.findIndex(a => a.id === req.params.addressId);
@@ -5950,12 +6137,14 @@ app.put('/api/users/:id/addresses/:addressId', async (req, res) => {
     address: address ?? addresses[idx].address, latitude: finalLat,
     longitude: finalLng, isPrimary: isPrimary ?? addresses[idx].isPrimary,
     alarmCode: alarmCode ?? addresses[idx].alarmCode, notes: notes ?? addresses[idx].notes,
+    radiusMeters: radiusMeters != null ? Number(radiusMeters) : addresses[idx].radiusMeters,
     updatedAt: Date.now() };
   addresses[idx] = updated;
   await supabaseAdmin.from('user_addresses').update({
     label: updated.label, address: updated.address, latitude: updated.latitude,
     longitude: updated.longitude, is_primary: updated.isPrimary,
-    alarm_code: updated.alarmCode, notes: updated.notes, updated_at: updated.updatedAt,
+    alarm_code: updated.alarmCode, notes: updated.notes, radius_meters: updated.radiusMeters || null,
+    updated_at: updated.updatedAt,
   }).eq('id', updated.id);
   res.json(updated);
 });
