@@ -440,10 +440,20 @@
               </div>
 
               <div id="sectorCircleFields">
-                <div class="gf-info" id="sectorCircleHint">Cliquez sur la carte pour placer le centre, puis ajustez le rayon.</div>
+                <div class="gf-field">
+                  <label>Adresse (point de départ)</label>
+                  <div style="position:relative">
+                    <input type="text" id="sectorAddress" class="form-control" placeholder="Rechercher une adresse..." autocomplete="off" oninput="onSectorAddressInput(this.value)">
+                    <div id="sectorAddressSuggestions" class="address-suggestions" style="display:none"></div>
+                  </div>
+                </div>
+                <div class="gf-info" id="sectorCircleHint">Cliquez sur la carte ou recherchez une adresse pour placer le centre, puis ajustez le rayon.</div>
                 <div class="gf-field" id="sectorRadiusField" style="display:none;">
-                  <label>Rayon : <strong id="sectorRadiusValue">500</strong> m</label>
-                  <input type="range" id="sectorRadiusSlider" min="50" max="5000" step="50" value="500" oninput="updateSectorRadius(this.value)">
+                  <label>Rayon (mètres)</label>
+                  <div class="sector-radius-row">
+                    <input type="number" id="sectorRadiusInput" min="10" max="50000" step="10" value="500" oninput="updateSectorRadiusFromInput(this.value)">
+                    <input type="range" id="sectorRadiusSlider" min="50" max="5000" step="50" value="500" oninput="updateSectorRadius(this.value)">
+                  </div>
                 </div>
               </div>
 

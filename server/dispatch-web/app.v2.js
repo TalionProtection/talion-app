@@ -4382,6 +4382,8 @@ function showSectorForm() {
   document.getElementById('sectorFormTitle').textContent = 'Nouveau secteur';
   document.getElementById('sectorName').value = '';
   document.getElementById('sectorColor').value = '#3b82f6';
+  document.getElementById('sectorAddress').value = '';
+  document.getElementById('sectorAddressSuggestions').style.display = 'none';
   document.getElementById('sectorShapeToggle').style.display = 'flex';
   selectSectorShape('circle');
   document.getElementById('sectorListView').style.display = 'none';
@@ -4395,6 +4397,8 @@ function editSector(sectorId) {
   document.getElementById('sectorFormTitle').textContent = `Modifier « ${sector.name} »`;
   document.getElementById('sectorName').value = sector.name;
   document.getElementById('sectorColor').value = sector.color;
+  document.getElementById('sectorAddress').value = '';
+  document.getElementById('sectorAddressSuggestions').style.display = 'none';
   // Shape is fixed once a sector is created — editing only adjusts geometry/name/color.
   document.getElementById('sectorShapeToggle').style.display = 'none';
   document.getElementById('sectorListView').style.display = 'none';
@@ -4407,8 +4411,8 @@ function editSector(sectorId) {
     document.getElementById('sectorPolygonFields').style.display = 'none';
     sectorCircleCenter = L.latLng(sector.center.latitude, sector.center.longitude);
     sectorCircleRadius = sector.radiusMeters;
-    document.getElementById('sectorRadiusSlider').value = sectorCircleRadius;
-    document.getElementById('sectorRadiusValue').textContent = sectorCircleRadius;
+    document.getElementById('sectorRadiusSlider').value = Math.min(Math.max(sectorCircleRadius, 50), 5000);
+    document.getElementById('sectorRadiusInput').value = sectorCircleRadius;
     document.getElementById('sectorRadiusField').style.display = 'block';
     document.getElementById('sectorCircleHint').textContent = 'Glissez le repère pour déplacer le centre, ajustez le rayon ci-dessous.';
     placeSectorCircleCenter(sectorCircleCenter, true);
@@ -4503,9 +4507,66 @@ function updateSectorCircle() {
 
 function updateSectorRadius(value) {
   sectorCircleRadius = parseFloat(value);
-  document.getElementById('sectorRadiusValue').textContent = value;
+  document.getElementById('sectorRadiusInput').value = sectorCircleRadius;
   updateSectorCircle();
 }
+
+function updateSectorRadiusFromInput(value) {
+  const v = parseFloat(value);
+  if (isNaN(v) || v <= 0) return;
+  sectorCircleRadius = v;
+  const slider = document.getElementById('sectorRadiusSlider');
+  slider.value = Math.min(Math.max(v, Number(slider.min)), Number(slider.max));
+  updateSectorCircle();
+}
+
+// ── Address Autocomplete for sector circle center ──
+let sectorAddressDebounceTimer = null;
+
+function onSectorAddressInput(value) {
+  clearTimeout(sectorAddressDebounceTimer);
+  const box = document.getElementById('sectorAddressSuggestions');
+  if (!value || value.length < 3) { box.style.display = 'none'; return; }
+  sectorAddressDebounceTimer = setTimeout(() => fetchSectorAddressSuggestions(value), 350);
+}
+
+async function fetchSectorAddressSuggestions(query) {
+  const box = document.getElementById('sectorAddressSuggestions');
+  try {
+    const res = await fetch(`${API_BASE}/api/geocode?q=${encodeURIComponent(query)}`);
+    const results = await res.json();
+    if (!results || results.length === 0) { box.style.display = 'none'; return; }
+    box.innerHTML = results.map((r, i) => `
+      <div class="address-suggestion-item" onclick="selectSectorAddressSuggestion(${i})" data-lat="${r.lat}" data-lon="${r.lon}" data-name="${r.display_name.replace(/"/g, '&quot;')}">
+        <span class="addr-icon">📍</span>
+        <span class="addr-text">${r.display_name}</span>
+      </div>
+    `).join('');
+    box.style.display = 'block';
+  } catch (e) {
+    console.error('[Sectors] Address autocomplete failed:', e);
+    box.style.display = 'none';
+  }
+}
+
+function selectSectorAddressSuggestion(index) {
+  const box = document.getElementById('sectorAddressSuggestions');
+  const items = box.querySelectorAll('.address-suggestion-item');
+  if (!items[index]) return;
+  const item = items[index];
+  const lat = parseFloat(item.getAttribute('data-lat'));
+  const lon = parseFloat(item.getAttribute('data-lon'));
+  document.getElementById('sectorAddress').value = item.getAttribute('data-name');
+  box.style.display = 'none';
+  placeSectorCircleCenter(L.latLng(lat, lon));
+}
+
+document.addEventListener('click', (e) => {
+  const box = document.getElementById('sectorAddressSuggestions');
+  if (box && !e.target.closest('#sectorAddress') && !e.target.closest('#sectorAddressSuggestions')) {
+    box.style.display = 'none';
+  }
+});
 
 function startSectorPolygonDraw() {
   if (!dispatchMap || !window.L?.Draw) return;

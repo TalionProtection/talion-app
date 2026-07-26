@@ -704,12 +704,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   color: #000;
 }
 .gf-field input[type="text"],
+.gf-field input[type="number"],
 .gf-field input[type="color"] {
   font-family: inherit;
   font-size: 12px;
 }
-.gf-field input[type="text"] {
-  width: 100%;
+.gf-field input[type="text"],
+.gf-field input[type="number"] {
   padding: 8px 10px;
   border-radius: 8px;
   border: 1px solid var(--border-hover);
@@ -718,7 +719,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   outline: none;
   box-sizing: border-box;
 }
-.gf-field input[type="text"]:focus { border-color: #3b82f6; }
+.gf-field input[type="text"] { width: 100%; }
+.gf-field input[type="text"]:focus,
+.gf-field input[type="number"]:focus { border-color: #3b82f6; }
+.sector-radius-row { display: flex; gap: 8px; align-items: center; }
+.sector-radius-row input[type="number"] { width: 80px; flex-shrink: 0; }
+.sector-radius-row input[type="range"] { flex: 1; }
 .gf-field input[type="color"] {
   width: 100%;
   height: 32px;
