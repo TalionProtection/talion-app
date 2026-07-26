@@ -6362,10 +6362,18 @@ app.get('/api/alerts/:id/context', async (req, res) => {
       }
     }
     if (!member) return null;
-    return { id: member.id, name: member.name, role: rel.type, phone: member.phoneMobile, photoUrl: member.photoUrl };
+    return {
+      id: member.id, name: member.name, role: rel.type, phone: member.phoneMobile, photoUrl: member.photoUrl,
+      presence: computeEffectivePresence(member.id, true),
+    };
   }).filter(Boolean);
 
+  // The reporter's own current presence — separate from where the incident
+  // was reported FROM, since they may have moved since. Same Ghost-mode rule
+  // as everywhere else: automatic unless Ghost with no manual override.
+  const reporterPresence = computeEffectivePresence(resolvedUserId, true);
+
   const { passwordHash, ...safeUser } = user;
-  res.json({ user: { ...safeUser, hasPassword: !!user.passwordHash }, addresses, family, locationContext });
+  res.json({ user: { ...safeUser, hasPassword: !!user.passwordHash }, addresses, family, locationContext, reporterPresence });
 });
 // livekit-server-sdk installed

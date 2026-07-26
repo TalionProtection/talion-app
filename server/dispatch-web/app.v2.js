@@ -3746,6 +3746,16 @@ async function openDetailModal(incidentId) {
             </div>`).join('');
 
           // Family
+          const presenceBadgeHtml = (p) => {
+            if (!p || p.status === 'unknown') return `<span style="font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;background:#f3f4f6;color:#6b7280;">❓ INCONNU</span>`;
+            const color = p.status === 'inside' ? '#22c55e' : '#f59e0b';
+            const label = p.status === 'inside'
+              ? `PRÉSENT${p.matchedLabel ? ' — ' + escapeHtml(p.matchedLabel) : ''}`
+              : `SORTI${p.matchedLabel ? ' DE ' + escapeHtml(p.matchedLabel).toUpperCase() : ''}`;
+            const since = p.setAt ? ` · depuis ${formatTimeAgo(p.setAt)}` : '';
+            return `<span style="font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;background:${color}20;color:${color};">${p.status === 'inside' ? '🏠' : '🚶'} ${label}</span><span style="font-size:10px;color:#9ca3af;margin-left:4px;">${since}</span>`;
+          };
+
           const familyHtml = (ctx.family || []).filter(Boolean).map(f => `
             <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f3f4f6;">
               <div style="width:32px;height:32px;border-radius:50%;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:14px;">
@@ -3754,6 +3764,7 @@ async function openDetailModal(incidentId) {
               <div style="flex:1;">
                 <div style="font-size:13px;font-weight:600;color:#1f2937;">${f.name}</div>
                 <div style="font-size:11px;color:#6b7280;">${f.role}</div>
+                <div style="margin-top:3px;">${presenceBadgeHtml(f.presence)}</div>
               </div>
               ${f.phone ? `<a href="tel:${f.phone}" style="font-size:12px;color:#1e3a5f;font-weight:600;text-decoration:none;">📞 ${f.phone}</a>` : ''}
             </div>`).join('');
@@ -3765,6 +3776,7 @@ async function openDetailModal(incidentId) {
               <div style="flex:1;">
                 <div style="font-weight:700;font-size:15px;color:#1f2937;">${u.firstName || ''} ${u.lastName || u.name || ''}</div>
                 ${phone ? `<a href="tel:${phone}" style="font-size:13px;color:#1e3a5f;font-weight:600;text-decoration:none;">📞 ${phone}</a>` : ''}
+                <div style="margin-top:4px;">${presenceBadgeHtml(ctx.reporterPresence)}</div>
               </div>
             </div>
             ${addrsHtml ? `<div style="margin-bottom:10px;">${addrsHtml}</div>` : ''}
