@@ -722,6 +722,10 @@ const manualPresence = new Map<string, PresenceManualStatus>(); // targetUserId 
 // confirmed inside, so an "outside" reading can say which one they left.
 // Naturally rebuilt from the next "inside" reading if lost on restart.
 const lastKnownAddressLabel = new Map<string, string>();
+// Ephemeral (not persisted) — when the user's automatic status last changed,
+// so "Présent" can show "depuis HH:mm" instead of just "right now". Reset to
+// Date.now() whenever the computed status or matched place actually changes.
+const autoPresenceSince = new Map<string, { status: 'inside' | 'outside' | 'unknown'; label?: string; since: number }>();
 
 // Family perimeter storage (persisted)
 const familyPerimeters = new Map<string, FamilyPerimeter>();
@@ -1286,24 +1290,41 @@ function getFamilyMemberIds(userId: string): string[] {
 // (PresenceManualStatus + manualPresence are declared earlier, alongside the
 // other storage maps, so the boot-time persisted-data loader can use them.)
 
-function computeAutoPresence(userId: string): { status: 'inside' | 'outside' | 'unknown'; matchedLabel?: string } {
+function computeAutoPresence(userId: string): { status: 'inside' | 'outside' | 'unknown'; matchedLabel?: string; since?: number } {
   const loc = users.get(userId)?.location;
   const now = Date.now();
   // Expired temporary addresses (e.g. a vacation rental past its end date) no
   // longer count — they stay on file for reference but drop out of matching.
   const addresses = (userAddresses.get(userId) || []).filter(a => !a.temporary || !a.expiresAt || a.expiresAt > now);
-  if (!loc || addresses.length === 0) return { status: 'unknown' };
-  for (const addr of addresses) {
-    if (addr.latitude == null || addr.longitude == null) continue;
-    const dist = haversineDistance(loc.latitude, loc.longitude, addr.latitude, addr.longitude);
-    if (dist <= (addr.radiusMeters || 150)) {
-      lastKnownAddressLabel.set(userId, addr.label);
-      return { status: 'inside', matchedLabel: addr.label };
+
+  let result: { status: 'inside' | 'outside' | 'unknown'; matchedLabel?: string };
+  if (!loc || addresses.length === 0) {
+    result = { status: 'unknown' };
+  } else {
+    let matched: typeof addresses[number] | undefined;
+    for (const addr of addresses) {
+      if (addr.latitude == null || addr.longitude == null) continue;
+      const dist = haversineDistance(loc.latitude, loc.longitude, addr.latitude, addr.longitude);
+      if (dist <= (addr.radiusMeters || 150)) { matched = addr; break; }
+    }
+    if (matched) {
+      lastKnownAddressLabel.set(userId, matched.label);
+      result = { status: 'inside', matchedLabel: matched.label };
+    } else {
+      // Outside every known address — still surface the last one they were
+      // confirmed at, so dispatch sees "Sorti de X" instead of just "Sorti".
+      result = { status: 'outside', matchedLabel: lastKnownAddressLabel.get(userId) };
     }
   }
-  // Outside every known address — still surface the last one they were
-  // confirmed at, so dispatch sees "Sorti de X" instead of just "Sorti".
-  return { status: 'outside', matchedLabel: lastKnownAddressLabel.get(userId) };
+
+  // Track when this exact (status, place) combination started, so the
+  // display can say "depuis HH:mm" rather than just describing "right now".
+  const prev = autoPresenceSince.get(userId);
+  const changed = !prev || prev.status !== result.status || prev.label !== result.matchedLabel;
+  const since = changed ? now : prev!.since;
+  autoPresenceSince.set(userId, { status: result.status, label: result.matchedLabel, since });
+
+  return { ...result, since };
 }
 
 // forDispatch=true applies the Ghost-mode rule; family-facing callers should
@@ -1336,7 +1357,7 @@ function computeEffectivePresence(userId: string, forDispatch: boolean): {
     }
   }
   const auto = computeAutoPresence(userId);
-  return { ...auto, source: 'auto' };
+  return { status: auto.status, source: 'auto', matchedLabel: auto.matchedLabel, setAt: auto.since };
 }
 
 // Connected components over the parent/child/sibling/spouse relationship
@@ -2855,6 +2876,7 @@ app.get('/api/family/members', (req, res) => {
         location: runtimeUser?.location || null,
         presenceStatus: presence.status,
         presenceLabel: presence.matchedLabel,
+        presenceSetAt: presence.setAt,
       };
     });
   res.json(members);

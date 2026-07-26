@@ -1263,8 +1263,8 @@ function renderFamilyGroups() {
               <div class="family-member-status status-${m.status}">${statusLine}</div>
               <div class="family-member-meta">
                 ${m.source === 'manual'
-                  ? `Statut manuel${m.setBy ? ' par ' + escapeHtml(m.setBy) : ''}${m.setAt ? ' · ' + formatTimeAgo(m.setAt) : ''}`
-                  : 'Statut automatique (position live)'}
+                  ? `Statut manuel${m.setBy ? ' par ' + escapeHtml(m.setBy) : ''}${m.setAt ? ' · depuis ' + formatTimeAgo(m.setAt) : ''}`
+                  : `Statut automatique (position live)${m.setAt ? ' · depuis ' + formatTimeAgo(m.setAt) : ''}`}
               </div>
               <div class="family-member-places-toggle" onclick="togglePlacesFor('${m.id}')">
                 🗂️ Gérer les lieux${m.addresses.length > 0 ? ` (${m.addresses.length})` : ''} <span id="places-caret-${m.id}">▾</span>

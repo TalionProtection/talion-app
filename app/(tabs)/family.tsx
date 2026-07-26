@@ -27,6 +27,7 @@ interface FamilyMember {
   lastSeen: number | null;
   presenceStatus?: 'inside' | 'outside' | 'unknown';
   presenceLabel?: string;
+  presenceSetAt?: number;
 }
 
 interface FamilyPerimeter {
@@ -158,6 +159,7 @@ export default function FamilyScreen() {
   const [myPresenceStatus, setMyPresenceStatus] = useState<'inside' | 'outside' | 'unknown'>('unknown');
   const [myPresenceLabel, setMyPresenceLabel] = useState<string | undefined>(undefined);
   const [myPresenceSource, setMyPresenceSource] = useState<'auto' | 'manual'>('auto');
+  const [myPresenceSetAt, setMyPresenceSetAt] = useState<number | undefined>(undefined);
   const [myPresenceSaving, setMyPresenceSaving] = useState<'inside' | 'outside' | 'auto' | null>(null);
 
   // Staff (responder/dispatcher/admin): can view and manually set presence
@@ -316,6 +318,7 @@ export default function FamilyScreen() {
       setMyPresenceStatus(data.status || 'unknown');
       setMyPresenceLabel(data.matchedLabel);
       setMyPresenceSource(data.source || 'auto');
+      setMyPresenceSetAt(data.setAt);
     } catch (e) {
       console.error('[Family] Error fetching my presence:', e);
     }
@@ -752,6 +755,9 @@ export default function FamilyScreen() {
               ? `Présent${item.presenceLabel ? ` — ${item.presenceLabel}` : ''}`
               : 'Sorti'}
           </Text>
+          {item.presenceSetAt && (
+            <Text style={styles.presenceMetaText}>· depuis {timeAgo(item.presenceSetAt)}</Text>
+          )}
         </View>
       )}
 
@@ -977,8 +983,8 @@ export default function FamilyScreen() {
             </Text>
             <Text style={styles.familyGroupMemberMeta}>
               {m.source === 'manual'
-                ? `Statut manuel${m.setBy ? ` par ${m.setBy}` : ''}${m.setAt ? ` · ${timeAgo(m.setAt)}` : ''}`
-                : 'Statut automatique (position live)'}
+                ? `Statut manuel${m.setBy ? ` par ${m.setBy}` : ''}${m.setAt ? ` · depuis ${timeAgo(m.setAt)}` : ''}`
+                : `Statut automatique (position live)${m.setAt ? ` · depuis ${timeAgo(m.setAt)}` : ''}`}
             </Text>
           </View>
           <View style={{ flexDirection: 'row', gap: 6 }}>
@@ -1059,6 +1065,9 @@ export default function FamilyScreen() {
                 ? '🚶 Sorti'
                 : '❓ Statut inconnu'}
           </Text>
+          {myPresenceSetAt && (
+            <Text style={styles.myPresenceMeta}>depuis {timeAgo(myPresenceSetAt)}</Text>
+          )}
         </View>
         <View style={{ flexDirection: 'row', gap: 8 }}>
           <TouchableOpacity
@@ -1624,6 +1633,11 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     marginTop: 2,
   },
+  myPresenceMeta: {
+    fontSize: 11,
+    color: '#9CA3AF',
+    marginTop: 2,
+  },
   myPresenceBtn: {
     paddingVertical: 8,
     paddingHorizontal: 14,
@@ -1872,6 +1886,10 @@ const styles = StyleSheet.create({
   presenceText: {
     fontSize: 13,
     fontWeight: '700',
+  },
+  presenceMetaText: {
+    fontSize: 11,
+    color: '#9CA3AF',
   },
   locationRow: {
     flexDirection: 'row',
