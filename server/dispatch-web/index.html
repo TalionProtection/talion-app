@@ -657,6 +657,17 @@
     </section>
   </main>
 
+  <!-- Presence "which place" picker (2nd step after clicking Présent) -->
+  <div class="modal-overlay" id="presencePlaceModal" style="display:none;">
+    <div class="modal" style="max-width:420px;">
+      <h3 class="modal-title">À quel endroit ?</h3>
+      <div id="presencePlaceList" class="presence-place-list"></div>
+      <div style="display:flex;justify-content:flex-end;margin-top:16px;">
+        <button class="btn btn-secondary" onclick="closePresencePlaceModal()">Annuler</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Add/Edit Place Modal (residence/office/vacation for a family member) -->
   <div class="modal-overlay" id="addPlaceModal" style="display:none;">
     <div class="modal" style="max-width:480px;">

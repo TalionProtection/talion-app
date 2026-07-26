@@ -165,6 +165,12 @@ export default function FamilyScreen() {
   const [allFamilyGroups, setAllFamilyGroups] = useState<FamilyGroup[]>([]);
   const [allFamiliesSavingId, setAllFamiliesSavingId] = useState<string | null>(null);
 
+  // "Which place?" picker — step 2 after choosing "Présent" (self or another
+  // member). placePickerTargetId === null means it's for the caller themselves.
+  const [placePickerVisible, setPlacePickerVisible] = useState(false);
+  const [placePickerTargetId, setPlacePickerTargetId] = useState<string | null>(null);
+  const [placePickerAddresses, setPlacePickerAddresses] = useState<{ label: string; address: string; isPrimary: boolean }[]>([]);
+
   // Modals
   const [selectedMember, setSelectedMember] = useState<FamilyMember | null>(null);
   const [showHistory, setShowHistory] = useState(false);
@@ -315,14 +321,14 @@ export default function FamilyScreen() {
     }
   }, [BASE, userId]);
 
-  const setMyPresence = useCallback(async (status: 'inside' | 'outside' | 'auto') => {
+  const setMyPresence = useCallback(async (status: 'inside' | 'outside' | 'auto', placeLabel?: string) => {
     if (!userId) return;
     setMyPresenceSaving(status);
     try {
       const res = await fetchWithTimeout(`${BASE}/api/family/presence/${userId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status }),
+        body: JSON.stringify(placeLabel ? { status, placeLabel } : { status }),
         timeout: 10000,
       });
       if (res.ok) {
@@ -352,13 +358,13 @@ export default function FamilyScreen() {
     }
   }, [BASE, isStaff]);
 
-  const setMemberPresence = useCallback(async (targetUserId: string, status: 'inside' | 'outside' | 'auto') => {
+  const setMemberPresence = useCallback(async (targetUserId: string, status: 'inside' | 'outside' | 'auto', placeLabel?: string) => {
     setAllFamiliesSavingId(targetUserId);
     try {
       const res = await fetchWithTimeout(`${BASE}/api/family/presence/${targetUserId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
-        body: JSON.stringify({ status }),
+        body: JSON.stringify(placeLabel ? { status, placeLabel } : { status }),
         timeout: 10000,
       });
       if (res.ok) {
@@ -373,6 +379,36 @@ export default function FamilyScreen() {
     }
     setAllFamiliesSavingId(null);
   }, [BASE, fetchAllFamilyGroups]);
+
+  const openPlacePickerForSelf = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/users/${userId}/addresses`, { timeout: 10000 });
+      const data = await res.json();
+      setPlacePickerAddresses(Array.isArray(data) ? data.map((a: any) => ({ label: a.label, address: a.address, isPrimary: a.isPrimary })) : []);
+    } catch (e) {
+      console.error('[Family] Error fetching my addresses:', e);
+      setPlacePickerAddresses([]);
+    }
+    setPlacePickerTargetId(null);
+    setPlacePickerVisible(true);
+  }, [BASE, userId]);
+
+  const openPlacePickerForMember = useCallback((targetId: string, addresses: { label: string; address: string; isPrimary: boolean }[]) => {
+    setPlacePickerAddresses(addresses);
+    setPlacePickerTargetId(targetId);
+    setPlacePickerVisible(true);
+  }, []);
+
+  const confirmPlacePick = useCallback((placeLabel: string) => {
+    const targetId = placePickerTargetId;
+    setPlacePickerVisible(false);
+    if (targetId === null) {
+      setMyPresence('inside', placeLabel);
+    } else {
+      setMemberPresence(targetId, 'inside', placeLabel);
+    }
+  }, [placePickerTargetId, setMyPresence, setMemberPresence]);
 
   const fetchPerimeters = useCallback(async () => {
     if (!userId) return;
@@ -948,7 +984,7 @@ export default function FamilyScreen() {
           <View style={{ flexDirection: 'row', gap: 6 }}>
             <TouchableOpacity
               style={styles.familyGroupActionBtn}
-              onPress={() => setMemberPresence(m.id, 'inside')}
+              onPress={() => openPlacePickerForMember(m.id, m.addresses)}
               disabled={allFamiliesSavingId === m.id}
             >
               {allFamiliesSavingId === m.id ? <ActivityIndicator size="small" color="#1e3a5f" /> : <Text style={styles.familyGroupActionBtnText}>Présent</Text>}
@@ -1027,7 +1063,7 @@ export default function FamilyScreen() {
         <View style={{ flexDirection: 'row', gap: 8 }}>
           <TouchableOpacity
             style={[styles.myPresenceBtn, myPresenceStatus === 'inside' && styles.myPresenceBtnActive]}
-            onPress={() => setMyPresence('inside')}
+            onPress={openPlacePickerForSelf}
             disabled={myPresenceSaving !== null}
           >
             {myPresenceSaving === 'inside' ? (
@@ -1147,6 +1183,29 @@ export default function FamilyScreen() {
           )}
         </>
       )}
+
+      {/* "Which place?" picker — step 2 after choosing Présent */}
+      <Modal visible={placePickerVisible} animationType="fade" transparent onRequestClose={() => setPlacePickerVisible(false)}>
+        <View style={styles.placePickerOverlay}>
+          <View style={styles.placePickerCard}>
+            <Text style={styles.placePickerTitle}>À quel endroit ?</Text>
+            {placePickerAddresses.length === 0 ? (
+              <Text style={styles.placePickerEmpty}>
+                Aucun lieu enregistré. Ajoutez-en un depuis l'onglet "Toutes familles" ou la console dispatch avant de marquer une présence.
+              </Text>
+            ) : (
+              placePickerAddresses.map((a, i) => (
+                <TouchableOpacity key={i} style={styles.placePickerItem} onPress={() => confirmPlacePick(a.label)}>
+                  <Text style={styles.placePickerItemText}>{a.isPrimary ? '⭐ ' : ''}{a.label}</Text>
+                </TouchableOpacity>
+              ))
+            )}
+            <TouchableOpacity style={styles.placePickerCancel} onPress={() => setPlacePickerVisible(false)}>
+              <Text style={styles.placePickerCancelText}>Annuler</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       {/* Location History Modal */}
       <Modal visible={showHistory} animationType="slide" presentationStyle="pageSheet">
@@ -1701,6 +1760,57 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     color: '#1e3a5f',
+  },
+  placePickerOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  placePickerCard: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 20,
+    width: '100%',
+    maxWidth: 360,
+  },
+  placePickerTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#111827',
+    marginBottom: 14,
+    textAlign: 'center',
+  },
+  placePickerEmpty: {
+    fontSize: 13,
+    color: '#6B7280',
+    textAlign: 'center',
+    lineHeight: 19,
+    marginBottom: 8,
+  },
+  placePickerItem: {
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    backgroundColor: '#F9FAFB',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    marginBottom: 8,
+  },
+  placePickerItemText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1e293b',
+  },
+  placePickerCancel: {
+    marginTop: 4,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  placePickerCancelText: {
+    fontSize: 14,
+    color: '#6B7280',
   },
   cardHeader: {
     flexDirection: 'row',

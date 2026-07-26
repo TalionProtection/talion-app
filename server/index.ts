@@ -713,6 +713,7 @@ const sectors = new Map<string, Sector>();
 // Manual presence override storage (persisted) — see computeEffectivePresence below
 interface PresenceManualStatus {
   status: 'inside' | 'outside';
+  placeLabel?: string; // which registered address — only meaningful when status is 'inside'
   setBy: string;
   setAt: number;
 }
@@ -1321,7 +1322,12 @@ function computeEffectivePresence(userId: string, forDispatch: boolean): {
     // again or explicitly cleared back to automatic.
     const manual = manualPresence.get(userId);
     if (manual) {
-      return { status: manual.status, source: 'manual', setBy: manual.setBy, setAt: manual.setAt };
+      // 'inside' names the specific place picked when it was set; 'outside'
+      // has no place of its own — show the last place they were confirmed
+      // at (from either a prior manual 'inside' or the automatic system),
+      // so "Sorti" always reads as "Sorti de X" with the change's timestamp.
+      const matchedLabel = manual.status === 'inside' ? manual.placeLabel : lastKnownAddressLabel.get(userId);
+      return { status: manual.status, source: 'manual', matchedLabel, setBy: manual.setBy, setAt: manual.setAt };
     }
     // No manual override on file: respect Ghost mode by not surfacing the
     // live automatic value to dispatch.
@@ -2872,9 +2878,12 @@ app.get('/api/family/presence/:userId', (req, res) => {
 // or dispatch/admin/responder staff.
 app.put('/api/family/presence/:targetUserId', requireAuth, (req, res) => {
   const targetUserId = req.params.targetUserId as string;
-  const { status } = req.body;
+  const { status, placeLabel } = req.body;
   if (status !== 'inside' && status !== 'outside' && status !== 'auto') {
     return res.status(400).json({ error: "status must be 'inside', 'outside', or 'auto'" });
+  }
+  if (status === 'inside' && !placeLabel) {
+    return res.status(400).json({ error: 'placeLabel is required when marking someone present — pick which registered address' });
   }
   const caller = req.supabaseUser!;
   const isSelf = caller.id === targetUserId;
@@ -2897,8 +2906,9 @@ app.put('/api/family/presence/:targetUserId', requireAuth, (req, res) => {
     return res.json({ success: true });
   }
 
-  const entry: PresenceManualStatus = { status, setBy: caller.id, setAt: Date.now() };
+  const entry: PresenceManualStatus = { status, placeLabel: status === 'inside' ? placeLabel : undefined, setBy: caller.id, setAt: Date.now() };
   manualPresence.set(targetUserId, entry);
+  if (status === 'inside') lastKnownAddressLabel.set(targetUserId, placeLabel);
   persistManualPresence();
   const payload = { type: 'presenceUpdated', targetUserId, status: entry.status, setBy: entry.setBy, setAt: entry.setAt };
   broadcastToRole('dispatcher', payload);
@@ -5815,7 +5825,10 @@ async function loadManualPresenceFromSupabase(): Promise<void> {
     if (error) { console.error('[Supabase] Failed to load presence_status:', error.message); return; }
     if (data && data.length > 0) {
       manualPresence.clear();
-      data.forEach((p: any) => manualPresence.set(p.target_user_id, { status: p.status, setBy: p.set_by, setAt: p.set_at }));
+      data.forEach((p: any) => {
+        manualPresence.set(p.target_user_id, { status: p.status, placeLabel: p.place_label || undefined, setBy: p.set_by, setAt: p.set_at });
+        if (p.status === 'inside' && p.place_label) lastKnownAddressLabel.set(p.target_user_id, p.place_label);
+      });
       console.log(`[Supabase] Loaded ${data.length} manual presence statuses`);
     }
   } catch (e) { console.error('[Supabase] loadManualPresenceFromSupabase error:', e); }
@@ -5824,7 +5837,7 @@ async function loadManualPresenceFromSupabase(): Promise<void> {
 async function saveManualPresenceToSupabase(targetUserId: string, p: PresenceManualStatus): Promise<void> {
   try {
     const { error } = await supabaseAdmin.from('presence_status').upsert({
-      target_user_id: targetUserId, status: p.status, set_by: p.setBy, set_at: p.setAt,
+      target_user_id: targetUserId, status: p.status, place_label: p.placeLabel || null, set_by: p.setBy, set_at: p.setAt,
     });
     if (error) console.error('[Supabase] saveManualPresenceToSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] saveManualPresenceToSupabase error:', e); }

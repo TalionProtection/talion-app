@@ -1280,7 +1280,7 @@ function renderFamilyGroups() {
               </div>
             </div>
             <div class="family-member-actions">
-              <button class="btn btn-secondary btn-sm" onclick="setPresence('${m.id}', 'inside')">Marquer présent</button>
+              <button class="btn btn-secondary btn-sm" onclick="openPresencePlacePicker('${m.id}')">Marquer présent</button>
               <button class="btn btn-secondary btn-sm" onclick="setPresence('${m.id}', 'outside')">Marquer sorti</button>
               ${m.source === 'manual' ? `<button class="btn btn-secondary btn-sm" onclick="setPresence('${m.id}', 'auto')">Revenir en auto</button>` : ''}
             </div>
@@ -1495,12 +1495,42 @@ async function deletePlace(userId, addressId) {
   }
 }
 
-async function setPresence(userId, status) {
+// Step 1 of marking someone present is choosing THIS action; step 2 is
+// picking which of their registered places it refers to (openPresencePlacePicker).
+// "Sorti" needs no picker — it always displays the last known place automatically.
+function openPresencePlacePicker(userId) {
+  const group = familyGroups.find(g => g.members.some(m => m.id === userId));
+  const member = group?.members.find(m => m.id === userId);
+  const addresses = member?.addresses || [];
+  const list = document.getElementById('presencePlaceList');
+
+  if (addresses.length === 0) {
+    list.innerHTML = '<div class="presence-place-empty">Aucun lieu enregistré pour cette personne.<br>Ajoutez-en un via « Gérer les lieux » avant de marquer sa présence.</div>';
+  } else {
+    list.innerHTML = addresses.map(a => `
+      <div class="presence-place-item" onclick="confirmPresencePlace('${userId}', '${a.label.replace(/'/g, "\\'")}')">
+        ${a.isPrimary ? '⭐ ' : ''}${getPlaceIcon(a.label)} ${escapeHtml(a.label)}
+      </div>
+    `).join('');
+  }
+  document.getElementById('presencePlaceModal').style.display = 'flex';
+}
+
+function closePresencePlaceModal() {
+  document.getElementById('presencePlaceModal').style.display = 'none';
+}
+
+function confirmPresencePlace(userId, placeLabel) {
+  closePresencePlaceModal();
+  setPresence(userId, 'inside', placeLabel);
+}
+
+async function setPresence(userId, status, placeLabel) {
   try {
     const res = await fetch(`${API_BASE}/api/family/presence/${encodeURIComponent(userId)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status }),
+      body: JSON.stringify(placeLabel ? { status, placeLabel } : { status }),
     });
     if (res.ok) {
       showToast('Statut mis à jour', 'success');
