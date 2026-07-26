@@ -143,6 +143,28 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
       }
     });
 
+    // Staff (dispatcher/responder/admin) get a local notification whenever a
+    // family member's inside/outside status flips, so it reaches them even if
+    // they're on a different tab/screen than the Familles view. Civilian users
+    // don't need this — family.tsx already handles their own family-tab UI.
+    // Note: family.tsx listens for this same event on the legacy websocketService's
+    // own connection (which receives it independently) — this handler must NOT
+    // also re-emit onto that service, or family.tsx would process it twice.
+    const isStaffRole = userRole === 'dispatcher' || userRole === 'responder' || userRole === 'admin';
+    const unsubPresenceUpdated = wsManager.on('presenceUpdated' as any, (msg: any) => {
+      if (!isStaffRole) return;
+      if (msg.status !== 'inside' && msg.status !== 'outside') return;
+      const name = msg.name || msg.targetUserId;
+      const label = msg.matchedLabel ? ` — ${msg.matchedLabel}` : '';
+      import('@/services/notification-service').then(({ notificationService }) => {
+        notificationService.sendStatusUpdate(
+          msg.status === 'inside' ? `\u{1F3E0} ${name} est rentré(e)` : `\u{1F6B6} ${name} est sorti(e)`,
+          `${name}${label}`,
+          { type: 'presence_change', targetUserId: msg.targetUserId, status: msg.status }
+        );
+      });
+    });
+
     // Poll connection status
     statusPollRef.current = setInterval(() => {
       const connected = wsManager.isConnected();
@@ -163,6 +185,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
       unsubProximityAlert();
       unsubStatusUpdate();
       unsubAlertsSnapshot();
+      unsubPresenceUpdated();
       
       if (statusPollRef.current) {
         clearInterval(statusPollRef.current);

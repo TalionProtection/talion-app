@@ -993,9 +993,15 @@ wss.on('connection', (ws: any) => {
       const conns = userConnections.get(userId);
       if (conns) {
         conns.delete(ws);
-        if (conns.size === 0) userConnections.delete(userId);
+        if (conns.size === 0) {
+          userConnections.delete(userId);
+          // Only announce offline once every connection for this user has closed —
+          // the app keeps two sockets open per session (wsManager + legacy
+          // websocketService), so without this check a single reconnect cycle
+          // fired an online/offline pair per socket, twice the real number.
+          broadcastUserStatus(userId, 'offline');
+        }
       }
-      broadcastUserStatus(userId, 'offline');
     }
   });
 
@@ -1123,6 +1129,10 @@ function handleAuth(ws: any, userId: string | undefined, userRole: string | unde
 
   users.set(userId, user);
 
+  // Same reasoning as the close handler: only the transition from zero to one
+  // active connection counts as "coming online" — a second socket for a user
+  // already connected elsewhere shouldn't re-announce them.
+  const wasAlreadyConnected = (userConnections.get(userId)?.size || 0) > 0;
   if (!userConnections.has(userId)) {
     userConnections.set(userId, new Set());
   }
@@ -1152,7 +1162,7 @@ function handleAuth(ws: any, userId: string | undefined, userRole: string | unde
     data: activeAlerts,
   }));
 
-  broadcastUserStatus(userId, 'online');
+  if (!wasAlreadyConnected) broadcastUserStatus(userId, 'online');
 }
 
 // Create alert handler
@@ -1340,7 +1350,55 @@ function computeAutoPresence(userId: string): { status: 'inside' | 'outside' | '
   autoPresenceState.set(userId, { status: result.status, label: result.matchedLabel, since });
   if (changed) persistAutoPresenceState();
 
+  // Notify only on a real entry/exit — i.e. a determinate status that flips
+  // to the other determinate status. A first-ever reading (prevState absent,
+  // right after boot or a freshly-added address) or a drop into 'unknown'
+  // (GPS lost) isn't itself an "entered/left" event worth paging staff for.
+  if (changed && prevState && (prevState.status === 'inside' || prevState.status === 'outside') &&
+      (result.status === 'inside' || result.status === 'outside') && prevState.status !== result.status) {
+    notifyPresenceTransition(userId, result.status, result.matchedLabel, since);
+  }
+
   return { ...result, since };
+}
+
+// Tell dispatch/responder/admin (web + mobile) and the target's family whenever
+// someone's inside/outside status flips — live WS for open consoles/app, plus a
+// push for staff so it still reaches them if the app is backgrounded or closed.
+function notifyPresenceTransition(userId: string, status: 'inside' | 'outside', matchedLabel: string | undefined, setAt: number, excludeStaffId?: string) {
+  const name = adminUsers.get(userId)?.name || userId;
+  const payload = { type: 'presenceUpdated', targetUserId: userId, name, status, matchedLabel, setBy: 'auto', setAt };
+  broadcastToRole('dispatcher', payload);
+  broadcastToRole('admin', payload);
+  broadcastToRole('responder', payload);
+  broadcastToUsers(getFamilyMemberIds(userId), payload);
+  notifyStaffPresenceChangePush(name, status, matchedLabel, excludeStaffId).catch(() => {});
+}
+
+async function notifyStaffPresenceChangePush(name: string, status: 'inside' | 'outside', matchedLabel: string | undefined, excludeUserId?: string) {
+  const targetTokens: string[] = [];
+  for (const [token, entry] of pushTokens) {
+    if ((entry.userRole === 'dispatcher' || entry.userRole === 'responder' || entry.userRole === 'admin') && entry.userId !== excludeUserId) {
+      targetTokens.push(token);
+    }
+  }
+  if (targetTokens.length === 0) return;
+  const emoji = status === 'inside' ? '\u{1F3E0}' : '\u{1F6B6}';
+  const title = status === 'inside' ? `${emoji} ${name} est rentré(e)` : `${emoji} ${name} est sorti(e)`;
+  const body = matchedLabel ? (status === 'inside' ? `Arrivé(e) à ${matchedLabel}` : `A quitté ${matchedLabel}`) : '';
+  const messages = targetTokens.map((token) => ({
+    to: token, sound: 'default', title, body,
+    data: { type: 'presence_change', status },
+    priority: 'normal' as const, channelId: 'family-alerts',
+  }));
+  try {
+    const response = await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: { 'Accept': 'application/json', 'Accept-Encoding': 'gzip, deflate', 'Content-Type': 'application/json' },
+      body: JSON.stringify(messages),
+    });
+    if (!response.ok) console.error(`[Push] Expo API error for presence change: ${response.status}`);
+  } catch (err) { console.error('[Push] Failed to send presence change push:', err); }
 }
 
 // forDispatch=true applies the Ghost-mode rule; family-facing callers should
@@ -1842,12 +1900,15 @@ function broadcastToRole(role: string, message: any) {
 }
 
 function broadcastUserStatus(userId: string, status: 'online' | 'offline') {
-  broadcastToRole('dispatcher', {
+  const payload = {
     type: 'userStatusChange',
     userId,
+    name: adminUsers.get(userId)?.name || userId,
     status,
     timestamp: Date.now(),
-  });
+  };
+  broadcastToRole('dispatcher', payload);
+  broadcastToRole('admin', payload);
 }
 
 // ─── REST API endpoints ────────────────────────────────────────────// ─── Authentication ───────────────────────────────────────────────────────
@@ -2935,13 +2996,17 @@ app.put('/api/family/presence/:targetUserId', requireAuth, (req, res) => {
   if (!isSelf && !isFamilyOwner && !isStaff) {
     return res.status(403).json({ error: 'Not authorized to set this presence status' });
   }
+  const name = adminUsers.get(targetUserId)?.name || targetUserId;
+  // Captured before mutating anything, so we can tell whether this call actually
+  // flips the status (vs. re-setting the same one) before paging staff about it.
+  const previousStatus = computeEffectivePresence(targetUserId, true).status;
 
   if (status === 'auto') {
     // Clear the manual override, handing control back to the live automatic computation.
     manualPresence.delete(targetUserId);
     persistManualPresence();
     deleteManualPresenceFromSupabase(targetUserId).catch(() => {});
-    const payload = { type: 'presenceUpdated', targetUserId, status: 'auto', setBy: caller.id, setAt: Date.now() };
+    const payload = { type: 'presenceUpdated', targetUserId, name, status: 'auto', setBy: caller.id, setAt: Date.now() };
     broadcastToRole('dispatcher', payload);
     broadcastToRole('admin', payload);
     broadcastToRole('responder', payload);
@@ -2958,11 +3023,15 @@ app.put('/api/family/presence/:targetUserId', requireAuth, (req, res) => {
     persistAutoPresenceState();
   }
   persistManualPresence();
-  const payload = { type: 'presenceUpdated', targetUserId, status: entry.status, setBy: entry.setBy, setAt: entry.setAt };
+  const matchedLabel = status === 'inside' ? placeLabel : autoPresenceState.get(targetUserId)?.label;
+  const payload = { type: 'presenceUpdated', targetUserId, name, status: entry.status, matchedLabel, setBy: entry.setBy, setAt: entry.setAt };
   broadcastToRole('dispatcher', payload);
   broadcastToRole('admin', payload);
   broadcastToRole('responder', payload);
   broadcastToUsers(getFamilyMemberIds(targetUserId), payload);
+  if (previousStatus !== entry.status) {
+    notifyStaffPresenceChangePush(name, entry.status, matchedLabel, isStaff ? caller.id : undefined).catch(() => {});
+  }
   res.json({ success: true });
 });
 

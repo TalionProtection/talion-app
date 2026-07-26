@@ -180,7 +180,7 @@ function handleWsMessage(msg) {
       break;
     }
     case 'userStatusChange': {
-      showToast(`👤 User ${msg.userId} is now ${msg.status}`, 'info');
+      showToast(`👤 ${msg.name || msg.userId} is now ${msg.status}`, 'info');
       fetch(`${API_BASE}/admin/users`).then(r => r.json()).then(users => { allUsers = users; renderUsers(); updateDashboard(); });
       break;
     }
@@ -189,6 +189,18 @@ function handleWsMessage(msg) {
       allAudit.unshift({ timestamp: now, category: 'broadcast', action: 'Zone Broadcast', performedBy: bc.by || 'Unknown', targetUser: '', details: `[${(bc.severity || 'medium').toUpperCase()}] ${bc.message} (${bc.radiusKm || 5}km)` });
       showToast(`📢 Broadcast: ${bc.message}`, 'warning');
       renderAudit(); updateDashboard();
+      break;
+    }
+    case 'presenceUpdated': {
+      if (msg.status === 'inside' || msg.status === 'outside') {
+        const name = msg.name || msg.targetUserId;
+        const label = msg.matchedLabel ? ` — ${msg.matchedLabel}` : '';
+        const text = msg.status === 'inside' ? `🏠 ${name} est rentré(e)${label}` : `🚶 ${name} est sorti(e)${label}`;
+        showToast(text, 'info');
+        sendBrowserNotification(msg.status === 'inside' ? 'Rentré(e)' : 'Sorti(e)', `${name}${label}`, 'info', `presence-${msg.targetUserId}`);
+        allAudit.unshift({ timestamp: now, category: 'presence', action: msg.status === 'inside' ? 'Rentré(e)' : 'Sorti(e)', performedBy: name, targetUser: '', details: msg.matchedLabel || '' });
+        renderAudit();
+      }
       break;
     }
     case 'pong': break;

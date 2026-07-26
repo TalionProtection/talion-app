@@ -458,14 +458,22 @@ function handleWsMessage(msg) {
       if (document.getElementById('tab-families')?.classList.contains('active')) {
         loadFamilyGroups();
       }
+      if (msg.status === 'inside' || msg.status === 'outside') {
+        const name = msg.name || msg.targetUserId;
+        const label = msg.matchedLabel ? ` — ${msg.matchedLabel}` : '';
+        const text = msg.status === 'inside' ? `\u{1F3E0} ${name} est rentré(e)${label}` : `\u{1F6B6} ${name} est sorti(e)${label}`;
+        showToast(text, 'info');
+        sendBrowserNotification(msg.status === 'inside' ? 'Rentré(e)' : 'Sorti(e)', `${name}${label}`, 'info', `presence-${msg.targetUserId}`);
+      }
       break;
     }
 
     case 'userStatusChange': {
       // A user came online/offline
-      showToast(`👤 User ${msg.userId} is now ${msg.status}`, 'info');
+      const suName = msg.name || msg.userId;
+      showToast(`👤 ${suName} is now ${msg.status}`, 'info');
       if (msg.status === 'offline') {
-        sendBrowserNotification('User Disconnected', `${msg.userId} went offline`, 'warning', `user-${msg.userId}`);
+        sendBrowserNotification('User Disconnected', `${suName} went offline`, 'warning', `user-${msg.userId}`);
       }
       break;
     }
