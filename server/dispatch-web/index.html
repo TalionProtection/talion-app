@@ -657,6 +657,42 @@
     </section>
   </main>
 
+  <!-- Add Place Modal (residence/office/vacation for a family member) -->
+  <div class="modal-overlay" id="addPlaceModal" style="display:none;">
+    <div class="modal" style="max-width:480px;">
+      <h3 class="modal-title">Ajouter un lieu</h3>
+      <div class="form-group">
+        <label>Type de lieu</label>
+        <div class="place-type-grid">
+          <button type="button" class="place-type-btn active" data-type="Domicile principal" onclick="selectPlaceType('Domicile principal','&#x1F3E0;')">&#x1F3E0; Domicile principal</button>
+          <button type="button" class="place-type-btn" data-type="Résidence secondaire" onclick="selectPlaceType('Résidence secondaire','&#x1F3E1;')">&#x1F3E1; Résidence secondaire</button>
+          <button type="button" class="place-type-btn" data-type="Bureau" onclick="selectPlaceType('Bureau','&#x1F3E2;')">&#x1F3E2; Bureau</button>
+          <button type="button" class="place-type-btn" data-type="Vacances" onclick="selectPlaceType('Vacances','&#x2708;&#xFE0F;')">&#x2708;&#xFE0F; Vacances (temporaire)</button>
+          <button type="button" class="place-type-btn" data-type="Autre" onclick="selectPlaceType('Autre','&#x1F4CD;')">&#x1F4CD; Autre</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Adresse</label>
+        <div style="position:relative">
+          <input type="text" id="placeAddress" class="form-control" placeholder="Rechercher une adresse..." autocomplete="off" oninput="onPlaceAddressInput(this.value)">
+          <div id="placeAddressSuggestions" class="address-suggestions" style="display:none"></div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Rayon (mètres)</label>
+        <input type="number" id="placeRadius" class="form-control" value="150" min="10">
+      </div>
+      <div class="form-group" id="placeExpiryField" style="display:none;">
+        <label>Jusqu'au (fin du séjour)</label>
+        <input type="date" id="placeExpiry" class="form-control">
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+        <button class="btn btn-secondary" onclick="closeAddPlaceModal()">Annuler</button>
+        <button class="btn btn-primary" onclick="savePlace()">Enregistrer</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Create PTT Group Modal -->
   <div class="modal-overlay" id="pttGroupModal" style="display:none;">
     <div class="modal" style="max-width:450px;">

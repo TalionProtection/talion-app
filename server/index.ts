@@ -717,6 +717,10 @@ interface PresenceManualStatus {
   setAt: number;
 }
 const manualPresence = new Map<string, PresenceManualStatus>(); // targetUserId -> manual status
+// Ephemeral (not persisted) — the label of the last address a user was
+// confirmed inside, so an "outside" reading can say which one they left.
+// Naturally rebuilt from the next "inside" reading if lost on restart.
+const lastKnownAddressLabel = new Map<string, string>();
 
 // Family perimeter storage (persisted)
 const familyPerimeters = new Map<string, FamilyPerimeter>();
@@ -1283,16 +1287,22 @@ function getFamilyMemberIds(userId: string): string[] {
 
 function computeAutoPresence(userId: string): { status: 'inside' | 'outside' | 'unknown'; matchedLabel?: string } {
   const loc = users.get(userId)?.location;
-  const addresses = userAddresses.get(userId) || [];
+  const now = Date.now();
+  // Expired temporary addresses (e.g. a vacation rental past its end date) no
+  // longer count — they stay on file for reference but drop out of matching.
+  const addresses = (userAddresses.get(userId) || []).filter(a => !a.temporary || !a.expiresAt || a.expiresAt > now);
   if (!loc || addresses.length === 0) return { status: 'unknown' };
   for (const addr of addresses) {
     if (addr.latitude == null || addr.longitude == null) continue;
     const dist = haversineDistance(loc.latitude, loc.longitude, addr.latitude, addr.longitude);
     if (dist <= (addr.radiusMeters || 150)) {
+      lastKnownAddressLabel.set(userId, addr.label);
       return { status: 'inside', matchedLabel: addr.label };
     }
   }
-  return { status: 'outside' };
+  // Outside every known address — still surface the last one they were
+  // confirmed at, so dispatch sees "Sorti de X" instead of just "Sorti".
+  return { status: 'outside', matchedLabel: lastKnownAddressLabel.get(userId) };
 }
 
 // forDispatch=true applies the Ghost-mode rule; family-facing callers should
@@ -3405,7 +3415,10 @@ function buildFamilyGroupsOverview() {
         matchedLabel: presence.matchedLabel,
         setBy: presence.setBy ? (adminUsers.get(presence.setBy)?.name || presence.setBy) : undefined,
         setAt: presence.setAt,
-        addresses: (userAddresses.get(uid) || []).map(a => ({ label: a.label, address: a.address, isPrimary: a.isPrimary })),
+        addresses: (userAddresses.get(uid) || []).map(a => ({
+          id: a.id, label: a.label, address: a.address, isPrimary: a.isPrimary,
+          temporary: a.temporary || false, expiresAt: a.expiresAt,
+        })),
       };
     }),
   }));
@@ -6077,6 +6090,8 @@ interface UserAddress {
   alarmCode?: string;
   notes?: string;
   radiusMeters?: number; // "at this address" proximity radius for presence detection; defaults to 150m
+  temporary?: boolean; // e.g. a vacation rental — surfaced distinctly and auto-excluded once expired
+  expiresAt?: number; // only meaningful when temporary; the address stops counting for presence after this
   createdAt: number;
   updatedAt: number;
 }
@@ -6095,6 +6110,8 @@ async function loadUserAddressesFromSupabase(): Promise<void> {
           latitude: a.latitude, longitude: a.longitude, placeId: a.place_id,
           isPrimary: a.is_primary, alarmCode: a.alarm_code, notes: a.notes,
           radiusMeters: a.radius_meters || undefined,
+          temporary: a.temporary || false,
+          expiresAt: a.expires_at || undefined,
           createdAt: a.created_at, updatedAt: a.updated_at,
         };
         if (!userAddresses.has(addr.userId)) userAddresses.set(addr.userId, []);
@@ -6115,7 +6132,7 @@ app.get('/api/users/:id/addresses', (req, res) => {
 
 // POST /api/users/:id/addresses
 app.post('/api/users/:id/addresses', async (req, res) => {
-  const { label, address, latitude, longitude, placeId, isPrimary, alarmCode, notes, radiusMeters } = req.body;
+  const { label, address, latitude, longitude, placeId, isPrimary, alarmCode, notes, radiusMeters, temporary, expiresAt } = req.body;
   if (!label || !address) return res.status(400).json({ error: 'label and address are required' });
   const userId = req.params.id;
   const now = Date.now();
@@ -6139,6 +6156,8 @@ app.post('/api/users/:id/addresses', async (req, res) => {
     alarmCode: alarmCode || null,
     notes: notes || null,
     radiusMeters: radiusMeters ? Number(radiusMeters) : undefined,
+    temporary: temporary || false,
+    expiresAt: expiresAt ? Number(expiresAt) : undefined,
     createdAt: now, updatedAt: now,
   };
   // If primary, unset other primary addresses
@@ -6155,6 +6174,8 @@ app.post('/api/users/:id/addresses', async (req, res) => {
     place_id: newAddr.placeId, is_primary: newAddr.isPrimary,
     alarm_code: newAddr.alarmCode, notes: newAddr.notes,
     radius_meters: newAddr.radiusMeters || null,
+    temporary: newAddr.temporary || false,
+    expires_at: newAddr.expiresAt || null,
     created_at: now, updated_at: now,
   });
   res.status(201).json(newAddr);
@@ -6162,7 +6183,7 @@ app.post('/api/users/:id/addresses', async (req, res) => {
 
 // PUT /api/users/:id/addresses/:addressId
 app.put('/api/users/:id/addresses/:addressId', async (req, res) => {
-  const { label, address, latitude, longitude, placeId, isPrimary, alarmCode, notes, radiusMeters } = req.body;
+  const { label, address, latitude, longitude, placeId, isPrimary, alarmCode, notes, radiusMeters, temporary, expiresAt } = req.body;
   const userId = req.params.id;
   const addresses = userAddresses.get(userId) || [];
   const idx = addresses.findIndex(a => a.id === req.params.addressId);
@@ -6183,12 +6204,15 @@ app.put('/api/users/:id/addresses/:addressId', async (req, res) => {
     longitude: finalLng, isPrimary: isPrimary ?? addresses[idx].isPrimary,
     alarmCode: alarmCode ?? addresses[idx].alarmCode, notes: notes ?? addresses[idx].notes,
     radiusMeters: radiusMeters != null ? Number(radiusMeters) : addresses[idx].radiusMeters,
+    temporary: temporary != null ? Boolean(temporary) : addresses[idx].temporary,
+    expiresAt: expiresAt != null ? Number(expiresAt) : addresses[idx].expiresAt,
     updatedAt: Date.now() };
   addresses[idx] = updated;
   await supabaseAdmin.from('user_addresses').update({
     label: updated.label, address: updated.address, latitude: updated.latitude,
     longitude: updated.longitude, is_primary: updated.isPrimary,
     alarm_code: updated.alarmCode, notes: updated.notes, radius_meters: updated.radiusMeters || null,
+    temporary: updated.temporary || false, expires_at: updated.expiresAt || null,
     updated_at: updated.updatedAt,
   }).eq('id', updated.id);
   res.json(updated);

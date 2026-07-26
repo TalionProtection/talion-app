@@ -1249,22 +1249,32 @@ function renderFamilyGroups() {
   container.innerHTML = familyGroups.map(group => `
     <div class="family-card">
       <div class="family-card-members">
-        ${group.members.map(m => `
+        ${group.members.map(m => {
+          const statusLine = m.status === 'outside' && m.matchedLabel
+            ? `Sorti de ${getPlaceIcon(m.matchedLabel)} ${escapeHtml(m.matchedLabel)}`
+            : `${STATUS_ICONS[m.status] || '❓'} ${STATUS_LABELS[m.status] || m.status}${m.matchedLabel ? ` — ${getPlaceIcon(m.matchedLabel)} ${escapeHtml(m.matchedLabel)}` : ''}`;
+          return `
           <div class="family-member-row">
             <div class="family-member-info">
               <div class="family-member-name">
                 ${m.name}
                 ${m.ghostMode ? '<span class="ghost-badge" title="Mode Ghost actif">👻 Ghost</span>' : ''}
               </div>
-              <div class="family-member-status status-${m.status}">
-                ${STATUS_ICONS[m.status] || '❓'} ${STATUS_LABELS[m.status] || m.status}${m.matchedLabel ? ` — ${escapeHtml(m.matchedLabel)}` : ''}
-              </div>
+              <div class="family-member-status status-${m.status}">${statusLine}</div>
               <div class="family-member-meta">
                 ${m.source === 'manual'
                   ? `Statut manuel${m.setBy ? ' par ' + escapeHtml(m.setBy) : ''}${m.setAt ? ' · ' + formatTimeAgo(m.setAt) : ''}`
                   : 'Statut automatique (position live)'}
               </div>
-              ${m.addresses.length > 0 ? `<div class="family-member-addresses">${m.addresses.map(a => `<span class="addr-chip">${a.isPrimary ? '⭐ ' : ''}${escapeHtml(a.label)}</span>`).join('')}</div>` : ''}
+              <div class="family-member-addresses">
+                ${m.addresses.map(a => `
+                  <span class="addr-chip place-chip${a.temporary ? ' place-chip-temp' : ''}">
+                    ${a.isPrimary ? '⭐ ' : ''}${getPlaceIcon(a.label)} ${escapeHtml(a.label)}${a.temporary && a.expiresAt ? ` (jusqu'au ${formatShortDate(a.expiresAt)})` : ''}
+                    <span class="place-chip-delete" title="Supprimer ce lieu" onclick="deletePlace('${m.id}','${a.id}')">&times;</span>
+                  </span>
+                `).join('')}
+                <button class="place-add-btn" onclick="openAddPlaceModal('${m.id}')">+ Ajouter un lieu</button>
+              </div>
             </div>
             <div class="family-member-actions">
               <button class="btn btn-secondary btn-sm" onclick="setPresence('${m.id}', 'inside')">Marquer présent</button>
@@ -1272,10 +1282,154 @@ function renderFamilyGroups() {
               ${m.source === 'manual' ? `<button class="btn btn-secondary btn-sm" onclick="setPresence('${m.id}', 'auto')">Revenir en auto</button>` : ''}
             </div>
           </div>
-        `).join('')}
+        `;
+        }).join('')}
       </div>
     </div>
   `).join('');
+}
+
+const PLACE_TYPE_ICONS = {
+  'Domicile principal': '🏠',
+  'Résidence secondaire': '🏡',
+  'Bureau': '🏢',
+  'Vacances': '✈️',
+  'Autre': '📍',
+};
+function getPlaceIcon(label) {
+  for (const [key, icon] of Object.entries(PLACE_TYPE_ICONS)) {
+    if (label && label.includes(key)) return icon;
+  }
+  return '📍';
+}
+function formatShortDate(ts) {
+  return new Date(ts).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+// ─── Add Place Modal ───────────────────────────────────────────
+let placeModalUserId = null;
+let placeSelectedType = 'Domicile principal';
+let placeLat = null;
+let placeLng = null;
+
+function openAddPlaceModal(userId) {
+  placeModalUserId = userId;
+  placeLat = null;
+  placeLng = null;
+  document.getElementById('placeAddress').value = '';
+  document.getElementById('placeAddressSuggestions').style.display = 'none';
+  document.getElementById('placeRadius').value = '150';
+  document.getElementById('placeExpiry').value = '';
+  selectPlaceType('Domicile principal', '🏠');
+  document.getElementById('addPlaceModal').style.display = 'flex';
+}
+
+function closeAddPlaceModal() {
+  document.getElementById('addPlaceModal').style.display = 'none';
+  placeModalUserId = null;
+}
+
+function selectPlaceType(type) {
+  placeSelectedType = type;
+  document.querySelectorAll('.place-type-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.getAttribute('data-type') === type);
+  });
+  document.getElementById('placeExpiryField').style.display = type === 'Vacances' ? 'block' : 'none';
+}
+
+let placeAddressDebounceTimer = null;
+function onPlaceAddressInput(value) {
+  clearTimeout(placeAddressDebounceTimer);
+  const box = document.getElementById('placeAddressSuggestions');
+  if (!value || value.length < 3) { box.style.display = 'none'; return; }
+  placeAddressDebounceTimer = setTimeout(() => fetchPlaceAddressSuggestions(value), 350);
+}
+
+async function fetchPlaceAddressSuggestions(query) {
+  const box = document.getElementById('placeAddressSuggestions');
+  try {
+    const res = await fetch(`${API_BASE}/api/geocode?q=${encodeURIComponent(query)}`);
+    const results = await res.json();
+    if (!results || results.length === 0) { box.style.display = 'none'; return; }
+    box.innerHTML = results.map((r, i) => `
+      <div class="address-suggestion-item" onclick="selectPlaceAddressSuggestion(${i})" data-lat="${r.lat}" data-lon="${r.lon}" data-name="${r.display_name.replace(/"/g, '&quot;')}">
+        <span class="addr-icon">📍</span>
+        <span class="addr-text">${r.display_name}</span>
+      </div>
+    `).join('');
+    box.style.display = 'block';
+  } catch (e) {
+    console.error('[Places] Address autocomplete failed:', e);
+    box.style.display = 'none';
+  }
+}
+
+function selectPlaceAddressSuggestion(index) {
+  const box = document.getElementById('placeAddressSuggestions');
+  const items = box.querySelectorAll('.address-suggestion-item');
+  if (!items[index]) return;
+  const item = items[index];
+  placeLat = parseFloat(item.getAttribute('data-lat'));
+  placeLng = parseFloat(item.getAttribute('data-lon'));
+  document.getElementById('placeAddress').value = item.getAttribute('data-name');
+  box.style.display = 'none';
+}
+
+document.addEventListener('click', (e) => {
+  const box = document.getElementById('placeAddressSuggestions');
+  if (box && !e.target.closest('#placeAddress') && !e.target.closest('#placeAddressSuggestions')) {
+    box.style.display = 'none';
+  }
+});
+
+async function savePlace() {
+  if (!placeModalUserId) return;
+  const address = document.getElementById('placeAddress').value.trim();
+  const radiusMeters = parseInt(document.getElementById('placeRadius').value, 10) || 150;
+  const expiryVal = document.getElementById('placeExpiry').value;
+  if (!address) { showToast('Adresse requise', 'error'); return; }
+
+  const isTemp = placeSelectedType === 'Vacances';
+  const body = {
+    label: placeSelectedType,
+    address,
+    latitude: placeLat,
+    longitude: placeLng,
+    radiusMeters,
+    temporary: isTemp,
+    expiresAt: isTemp && expiryVal ? new Date(expiryVal).getTime() : null,
+  };
+
+  try {
+    const res = await fetch(`${API_BASE}/api/users/${placeModalUserId}/addresses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (res.ok) {
+      showToast('Lieu ajouté', 'success');
+      closeAddPlaceModal();
+      loadFamilyGroups();
+    } else {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors de l\'ajout du lieu', 'error');
+    }
+  } catch (e) {
+    console.error('[Places] Save error:', e);
+    showToast('Erreur réseau', 'error');
+  }
+}
+
+async function deletePlace(userId, addressId) {
+  if (!confirm('Supprimer ce lieu ?')) return;
+  try {
+    await fetch(`${API_BASE}/api/users/${userId}/addresses/${addressId}`, { method: 'DELETE' });
+    showToast('Lieu supprimé', 'success');
+    loadFamilyGroups();
+  } catch (e) {
+    console.error('[Places] Delete error:', e);
+    showToast('Erreur réseau', 'error');
+  }
 }
 
 async function setPresence(userId, status) {
