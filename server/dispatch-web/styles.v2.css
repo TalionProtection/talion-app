@@ -244,7 +244,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .family-member-status.status-outside { color: #f59e0b; }
 .family-member-status.status-unknown { color: var(--text-muted); }
 .family-member-meta { font-size: 11px; color: var(--text-faint); margin-top: 2px; }
-.family-member-addresses-label { font-size: 10px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.4px; margin-top: 10px; }
+.family-member-places-toggle {
+  font-size: 11px; color: var(--text-muted); margin-top: 10px; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 4px; user-select: none;
+}
+.family-member-places-toggle:hover { color: var(--text-primary); }
 .family-member-addresses { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; align-items: center; }
 .family-member-addresses .addr-chip { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--bg-panel-header); color: var(--text-secondary); }
 .place-chip { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }

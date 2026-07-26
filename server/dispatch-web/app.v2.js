@@ -1266,8 +1266,10 @@ function renderFamilyGroups() {
                   ? `Statut manuel${m.setBy ? ' par ' + escapeHtml(m.setBy) : ''}${m.setAt ? ' · ' + formatTimeAgo(m.setAt) : ''}`
                   : 'Statut automatique (position live)'}
               </div>
-              <div class="family-member-addresses-label">Lieux enregistrés (référence, pas le statut actuel) :</div>
-              <div class="family-member-addresses">
+              <div class="family-member-places-toggle" onclick="togglePlacesFor('${m.id}')">
+                🗂️ Gérer les lieux${m.addresses.length > 0 ? ` (${m.addresses.length})` : ''} <span id="places-caret-${m.id}">▾</span>
+              </div>
+              <div class="family-member-addresses" id="places-${m.id}" style="display:none;">
                 ${m.addresses.map(a => `
                   <span class="addr-chip place-chip${a.temporary ? ' place-chip-temp' : ''}" title="Cliquer pour modifier" onclick="openEditPlaceModal('${m.id}','${a.id}')">
                     ${a.isPrimary ? '⭐ ' : ''}${getPlaceIcon(a.label)} ${escapeHtml(a.label)}${a.temporary && a.expiresAt ? ` (jusqu'au ${formatShortDate(a.expiresAt)})` : ''}
@@ -1305,6 +1307,18 @@ function getPlaceIcon(label) {
 }
 function formatShortDate(ts) {
   return new Date(ts).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+// Registered addresses are reference data, not a live status — collapsed by
+// default so the one precise status line above is never visually competing
+// with a list that could otherwise read as "present in several places".
+function togglePlacesFor(userId) {
+  const el = document.getElementById(`places-${userId}`);
+  const caret = document.getElementById(`places-caret-${userId}`);
+  if (!el) return;
+  const isHidden = el.style.display === 'none';
+  el.style.display = isHidden ? 'flex' : 'none';
+  if (caret) caret.textContent = isHidden ? '▴' : '▾';
 }
 
 // ─── Add/Edit Place Modal ────────────────────────────────────────
