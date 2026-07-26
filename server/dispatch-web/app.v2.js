@@ -4948,10 +4948,10 @@ document.addEventListener('click', (e) => {
 });
 
 // ── Zone Quick Filters ──
-function zoomToZone(zoneId) {
+async function zoomToZone(zoneId) {
   if (!dispatchMap) return;
   if (zoneId === 'all') {
-    dispatchMap.setView([46.2125, 6.1795], 13, { animate: true });
+    await zoomToAllResidences();
   } else {
     const layer = sectorLayers[zoneId];
     if (!layer) return;
@@ -4962,6 +4962,25 @@ function zoomToZone(zoneId) {
   document.querySelectorAll('.btn-zone-filter').forEach(btn => {
     btn.classList.toggle('zone-active', btn.getAttribute('data-zone') === zoneId);
   });
+}
+
+// "Tout" zooms out to fit every registered residence/office/etc. across every
+// user profile — not a fixed city — so it stays correct as families' places
+// change (Geneva today, maybe elsewhere tomorrow).
+async function zoomToAllResidences() {
+  try {
+    const res = await fetch(`${API_BASE}/dispatch/all-residences`);
+    const residences = res.ok ? await res.json() : [];
+    if (residences.length === 0) {
+      dispatchMap.setView([46.2125, 6.1795], 13, { animate: true });
+      return;
+    }
+    const bounds = L.latLngBounds(residences.map(r => [r.latitude, r.longitude]));
+    dispatchMap.fitBounds(bounds, { padding: [60, 60], maxZoom: 12 });
+  } catch (e) {
+    console.error('[Map] Failed to fetch all residences:', e);
+    dispatchMap.setView([46.2125, 6.1795], 13, { animate: true });
+  }
 }
 
 // ─── Sector CRUD (admin-managed organizational zones) ───────────────────

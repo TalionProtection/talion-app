@@ -6165,6 +6165,24 @@ app.get('/api/users/:id/addresses', (req, res) => {
   res.json(addresses);
 });
 
+// GET /dispatch/all-residences — every geocoded address across every user
+// profile (not scoped to family units), used by the map's "Tout" zoom-out
+// to fit the view to wherever people's registered places actually are,
+// instead of a hardcoded city.
+app.get('/dispatch/all-residences', (req, res) => {
+  const now = Date.now();
+  const result: { latitude: number; longitude: number; label: string; userName: string }[] = [];
+  for (const [userId, addresses] of userAddresses) {
+    const userName = adminUsers.get(userId)?.name || userId;
+    for (const a of addresses) {
+      if (a.latitude == null || a.longitude == null) continue;
+      if (a.temporary && a.expiresAt && a.expiresAt <= now) continue;
+      result.push({ latitude: a.latitude, longitude: a.longitude, label: a.label, userName });
+    }
+  }
+  res.json(result);
+});
+
 // POST /api/users/:id/addresses
 app.post('/api/users/:id/addresses', async (req, res) => {
   const { label, address, latitude, longitude, placeId, isPrimary, alarmCode, notes, radiusMeters, temporary, expiresAt } = req.body;
