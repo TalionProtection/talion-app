@@ -1266,11 +1266,12 @@ function renderFamilyGroups() {
                   ? `Statut manuel${m.setBy ? ' par ' + escapeHtml(m.setBy) : ''}${m.setAt ? ' · ' + formatTimeAgo(m.setAt) : ''}`
                   : 'Statut automatique (position live)'}
               </div>
+              <div class="family-member-addresses-label">Lieux enregistrés (référence, pas le statut actuel) :</div>
               <div class="family-member-addresses">
                 ${m.addresses.map(a => `
-                  <span class="addr-chip place-chip${a.temporary ? ' place-chip-temp' : ''}">
+                  <span class="addr-chip place-chip${a.temporary ? ' place-chip-temp' : ''}" title="Cliquer pour modifier" onclick="openEditPlaceModal('${m.id}','${a.id}')">
                     ${a.isPrimary ? '⭐ ' : ''}${getPlaceIcon(a.label)} ${escapeHtml(a.label)}${a.temporary && a.expiresAt ? ` (jusqu'au ${formatShortDate(a.expiresAt)})` : ''}
-                    <span class="place-chip-delete" title="Supprimer ce lieu" onclick="deletePlace('${m.id}','${a.id}')">&times;</span>
+                    <span class="place-chip-delete" title="Supprimer ce lieu" onclick="event.stopPropagation(); deletePlace('${m.id}','${a.id}')">&times;</span>
                   </span>
                 `).join('')}
                 <button class="place-add-btn" onclick="openAddPlaceModal('${m.id}')">+ Ajouter un lieu</button>
@@ -1306,27 +1307,70 @@ function formatShortDate(ts) {
   return new Date(ts).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' });
 }
 
-// ─── Add Place Modal ───────────────────────────────────────────
+// ─── Add/Edit Place Modal ────────────────────────────────────────
+const PLACE_TYPES = Object.keys(PLACE_TYPE_ICONS);
+// Labels are stored as "<type>" or "<type> — <name>" — split them back apart
+// for editing (falls back to 'Autre' + the raw label for anything that
+// predates this scheme or doesn't match a known type).
+function parsePlaceLabel(label) {
+  for (const t of PLACE_TYPES) {
+    if (label === t) return { type: t, name: '' };
+    if (label.startsWith(t + ' — ')) return { type: t, name: label.slice((t + ' — ').length) };
+  }
+  return { type: 'Autre', name: label };
+}
+
 let placeModalUserId = null;
+let placeEditingId = null; // null while creating a new place
 let placeSelectedType = 'Domicile principal';
 let placeLat = null;
 let placeLng = null;
 
 function openAddPlaceModal(userId) {
   placeModalUserId = userId;
+  placeEditingId = null;
   placeLat = null;
   placeLng = null;
+  document.getElementById('placeModalTitle').textContent = 'Ajouter un lieu';
+  document.getElementById('placeName').value = '';
   document.getElementById('placeAddress').value = '';
   document.getElementById('placeAddressSuggestions').style.display = 'none';
   document.getElementById('placeRadius').value = '150';
   document.getElementById('placeExpiry').value = '';
-  selectPlaceType('Domicile principal', '🏠');
+  selectPlaceType('Domicile principal');
   document.getElementById('addPlaceModal').style.display = 'flex';
+}
+
+async function openEditPlaceModal(userId, addressId) {
+  try {
+    const res = await fetch(`${API_BASE}/api/users/${userId}/addresses`);
+    const addresses = res.ok ? await res.json() : [];
+    const addr = addresses.find(a => a.id === addressId);
+    if (!addr) { showToast('Lieu introuvable', 'error'); return; }
+
+    placeModalUserId = userId;
+    placeEditingId = addressId;
+    placeLat = addr.latitude ?? null;
+    placeLng = addr.longitude ?? null;
+    const { type, name } = parsePlaceLabel(addr.label);
+    document.getElementById('placeModalTitle').textContent = 'Modifier ce lieu';
+    document.getElementById('placeName').value = name;
+    document.getElementById('placeAddress').value = addr.address || '';
+    document.getElementById('placeAddressSuggestions').style.display = 'none';
+    document.getElementById('placeRadius').value = addr.radiusMeters || 150;
+    document.getElementById('placeExpiry').value = addr.expiresAt ? new Date(addr.expiresAt).toISOString().slice(0, 10) : '';
+    selectPlaceType(type);
+    document.getElementById('addPlaceModal').style.display = 'flex';
+  } catch (e) {
+    console.error('[Places] Load for edit failed:', e);
+    showToast('Erreur réseau', 'error');
+  }
 }
 
 function closeAddPlaceModal() {
   document.getElementById('addPlaceModal').style.display = 'none';
   placeModalUserId = null;
+  placeEditingId = null;
 }
 
 function selectPlaceType(type) {
@@ -1384,14 +1428,16 @@ document.addEventListener('click', (e) => {
 
 async function savePlace() {
   if (!placeModalUserId) return;
+  const name = document.getElementById('placeName').value.trim();
   const address = document.getElementById('placeAddress').value.trim();
   const radiusMeters = parseInt(document.getElementById('placeRadius').value, 10) || 150;
   const expiryVal = document.getElementById('placeExpiry').value;
   if (!address) { showToast('Adresse requise', 'error'); return; }
 
   const isTemp = placeSelectedType === 'Vacances';
+  const label = name ? `${placeSelectedType} — ${name}` : placeSelectedType;
   const body = {
-    label: placeSelectedType,
+    label,
     address,
     latitude: placeLat,
     longitude: placeLng,
@@ -1401,13 +1447,16 @@ async function savePlace() {
   };
 
   try {
-    const res = await fetch(`${API_BASE}/api/users/${placeModalUserId}/addresses`, {
-      method: 'POST',
+    const url = placeEditingId
+      ? `${API_BASE}/api/users/${placeModalUserId}/addresses/${placeEditingId}`
+      : `${API_BASE}/api/users/${placeModalUserId}/addresses`;
+    const res = await fetch(url, {
+      method: placeEditingId ? 'PUT' : 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
     if (res.ok) {
-      showToast('Lieu ajouté', 'success');
+      showToast(placeEditingId ? 'Lieu modifié' : 'Lieu ajouté', 'success');
       closeAddPlaceModal();
       loadFamilyGroups();
     } else {

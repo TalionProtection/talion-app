@@ -657,10 +657,10 @@
     </section>
   </main>
 
-  <!-- Add Place Modal (residence/office/vacation for a family member) -->
+  <!-- Add/Edit Place Modal (residence/office/vacation for a family member) -->
   <div class="modal-overlay" id="addPlaceModal" style="display:none;">
     <div class="modal" style="max-width:480px;">
-      <h3 class="modal-title">Ajouter un lieu</h3>
+      <h3 class="modal-title" id="placeModalTitle">Ajouter un lieu</h3>
       <div class="form-group">
         <label>Type de lieu</label>
         <div class="place-type-grid">
@@ -670,6 +670,10 @@
           <button type="button" class="place-type-btn" data-type="Vacances" onclick="selectPlaceType('Vacances','&#x2708;&#xFE0F;')">&#x2708;&#xFE0F; Vacances (temporaire)</button>
           <button type="button" class="place-type-btn" data-type="Autre" onclick="selectPlaceType('Autre','&#x1F4CD;')">&#x1F4CD; Autre</button>
         </div>
+      </div>
+      <div class="form-group">
+        <label>Nom (pour distinguer, ex: Megève, Nice...)</label>
+        <input type="text" id="placeName" class="form-control" placeholder="Optionnel si un seul lieu de ce type">
       </div>
       <div class="form-group">
         <label>Adresse</label>
