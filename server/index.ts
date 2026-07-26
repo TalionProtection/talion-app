@@ -3618,6 +3618,25 @@ app.put('/api/users/:id/ghost-mode', requireAuth, (req, res) => {
   user.ghostMode = Boolean(req.body.ghostMode);
   adminUsers.set(user.id, user);
   saveAdminUserToSupabase(user).catch(e => console.error('[GhostMode] Supabase save error:', e));
+
+  // Push the visibility change to dispatch immediately, rather than waiting for the
+  // next location ping — enabling Ghost mode removes an already-rendered marker;
+  // disabling it re-shows the user right away using their last known location.
+  // (Skip hiding if they're currently revealed for an active incident — that reveal
+  // should still hold even if they happen to re-toggle Ghost mode while it's active.)
+  if (user.ghostMode && !isRevealedForActiveIncident(targetId)) {
+    const removeMsg = { type: 'userLocationRemoved', userId: targetId, timestamp: Date.now() };
+    broadcastToRole('dispatcher', removeMsg);
+    broadcastToRole('admin', removeMsg);
+  } else if (!user.ghostMode) {
+    const runtimeUser = users.get(targetId);
+    if (runtimeUser?.location) {
+      const showMsg = { type: 'userLocationUpdate', userId: targetId, name: user.name, location: runtimeUser.location, timestamp: Date.now() };
+      broadcastToRole('dispatcher', showMsg);
+      broadcastToRole('admin', showMsg);
+    }
+  }
+
   res.json({ success: true, ghostMode: user.ghostMode });
 });
 
