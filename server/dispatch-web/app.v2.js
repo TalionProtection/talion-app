@@ -3715,7 +3715,7 @@ async function openDetailModal(incidentId) {
               locBadge = `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 12px;margin-bottom:12px;display:flex;align-items:center;gap:8px;">
                 <span style="font-size:18px;">🏠</span>
                 <div>
-                  <div style="font-weight:700;color:#dc2626;font-size:13px;">⚠️ ALERTE POSSIBLE HOME-JACKING</div>
+                  <div style="font-weight:700;color:#dc2626;font-size:13px;">⚠️ ALERTE POSSIBLE HOME-JACKING <span style="font-weight:500;font-size:9px;color:#b91c1c;text-transform:none;">(au moment du signalement)</span></div>
                   <div style="font-size:11px;color:#991b1b;">${loc.label} · ${loc.distanceMeters}m · Possible home-jacking</div>
                   ${loc.alarmCode ? `<div style="font-size:11px;color:#991b1b;margin-top:2px;">🔑 Code alarme: <strong>${loc.alarmCode}</strong></div>` : ''}
                 </div>
@@ -3724,7 +3724,7 @@ async function openDetailModal(incidentId) {
               locBadge = `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:8px 12px;margin-bottom:12px;display:flex;align-items:center;gap:8px;">
                 <span style="font-size:18px;">📍</span>
                 <div>
-                  <div style="font-weight:700;color:#16a34a;font-size:13px;">HORS DOMICILE</div>
+                  <div style="font-weight:700;color:#16a34a;font-size:13px;">HORS DOMICILE <span style="font-weight:500;font-size:9px;color:#15803d;">(au moment du signalement)</span></div>
                   <div style="font-size:11px;color:#15803d;">${loc.label} · ${loc.distanceMeters}m du domicile connu</div>
                 </div>
               </div>`;
@@ -3776,11 +3776,11 @@ async function openDetailModal(incidentId) {
               <div style="flex:1;">
                 <div style="font-weight:700;font-size:15px;color:#1f2937;">${u.firstName || ''} ${u.lastName || u.name || ''}</div>
                 ${phone ? `<a href="tel:${phone}" style="font-size:13px;color:#1e3a5f;font-weight:600;text-decoration:none;">📞 ${phone}</a>` : ''}
-                <div style="margin-top:4px;">${presenceBadgeHtml(ctx.reporterPresence)}</div>
+                <div style="margin-top:4px;">${presenceBadgeHtml(ctx.reporterPresence)} <span style="font-size:9px;color:#9ca3af;">(en direct maintenant)</span></div>
               </div>
             </div>
             ${addrsHtml ? `<div style="margin-bottom:10px;">${addrsHtml}</div>` : ''}
-            ${familyHtml ? `<div><div style="font-size:12px;font-weight:600;color:#6b7280;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Famille</div>${familyHtml}</div>` : ''}
+            ${familyHtml ? `<div><div style="font-size:12px;font-weight:600;color:#6b7280;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Famille <span style="text-transform:none;font-weight:500;">(statut en direct)</span></div>${familyHtml}</div>` : ''}
           `;
         }
       }

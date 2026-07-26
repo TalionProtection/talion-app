@@ -76,6 +76,7 @@ const PTT_CHANNELS_FILE = path.join(dataDir, 'ptt-channels.json');
 const PTT_MESSAGES_FILE = path.join(dataDir, 'ptt-messages.json');
 const SECTORS_FILE = path.join(dataDir, 'sectors.json');
 const PRESENCE_FILE = path.join(dataDir, 'presence-status.json');
+const AUTO_PRESENCE_FILE = path.join(dataDir, 'auto-presence-state.json');
 
 function loadJsonFile<T>(filePath: string, defaultValue: T): T {
   try {
@@ -718,14 +719,19 @@ interface PresenceManualStatus {
   setAt: number;
 }
 const manualPresence = new Map<string, PresenceManualStatus>(); // targetUserId -> manual status
-// Ephemeral (not persisted) — the label of the last address a user was
-// confirmed inside, so an "outside" reading can say which one they left.
-// Naturally rebuilt from the next "inside" reading if lost on restart.
-const lastKnownAddressLabel = new Map<string, string>();
-// Ephemeral (not persisted) — when the user's automatic status last changed,
-// so "Présent" can show "depuis HH:mm" instead of just "right now". Reset to
-// Date.now() whenever the computed status or matched place actually changes.
-const autoPresenceSince = new Map<string, { status: 'inside' | 'outside' | 'unknown'; label?: string; since: number }>();
+
+// Automatic presence state (persisted — JSON + Supabase, like manualPresence).
+// Tracks both the last known place (so an "outside" reading can say which one
+// they left) and when the current (status, place) combination began (so
+// "Présent" can show "depuis HH:mm" instead of just "right now"). This used
+// to be two in-memory-only maps that reset on every server restart/redeploy,
+// silently losing arrival times and "sorti de X" context — now persisted.
+interface AutoPresenceState {
+  status: 'inside' | 'outside' | 'unknown';
+  label?: string;
+  since: number;
+}
+const autoPresenceState = new Map<string, AutoPresenceState>();
 
 // Family perimeter storage (persisted)
 const familyPerimeters = new Map<string, FamilyPerimeter>();
@@ -836,9 +842,16 @@ seedDemoData();
 
   // Load persisted manual presence status
   const savedPresence = loadJsonFile<({ targetUserId: string } & PresenceManualStatus)[]>(PRESENCE_FILE, []);
-  savedPresence.forEach(p => manualPresence.set(p.targetUserId, { status: p.status, setBy: p.setBy, setAt: p.setAt }));
+  savedPresence.forEach(p => manualPresence.set(p.targetUserId, { status: p.status, placeLabel: p.placeLabel, setBy: p.setBy, setAt: p.setAt }));
   if (savedPresence.length > 0) {
     console.log(`[Persist] Loaded ${savedPresence.length} manual presence statuses from disk`);
+  }
+
+  // Load persisted automatic presence state (arrival times, last known place)
+  const savedAutoPresence = loadJsonFile<({ userId: string } & AutoPresenceState)[]>(AUTO_PRESENCE_FILE, []);
+  savedAutoPresence.forEach(p => autoPresenceState.set(p.userId, { status: p.status, label: p.label, since: p.since }));
+  if (savedAutoPresence.length > 0) {
+    console.log(`[Persist] Loaded ${savedAutoPresence.length} automatic presence states from disk`);
   }
 
   // Load persisted proximity alerts
@@ -1296,6 +1309,7 @@ function computeAutoPresence(userId: string): { status: 'inside' | 'outside' | '
   // Expired temporary addresses (e.g. a vacation rental past its end date) no
   // longer count — they stay on file for reference but drop out of matching.
   const addresses = (userAddresses.get(userId) || []).filter(a => !a.temporary || !a.expiresAt || a.expiresAt > now);
+  const prevState = autoPresenceState.get(userId);
 
   let result: { status: 'inside' | 'outside' | 'unknown'; matchedLabel?: string };
   if (!loc || addresses.length === 0) {
@@ -1308,21 +1322,23 @@ function computeAutoPresence(userId: string): { status: 'inside' | 'outside' | '
       if (dist <= (addr.radiusMeters || 150)) { matched = addr; break; }
     }
     if (matched) {
-      lastKnownAddressLabel.set(userId, matched.label);
       result = { status: 'inside', matchedLabel: matched.label };
     } else {
       // Outside every known address — still surface the last one they were
-      // confirmed at, so dispatch sees "Sorti de X" instead of just "Sorti".
-      result = { status: 'outside', matchedLabel: lastKnownAddressLabel.get(userId) };
+      // confirmed at (persisted across restarts), so dispatch sees "Sorti de
+      // X" instead of just "Sorti".
+      result = { status: 'outside', matchedLabel: prevState?.label };
     }
   }
 
   // Track when this exact (status, place) combination started, so the
   // display can say "depuis HH:mm" rather than just describing "right now".
-  const prev = autoPresenceSince.get(userId);
-  const changed = !prev || prev.status !== result.status || prev.label !== result.matchedLabel;
-  const since = changed ? now : prev!.since;
-  autoPresenceSince.set(userId, { status: result.status, label: result.matchedLabel, since });
+  // Only persist on an actual transition — this function runs on every fetch,
+  // far more often than the state actually changes.
+  const changed = !prevState || prevState.status !== result.status || prevState.label !== result.matchedLabel;
+  const since = changed ? now : prevState!.since;
+  autoPresenceState.set(userId, { status: result.status, label: result.matchedLabel, since });
+  if (changed) persistAutoPresenceState();
 
   return { ...result, since };
 }
@@ -1347,7 +1363,7 @@ function computeEffectivePresence(userId: string, forDispatch: boolean): {
       // has no place of its own — show the last place they were confirmed
       // at (from either a prior manual 'inside' or the automatic system),
       // so "Sorti" always reads as "Sorti de X" with the change's timestamp.
-      const matchedLabel = manual.status === 'inside' ? manual.placeLabel : lastKnownAddressLabel.get(userId);
+      const matchedLabel = manual.status === 'inside' ? manual.placeLabel : autoPresenceState.get(userId)?.label;
       return { status: manual.status, source: 'manual', matchedLabel, setBy: manual.setBy, setAt: manual.setAt };
     }
     // No manual override on file: respect Ghost mode by not surfacing the
@@ -1388,6 +1404,11 @@ function computeFamilyGroups(): string[][] {
 function persistManualPresence() {
   debouncedSave(PRESENCE_FILE, Array.from(manualPresence.entries()).map(([targetUserId, p]) => ({ targetUserId, ...p })));
   manualPresence.forEach((p, targetUserId) => saveManualPresenceToSupabase(targetUserId, p));
+}
+
+function persistAutoPresenceState() {
+  debouncedSave(AUTO_PRESENCE_FILE, Array.from(autoPresenceState.entries()).map(([userId, p]) => ({ userId, ...p })));
+  autoPresenceState.forEach((p, userId) => saveAutoPresenceStateToSupabase(userId, p));
 }
 
 // ─── Duplicate incident detection ────────────────────────────────────────
@@ -2930,7 +2951,12 @@ app.put('/api/family/presence/:targetUserId', requireAuth, (req, res) => {
 
   const entry: PresenceManualStatus = { status, placeLabel: status === 'inside' ? placeLabel : undefined, setBy: caller.id, setAt: Date.now() };
   manualPresence.set(targetUserId, entry);
-  if (status === 'inside') lastKnownAddressLabel.set(targetUserId, placeLabel);
+  if (status === 'inside') {
+    // Keep the automatic-state cache in sync so "the last known place" is
+    // still correct if this later reverts to automatic.
+    autoPresenceState.set(targetUserId, { status: 'inside', label: placeLabel, since: entry.setAt });
+    persistAutoPresenceState();
+  }
   persistManualPresence();
   const payload = { type: 'presenceUpdated', targetUserId, status: entry.status, setBy: entry.setBy, setAt: entry.setAt };
   broadcastToRole('dispatcher', payload);
@@ -5545,6 +5571,7 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
     loadFamilyPerimetersFromSupabase(),
     loadSectorsFromSupabase(),
     loadManualPresenceFromSupabase(),
+    loadAutoPresenceStateFromSupabase(),
     loadPushTokensFromSupabase(),
     loadUserAddressesFromSupabase(),
     loadConversationsFromSupabase(),
@@ -5849,7 +5876,7 @@ async function loadManualPresenceFromSupabase(): Promise<void> {
       manualPresence.clear();
       data.forEach((p: any) => {
         manualPresence.set(p.target_user_id, { status: p.status, placeLabel: p.place_label || undefined, setBy: p.set_by, setAt: p.set_at });
-        if (p.status === 'inside' && p.place_label) lastKnownAddressLabel.set(p.target_user_id, p.place_label);
+        if (p.status === 'inside' && p.place_label) autoPresenceState.set(p.target_user_id, { status: 'inside', label: p.place_label, since: p.set_at });
       });
       console.log(`[Supabase] Loaded ${data.length} manual presence statuses`);
     }
@@ -5870,6 +5897,27 @@ async function deleteManualPresenceFromSupabase(targetUserId: string): Promise<v
     const { error } = await supabaseAdmin.from('presence_status').delete().eq('target_user_id', targetUserId);
     if (error) console.error('[Supabase] deleteManualPresenceFromSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] deleteManualPresenceFromSupabase error:', e); }
+}
+
+async function loadAutoPresenceStateFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('auto_presence_state').select('*');
+    if (error) { console.error('[Supabase] Failed to load auto_presence_state:', error.message); return; }
+    if (data && data.length > 0) {
+      autoPresenceState.clear();
+      data.forEach((p: any) => autoPresenceState.set(p.user_id, { status: p.status, label: p.label || undefined, since: p.since }));
+      console.log(`[Supabase] Loaded ${data.length} automatic presence states`);
+    }
+  } catch (e) { console.error('[Supabase] loadAutoPresenceStateFromSupabase error:', e); }
+}
+
+async function saveAutoPresenceStateToSupabase(userId: string, p: AutoPresenceState): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('auto_presence_state').upsert({
+      user_id: userId, status: p.status, label: p.label || null, since: p.since,
+    });
+    if (error) console.error('[Supabase] saveAutoPresenceStateToSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] saveAutoPresenceStateToSupabase error:', e); }
 }
 
 // ─── Sync push_tokens from Supabase on startup ───────────────────────────
