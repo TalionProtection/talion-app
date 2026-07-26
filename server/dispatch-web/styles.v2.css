@@ -1296,6 +1296,17 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .detail-value { font-size: 14px; color: var(--text-primary); font-weight: 500; }
 .detail-section { padding: 8px 24px 12px; }
 .detail-section-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); font-weight: 700; margin-bottom: 8px; }
+.nearby-radius-control { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.nearby-radius-btn { width: 28px; height: 28px; border-radius: 8px; border: 1px solid var(--border-subtle); background: var(--bg-chip); color: var(--text-primary); font-size: 16px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.nearby-radius-btn:hover { background: var(--bg-hover); }
+.nearby-radius-control input[type="number"] { width: 72px; text-align: center; padding: 5px 6px; border-radius: 8px; border: 1px solid var(--border-subtle); background: var(--bg-input); color: var(--text-primary); font-size: 13px; font-weight: 600; }
+.nearby-radius-unit { font-size: 12px; color: var(--text-muted); }
+.nearby-users-list { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
+.nearby-user-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; background: var(--bg-chip); cursor: pointer; }
+.nearby-user-row:hover { background: var(--bg-hover); }
+.nearby-user-name { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.nearby-user-dist { font-size: 11px; color: var(--text-muted); margin-left: auto; white-space: nowrap; }
+.nearby-users-empty { font-size: 12px; color: var(--text-muted); padding: 4px 0; }
 .detail-desc { font-size: 14px; color: var(--text-body); line-height: 1.5; margin: 0; }
 .detail-photos { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
 .detail-photo-link { display: block; border-radius: 8px; overflow: hidden; border: 2px solid var(--border-subtle); transition: border-color 0.2s, transform 0.2s; }

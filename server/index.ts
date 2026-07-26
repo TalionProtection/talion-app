@@ -3776,6 +3776,32 @@ function computeNearbyResponders(alert: Alert): NearbyResponderInfo[] {
   return result;
 }
 
+// Civilian users (non-responder) within radiusMeters of a location, for the dispatch
+// map's "nearby users" panel on an incident. Same Ghost-mode gating as the live map
+// (/dispatch/map/users) so a hidden user isn't exposed just because an incident is nearby.
+function computeNearbyUsers(location: { latitude: number; longitude: number }, radiusMeters: number) {
+  const now = Date.now();
+  return Array.from(users.values())
+    .filter(u => u.location && u.role !== 'responder')
+    .filter(u => !(adminUsers.get(u.id)?.ghostMode && !isRevealedForActiveIncident(u.id)))
+    .map(u => {
+      const adminUser = adminUsers.get(u.id);
+      const name = adminUser ? `${adminUser.firstName} ${adminUser.lastName}`.trim() : u.id;
+      const distanceMeters = Math.round(haversineDistance(u.location!.latitude, u.location!.longitude, location.latitude, location.longitude));
+      return {
+        id: u.id,
+        name,
+        role: u.role,
+        status: u.status || 'available',
+        location: u.location,
+        lastSeen: u.lastSeen || now,
+        distanceMeters,
+      };
+    })
+    .filter(u => u.distanceMeters <= radiusMeters)
+    .sort((a, b) => a.distanceMeters - b.distanceMeters);
+}
+
 // Ghost-mode users (role 'user') within radiusMeters of a location — used to send
 // reveal-request pushes when an incident is created with a visibility radius.
 function findGhostUsersNearLocation(location: { latitude: number; longitude: number }, radiusMeters: number): string[] {
@@ -3804,6 +3830,17 @@ app.get('/dispatch/incidents/:id/responders-nearby', (req, res) => {
     responders: result,
     suggestedResponderId: suggested ? suggested.id : null,
   });
+});
+
+// Dispatch: civilian users within an adjustable radius of an incident (for the map panel).
+// Radius is a query param, not stored on the incident — the dispatcher can widen/narrow it
+// live and get a fresh list, defaulting to 200m.
+app.get('/dispatch/incidents/:id/nearby-users', (req, res) => {
+  const alert = alerts.get(req.params.id);
+  if (!alert) return res.status(404).json({ error: 'Incident not found' });
+  const radiusMeters = Math.max(50, Math.min(50000, parseFloat(req.query.radius as string) || 200));
+  const nearbyUsers = computeNearbyUsers(alert.location, radiusMeters);
+  res.json({ incidentId: alert.id, radiusMeters, users: nearbyUsers });
 });
 
 // Dispatch: resolve incident

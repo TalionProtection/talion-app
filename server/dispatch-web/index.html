@@ -810,6 +810,18 @@
         <div class="detail-coords" id="detailCoords"></div>
       </div>
 
+      <!-- Nearby Users -->
+      <div class="detail-section" id="detailNearbySection" style="display:none;">
+        <h4 class="detail-section-title">📡 Utilisateurs à proximité</h4>
+        <div class="nearby-radius-control">
+          <button type="button" class="nearby-radius-btn" onclick="adjustNearbyRadius(-50)">−</button>
+          <input type="number" id="detailNearbyRadius" value="200" min="50" max="5000" step="50" oninput="onNearbyRadiusChange()">
+          <span class="nearby-radius-unit">m</span>
+          <button type="button" class="nearby-radius-btn" onclick="adjustNearbyRadius(50)">+</button>
+        </div>
+        <div id="detailNearbyUsersList" class="nearby-users-list"></div>
+      </div>
+
       <!-- Info Grid -->
       <div class="detail-grid">
         <div class="detail-field">

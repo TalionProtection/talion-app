@@ -3607,6 +3607,9 @@ function updateMapTileLayer() {
 let detailMiniMap = null;
 let detailMarker = null;
 let detailCircle = null;
+let detailNearbyMarkers = [];
+let currentDetailIncidentId = null;
+let nearbyRadiusDebounceTimer = null;
 
 async function openDetailModal(incidentId) {
   const modal = document.getElementById('detailModal');
@@ -3954,14 +3957,103 @@ async function openDetailModal(incidentId) {
   
   // Show modal
   modal.classList.add('active');
-  
+
+  // Nearby users panel — resets to the 200m default each time a (possibly different)
+  // incident is opened; the dispatcher can then widen/narrow it live.
+  currentDetailIncidentId = inc.id;
+  const nearbySection = document.getElementById('detailNearbySection');
+  const nearbyRadiusInput = document.getElementById('detailNearbyRadius');
+  if (nearbySection && nearbyRadiusInput) {
+    nearbySection.style.display = hasValidLocation ? 'block' : 'none';
+    nearbyRadiusInput.value = 200;
+  }
+
   // Initialize or update mini map after modal is visible
   setTimeout(() => {
-    initDetailMiniMap(lat, lng, hasValidLocation, severity);
+    initDetailMiniMap(lat, lng, hasValidLocation, severity, 200);
+    if (hasValidLocation) loadNearbyUsers(inc.id, 200);
   }, 150);
 }
 
-function initDetailMiniMap(lat, lng, hasValidLocation, severity) {
+// Fetch civilian users within `radius` meters of the open incident, render the list,
+// and mirror the radius onto the mini-map's dashed circle + add a marker per user.
+async function loadNearbyUsers(incidentId, radius) {
+  const listEl = document.getElementById('detailNearbyUsersList');
+  if (!listEl) return;
+  listEl.innerHTML = '<div class="nearby-users-empty">Recherche…</div>';
+  try {
+    const res = await fetch(`${API_BASE}/dispatch/incidents/${encodeURIComponent(incidentId)}/nearby-users?radius=${radius}`);
+    if (!res.ok) throw new Error('request failed');
+    const data = await res.json();
+    // Stale response from a previous incident/radius that resolved late — ignore it.
+    if (incidentId !== currentDetailIncidentId) return;
+    renderNearbyUsers(data.users || []);
+  } catch (e) {
+    console.warn('[Nearby] Failed to load nearby users:', e);
+    listEl.innerHTML = '<div class="nearby-users-empty">Erreur de chargement</div>';
+  }
+}
+
+function renderNearbyUsers(usersList) {
+  const listEl = document.getElementById('detailNearbyUsersList');
+  if (!listEl) return;
+
+  // Clear previous per-user markers from the mini map
+  detailNearbyMarkers.forEach(m => { if (detailMiniMap) detailMiniMap.removeLayer(m); });
+  detailNearbyMarkers = [];
+
+  if (usersList.length === 0) {
+    listEl.innerHTML = '<div class="nearby-users-empty">Aucun utilisateur dans ce rayon</div>';
+    return;
+  }
+
+  listEl.innerHTML = usersList.map(u => {
+    const distLabel = u.distanceMeters < 1000 ? `${u.distanceMeters} m` : `${(u.distanceMeters / 1000).toFixed(1)} km`;
+    return `<div class="nearby-user-row" onclick="openUserProfile('${u.id}', '${escapeHtml(u.name).replace(/'/g, "\\'")}')">
+      <span>${u.role === 'user' ? '\u{1F464}' : '\u{1F46E}'}</span>
+      <span class="nearby-user-name">${escapeHtml(u.name)}</span>
+      <span class="nearby-user-dist">${distLabel}</span>
+    </div>`;
+  }).join('');
+
+  if (detailMiniMap) {
+    usersList.forEach(u => {
+      if (!u.location) return;
+      const marker = L.circleMarker([u.location.latitude, u.location.longitude], {
+        radius: 6, color: '#fff', weight: 2, fillColor: '#3b82f6', fillOpacity: 0.9,
+      }).addTo(detailMiniMap).bindTooltip(u.name, { direction: 'top', offset: [0, -4] });
+      detailNearbyMarkers.push(marker);
+    });
+  }
+}
+
+function adjustNearbyRadius(delta) {
+  const input = document.getElementById('detailNearbyRadius');
+  if (!input) return;
+  const min = parseFloat(input.min) || 50;
+  const max = parseFloat(input.max) || 5000;
+  const next = Math.min(max, Math.max(min, (parseFloat(input.value) || 200) + delta));
+  input.value = next;
+  onNearbyRadiusChange();
+}
+
+function onNearbyRadiusChange() {
+  const input = document.getElementById('detailNearbyRadius');
+  if (!input || !currentDetailIncidentId) return;
+  const min = parseFloat(input.min) || 50;
+  const max = parseFloat(input.max) || 5000;
+  let radius = parseFloat(input.value) || 200;
+  radius = Math.min(max, Math.max(min, radius));
+  if (detailCircle) detailCircle.setRadius(radius);
+
+  clearTimeout(nearbyRadiusDebounceTimer);
+  const incidentId = currentDetailIncidentId;
+  nearbyRadiusDebounceTimer = setTimeout(() => {
+    loadNearbyUsers(incidentId, radius);
+  }, 350);
+}
+
+function initDetailMiniMap(lat, lng, hasValidLocation, severity, radius) {
   const mapEl = document.getElementById('detailMiniMap');
   if (!mapEl) return;
   
@@ -4014,9 +4106,9 @@ function initDetailMiniMap(lat, lng, hasValidLocation, severity) {
     })
   }).addTo(detailMiniMap);
   
-  // Add radius circle
+  // Add radius circle (kept in sync with the "Utilisateurs à proximité" radius control)
   detailCircle = L.circle([lat, lng], {
-    radius: 200,
+    radius: radius || 200,
     color: color,
     fillColor: color,
     fillOpacity: 0.12,
@@ -4027,6 +4119,8 @@ function initDetailMiniMap(lat, lng, hasValidLocation, severity) {
 
 function closeDetailModal() {
   document.getElementById('detailModal').classList.remove('active');
+  currentDetailIncidentId = null;
+  clearTimeout(nearbyRadiusDebounceTimer);
   // Clean up map after animation
   setTimeout(() => {
     if (detailMiniMap) {
@@ -4034,6 +4128,7 @@ function closeDetailModal() {
       detailMiniMap = null;
       detailMarker = null;
       detailCircle = null;
+      detailNearbyMarkers = [];
     }
   }, 300);
 }
