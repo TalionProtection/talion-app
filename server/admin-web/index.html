@@ -458,10 +458,19 @@
         <button type="button" onclick="selectAddrType('Bureau','🏢')" class="addr-type-btn" data-type="Bureau" style="padding:10px 6px;border:2px solid #e5e7eb;border-radius:8px;background:#f9fafb;cursor:pointer;font-size:11px;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:4px;color:#1f2937;"><span style="font-size:20px;">🏢</span>Bureau</button>
         <button type="button" onclick="selectAddrType('École','🏫')" class="addr-type-btn" data-type="École" style="padding:10px 6px;border:2px solid #e5e7eb;border-radius:8px;background:#f9fafb;cursor:pointer;font-size:11px;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:4px;color:#1f2937;"><span style="font-size:20px;">🏫</span>École</button>
         <button type="button" onclick="selectAddrType('Hôtel','🏨')" class="addr-type-btn" data-type="Hôtel" style="padding:10px 6px;border:2px solid #e5e7eb;border-radius:8px;background:#f9fafb;cursor:pointer;font-size:11px;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:4px;color:#1f2937;"><span style="font-size:20px;">🏨</span>Hôtel</button>
+        <button type="button" onclick="selectAddrType('Vacances','✈️')" class="addr-type-btn" data-type="Vacances" style="padding:10px 6px;border:2px solid #e5e7eb;border-radius:8px;background:#f9fafb;cursor:pointer;font-size:11px;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:4px;color:#1f2937;"><span style="font-size:20px;">✈️</span>Vacances</button>
         <button type="button" onclick="selectAddrType('Autre','📍')" class="addr-type-btn" data-type="Autre" style="padding:10px 6px;border:2px solid #e5e7eb;border-radius:8px;background:#f9fafb;cursor:pointer;font-size:11px;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:4px;color:#1f2937;"><span style="font-size:20px;">📍</span>Autre</button>
       </div>
       <input type="hidden" id="addrLabel" value="Résidence principale">
       <input type="hidden" id="addrTypeIcon" value="🏠">
+    </div>
+    <div class="form-group">
+      <label class="form-label">✏️ Nom (pour distinguer, ex: Megève, Nice...)</label>
+      <input id="addrName" style="background:#fff;color:#1f2937;border:1px solid #e5e7eb;border-radius:6px;padding:8px 12px;width:100%;box-sizing:border-box;font-size:14px;" placeholder="Optionnel si un seul lieu de ce type">
+    </div>
+    <div class="form-group" id="addrExpiryField" style="display:none;">
+      <label class="form-label">📅 Jusqu'au (fin du séjour)</label>
+      <input type="date" id="addrExpiry" style="background:#fff;color:#1f2937;border:1px solid #e5e7eb;border-radius:6px;padding:8px 12px;width:100%;box-sizing:border-box;font-size:14px;">
     </div>
     <div class="form-group" style="position:relative;">
     <div class="form-group" style="position:relative;">

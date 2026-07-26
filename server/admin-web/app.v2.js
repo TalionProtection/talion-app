@@ -1202,6 +1202,7 @@ const ADDR_TYPE_ICONS = {
   'Bureau': '🏢',
   'École': '🏫',
   'Hôtel': '🏨',
+  'Vacances': '✈️',
   'Autre': '📍',
 };
 
@@ -1210,6 +1211,17 @@ function getAddrIcon(label) {
     if (label && label.includes(key)) return icon;
   }
   return '📍';
+}
+
+// Labels are stored as "<type>" or "<type> — <name>" — split them back apart
+// for editing (falls back to 'Autre' + the raw label for anything that
+// predates this scheme or doesn't match a known type).
+function parseAddrLabel(label) {
+  for (const t of Object.keys(ADDR_TYPE_ICONS)) {
+    if (label === t) return { type: t, name: '' };
+    if (label && label.startsWith(t + ' — ')) return { type: t, name: label.slice((t + ' — ').length) };
+  }
+  return { type: 'Autre', name: label || '' };
 }
 
 async function loadUserAddresses(userId) {
@@ -1243,6 +1255,7 @@ function renderAddressesInDrawer() {
             ${addr.isPrimary ? '<span style="background:#1e3a5f;color:white;font-size:10px;padding:2px 8px;border-radius:12px;font-weight:600;">PRINCIPAL</span>' : ''}
           </div>
           <div style="font-size:12px;color:var(--text-secondary);margin-left:26px;">${addr.address}</div>
+          ${addr.temporary && addr.expiresAt ? `<div style="font-size:11px;color:#3b82f6;margin-top:3px;margin-left:26px;">📅 Temporaire, jusqu'au ${new Date(addr.expiresAt).toLocaleDateString('fr-FR')}</div>` : ''}
           ${addr.alarmCode ? `<div style="font-size:11px;color:var(--text-faint);margin-top:3px;margin-left:26px;">🔑 Code alarme: <strong>${addr.alarmCode}</strong></div>` : ''}
           ${addr.notes ? `<div style="font-size:11px;color:var(--text-faint);margin-top:2px;margin-left:26px;">📝 ${addr.notes}</div>` : ''}
         </div>
@@ -1263,6 +1276,8 @@ function selectAddrType(label, icon) {
     btn.style.border = isSelected ? '2px solid #1e3a5f' : '2px solid var(--border)';
     btn.style.background = isSelected ? '#e8f0fe' : 'none';
   });
+  const expiryField = document.getElementById('addrExpiryField');
+  if (expiryField) expiryField.style.display = label === 'Vacances' ? 'block' : 'none';
 }
 
 let addrSearchTimer = null;
@@ -1330,6 +1345,8 @@ function showAddAddressForm() {
     addrEl.removeAttribute('data-lon');
     const countryEl = document.getElementById('addrCountry');
     if (countryEl) countryEl.value = '';
+    document.getElementById('addrName').value = '';
+    document.getElementById('addrExpiry').value = '';
     document.getElementById('addrAlarmCode').value = '';
     document.getElementById('addrNotes').value = '';
     document.getElementById('addrIsPrimary').checked = currentAddresses.length === 0;
@@ -1344,7 +1361,9 @@ function closeAddAddressModal() {
 }
 
 async function saveAddress() {
-  const label = document.getElementById('addrLabel').value.trim();
+  const type = document.getElementById('addrLabel').value.trim();
+  const name = document.getElementById('addrName')?.value.trim() || '';
+  const label = name ? `${type} — ${name}` : type;
   const addrEl = document.getElementById('addrAddress');
   const street = document.getElementById('addrStreet')?.value.trim() || '';
   const city = document.getElementById('addrCity')?.value.trim() || '';
@@ -1356,8 +1375,11 @@ async function saveAddress() {
   const latitude = parseFloat(addrEl.dataset.lat) || null;
   const longitude = parseFloat(addrEl.dataset.lon) || null;
   const country = document.getElementById('addrCountry')?.value.trim() || null;
+  const isTemp = type === 'Vacances';
+  const expiryVal = document.getElementById('addrExpiry')?.value;
+  const expiresAt = isTemp && expiryVal ? new Date(expiryVal).getTime() : null;
 
-  if (!label || !address) { showToast('Type et adresse obligatoires', 'error'); return; }
+  if (!type || !address) { showToast('Type et adresse obligatoires', 'error'); return; }
   if (!editingUserId) { showToast('Sauvegardez d\'abord l\'utilisateur', 'error'); return; }
 
   const modal = document.getElementById('addAddressModal');
@@ -1365,7 +1387,7 @@ async function saveAddress() {
   if (modal) modal._editingAddressId = null;
 
   const method = editingAddressId ? 'PUT' : 'POST';
-  const url = editingAddressId 
+  const url = editingAddressId
     ? `${API_BASE}/api/users/${editingUserId}/addresses/${editingAddressId}`
     : `${API_BASE}/api/users/${editingUserId}/addresses`;
 
@@ -1373,7 +1395,7 @@ async function saveAddress() {
     const res = await fetch(url, {
       method,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ label, address, latitude, longitude, isPrimary, alarmCode: alarmCode || null, notes: notes || null, country: country || null }),
+      body: JSON.stringify({ label, address, latitude, longitude, isPrimary, alarmCode: alarmCode || null, notes: notes || null, country: country || null, temporary: isTemp, expiresAt }),
     });
     if (res.ok) {
       showToast(editingAddressId ? '✅ Adresse mise à jour' : '✅ Adresse ajoutée', 'success');
@@ -1406,15 +1428,18 @@ async function editAddress(addressId) {
   if (!modal) return;
 
   // Pre-fill form
-  selectAddrType(addr.label, getAddrIcon(addr.label));
-  
+  const { type, name } = parseAddrLabel(addr.label);
+  selectAddrType(type, getAddrIcon(type));
+  document.getElementById('addrName').value = name;
+  document.getElementById('addrExpiry').value = addr.expiresAt ? new Date(addr.expiresAt).toISOString().slice(0, 10) : '';
+
   const parts = addr.address.split(',').map(p => p.trim());
   const streetEl = document.getElementById('addrStreet');
   const cityEl = document.getElementById('addrCity');
   const countryEl = document.getElementById('addrCountry');
   const searchEl = document.getElementById('addrSearch');
   const addrEl = document.getElementById('addrAddress');
-  
+
   if (searchEl) searchEl.value = addr.address;
   if (addrEl) { addrEl.value = addr.address; addrEl.dataset.lat = addr.latitude || ''; addrEl.dataset.lon = addr.longitude || ''; }
   if (streetEl) streetEl.value = parts[0] || '';
