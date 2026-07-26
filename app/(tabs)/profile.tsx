@@ -379,6 +379,21 @@ export default function ProfileScreen() {
           </View>
         )}
 
+        {/* History: archived alerts */}
+        <View style={styles.formSection}>
+          <Text style={styles.sectionTitle}>Historique</Text>
+          <Pressable
+            onPress={() => router.push('/alerts-archive')}
+            style={({ pressed }) => [styles.historyRow, pressed && { opacity: 0.7 }]}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={styles.fieldLabel}>Alertes archivées</Text>
+              <Text style={styles.fieldHint}>Retrouvez l'historique de vos alertes archivées</Text>
+            </View>
+            <IconSymbol name="chevron.right" size={18} color="#9CA3AF" />
+          </Pressable>
+        </View>
+
         {/* Save Button */}
         {isEditing && (
           <Pressable
@@ -655,6 +670,11 @@ const styles = StyleSheet.create({
     color: '#94a3b8',
     marginTop: 4,
     fontStyle: 'italic',
+  },
+  historyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
   },
   input: {
     fontSize: 16,

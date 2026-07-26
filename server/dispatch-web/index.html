@@ -45,6 +45,9 @@
       <a href="#" class="nav-item" data-tab="ptt">
         <span class="nav-icon">&#x1F399;</span> PTT
       </a>
+      <a href="#" class="nav-item" data-tab="archives">
+        <span class="nav-icon">&#x1F5C4;&#xFE0F;</span> Archives
+      </a>
     </nav>
     <div class="sidebar-footer">
       <a href="/admin-console/" class="console-link">&#x1F6E1; Admin Console</a>
@@ -623,6 +626,20 @@
           </div>
         </div>
       </div>
+    </section>
+
+    <!-- Archives Tab -->
+    <section class="tab-content" id="tab-archives">
+      <div class="toolbar">
+        <div class="filter-chips">
+          <button class="chip active" data-archive-view="dispatch" onclick="setArchiveView('dispatch')">&#x1F4E1; Créées par Dispatch</button>
+          <button class="chip" data-archive-view="mobile" onclick="setArchiveView('mobile')">&#x1F464; Créées par Utilisateurs</button>
+        </div>
+        <div class="toolbar-stats">
+          <span class="stat-badge stat-blue" id="archiveCount">0 archivée(s)</span>
+        </div>
+      </div>
+      <div id="archivesList" class="incident-cards"></div>
     </section>
   </main>
 

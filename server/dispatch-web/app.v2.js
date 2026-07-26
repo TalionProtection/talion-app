@@ -170,6 +170,7 @@ function handleWsMessage(msg) {
       const formatted = {
         id: alert.id, type: alert.type, severity: alert.severity, status: alert.status,
         reportedBy: alert.createdBy, address: alert.location?.address || 'Unknown',
+        description: alert.description,
         timestamp: alert.createdAt, assignedCount: alert.respondingUsers?.length || 0,
         respondingUsers: alert.respondingUsers || [], respondingNames: alert.respondingNames || [],
         respondingDetails: alert.respondingDetails || [],
@@ -178,6 +179,11 @@ function handleWsMessage(msg) {
         statusHistory: alert.statusHistory || [],
         responderEscalation: alert.responderEscalation || {},
         escalationLevel: alert.escalationLevel || 0,
+        possibleDuplicates: alert.possibleDuplicates || [],
+        linkedIncidentIds: alert.linkedIncidentIds || [],
+        origin: alert.origin || 'dispatch',
+        archived: alert.archived || false,
+        archivedAt: alert.archivedAt,
       };
       if (existing >= 0) { incidents[existing] = formatted; } else { incidents.unshift(formatted); }
       showToast(`🚨 New Incident: ${alert.type.toUpperCase()} - ${alert.location?.address || 'Unknown'}`, 'error');
@@ -210,13 +216,20 @@ function handleWsMessage(msg) {
       const formatted = {
         id: alert.id, type: alert.type, severity: alert.severity, status: alert.status,
         reportedBy: alert.createdBy, address: alert.location?.address || 'Unknown',
+        description: alert.description,
         timestamp: alert.createdAt, assignedCount: alert.respondingUsers?.length || 0,
         respondingUsers: alert.respondingUsers || [], respondingNames: alert.respondingNames || [],
         respondingDetails: alert.respondingDetails || [],
+        photos: alert.photos || [],
         responderStatuses: alert.responderStatuses || {},
         statusHistory: alert.statusHistory || [],
         responderEscalation: alert.responderEscalation || {},
         escalationLevel: alert.escalationLevel || 0,
+        possibleDuplicates: alert.possibleDuplicates || [],
+        linkedIncidentIds: alert.linkedIncidentIds || [],
+        origin: alert.origin || 'dispatch',
+        archived: alert.archived || false,
+        archivedAt: alert.archivedAt,
       };
       if (idx >= 0) { incidents[idx] = formatted; } else { incidents.unshift(formatted); }
       showToast(`\ud83d\udccb Incident ${formatIncidentId(alert.id)} mis \u00e0 jour`, 'info');
@@ -614,6 +627,7 @@ function updateAll() {
   updateStats();
   renderOverview();
   renderIncidents();
+  renderArchives();
   document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString();
 }
 
@@ -686,13 +700,16 @@ function switchTab(tab) {
   document.querySelector(`.nav-item[data-tab="${tab}"]`)?.classList.add('active');
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.getElementById(`tab-${tab}`)?.classList.add('active');
-  const titles = { overview: "Vue d'ensemble", incidents: "Gestion des incidents", responders: "Unités d'intervention", broadcast: "Diffusion", map: "Carte en direct", messages: "Messages", patrol: "Rapports de Ronde", ptt: "Push-to-Talk" };
+  const titles = { overview: "Vue d'ensemble", incidents: "Gestion des incidents", responders: "Unités d'intervention", broadcast: "Diffusion", map: "Carte en direct", messages: "Messages", patrol: "Rapports de Ronde", ptt: "Push-to-Talk", archives: "Archives" };
   document.getElementById('pageTitle').textContent = titles[tab] || tab;
   if (tab === 'map') {
     setTimeout(() => { if (dispatchMap) { dispatchMap.invalidateSize(); } else { initMap(); } }, 100);
   }
   if (tab === 'ptt') {
     loadPTTChannels();
+  }
+  if (tab === 'archives') {
+    renderArchives();
   }
 }
 
@@ -717,6 +734,7 @@ async function refreshData() {
     updateStats();
     renderOverview();
     renderIncidents();
+    renderArchives();
     renderResponders();
     renderBroadcastHistory();
     document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString();
@@ -784,7 +802,7 @@ function renderOverview() {
   const container = document.getElementById('overviewIncidents');
   const OV_AGING_RANK = { critical: 0, warning: 1 };
   const activeIncs = incidents
-    .filter(i => i.status !== 'resolved')
+    .filter(i => i.status !== 'resolved' && !i.archived)
     .sort((a, b) => {
       const aRank = OV_AGING_RANK[incidentAgingTier(a)] ?? 2;
       const bRank = OV_AGING_RANK[incidentAgingTier(b)] ?? 2;
@@ -965,11 +983,12 @@ function setIncidentViewMode(mode) {
 
 function renderIncidents() {
   const container = document.getElementById('incidentsList');
-  let filtered = incidents;
+  const nonArchived = incidents.filter(i => !i.archived);
+  let filtered = nonArchived;
   if (currentFilter === 'all') {
-    filtered = incidents.filter(i => i.status !== 'resolved');
+    filtered = nonArchived.filter(i => i.status !== 'resolved');
   } else {
-    filtered = incidents.filter(i => i.status === currentFilter);
+    filtered = nonArchived.filter(i => i.status === currentFilter);
   }
   if (currentIncidentSearch) {
     const q = currentIncidentSearch;
@@ -1050,6 +1069,7 @@ function renderIncidentsCards(container, filtered) {
           ${inc.status === 'active' ? `<button class="btn btn-warning btn-sm" onclick="event.stopPropagation(); acknowledgeIncident('${inc.id}')">Acquitter</button>` : ''}
           ${inc.status !== 'resolved' ? `<button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); openAssignModal('${inc.id}')">Assigner Unité</button>` : ''}
           ${inc.status !== 'resolved' ? `<button class="btn btn-success btn-sm" onclick="event.stopPropagation(); openResolveModal('${inc.id}')">Résoudre</button>` : ''}
+          <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); archiveIncident('${inc.id}')">Archiver</button>
           <button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteIncident('${inc.id}')">Supprimer</button>
         </div>
       </div>
@@ -1077,6 +1097,7 @@ function renderIncidentsTable(container, filtered) {
         <td class="it-actions">
           ${inc.status === 'active' ? `<button class="btn btn-warning btn-sm" onclick="event.stopPropagation(); acknowledgeIncident('${inc.id}')">Acquitter</button>` : ''}
           ${inc.status !== 'resolved' ? `<button class="btn btn-success btn-sm" onclick="event.stopPropagation(); openResolveModal('${inc.id}')">Résoudre</button>` : ''}
+          <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); archiveIncident('${inc.id}')">Archiver</button>
           <button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteIncident('${inc.id}')">Supprimer</button>
         </td>
       </tr>
@@ -1098,6 +1119,94 @@ function filterIncidents(filter) {
   document.querySelectorAll('#tab-incidents .chip').forEach(c => c.classList.remove('active'));
   document.querySelector(`#tab-incidents .chip[data-filter="${filter}"]`)?.classList.add('active');
   renderIncidents();
+}
+
+// ─── Archive / Unarchive ──────────────────────────────────────
+// Archiving hides an incident from the normal active views (cards, table,
+// map, overview) without deleting it — it stays fully findable here.
+let archiveViewMode = 'dispatch'; // 'dispatch' | 'mobile'
+
+function setArchiveView(mode) {
+  archiveViewMode = mode;
+  document.querySelectorAll('#tab-archives .chip').forEach(c => c.classList.remove('active'));
+  document.querySelector(`#tab-archives .chip[data-archive-view="${mode}"]`)?.classList.add('active');
+  renderArchives();
+}
+
+function renderArchives() {
+  const container = document.getElementById('archivesList');
+  if (!container) return;
+  const archived = incidents
+    .filter(i => i.archived && (i.origin || 'dispatch') === archiveViewMode)
+    .sort((a, b) => (b.archivedAt || 0) - (a.archivedAt || 0));
+
+  document.getElementById('archiveCount').textContent = `${archived.length} archivée${archived.length !== 1 ? 's' : ''}`;
+
+  if (archived.length === 0) {
+    container.innerHTML = '<div class="empty-state"><div class="empty-icon">🗄️</div><p>Aucune alerte archivée dans cette catégorie</p></div>';
+    return;
+  }
+
+  container.innerHTML = archived.map(inc => `
+    <div class="incident-card sev-${inc.severity}" style="cursor:pointer;" onclick="openDetailModal('${inc.id}')">
+      <div class="inc-header">
+        <div class="inc-header-left">
+          <span class="inc-type-icon">${TYPE_ICONS[inc.type] || '🚨'}</span>
+          <div class="inc-info">
+            <h4>${inc.id.includes(' — ') ? inc.id : formatIncidentId(inc.id) + ' — ' + typeLabel(inc.type)}</h4>
+            <span class="inc-address">📍 ${inc.address}</span>
+          </div>
+        </div>
+        <div class="inc-badges">
+          <span class="badge badge-${inc.severity}">${sevLabel(inc.severity)}</span>
+          <span class="badge badge-${inc.status}">${statusLabel(inc.status)}</span>
+        </div>
+      </div>
+      <div class="inc-desc">Signalé par: ${inc.reportedBy}</div>
+      <div class="inc-meta">⏱ Créé ${formatTimeAgo(inc.timestamp)} · 🗄️ Archivé ${inc.archivedAt ? formatTimeAgo(inc.archivedAt) : ''}</div>
+      <div class="inc-actions">
+        <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); openDetailModal('${inc.id}')">Détails</button>
+        <button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); unarchiveIncident('${inc.id}')">Désarchiver</button>
+        <button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteIncident('${inc.id}')">Supprimer</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function archiveIncident(id) {
+  try {
+    const res = await fetch(`${API_BASE}/alerts/${encodeURIComponent(id)}/archive`, { method: 'PUT' });
+    if (res.ok) {
+      showToast(`Incident ${formatIncidentId(id)} archivé`, 'success');
+      if (document.getElementById('detailModal')?.classList.contains('active')) closeDetailModal();
+      await refreshData();
+      if (dispatchMap) refreshMapData();
+    } else {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors de l’archivage', 'error');
+    }
+  } catch (e) {
+    console.error('[Incidents] Archive error:', e);
+    showToast('Erreur réseau', 'error');
+  }
+}
+
+async function unarchiveIncident(id) {
+  try {
+    const res = await fetch(`${API_BASE}/alerts/${encodeURIComponent(id)}/unarchive`, { method: 'PUT' });
+    if (res.ok) {
+      showToast(`Incident ${formatIncidentId(id)} désarchivé`, 'success');
+      await refreshData();
+      renderArchives();
+      if (dispatchMap) refreshMapData();
+    } else {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur', 'error');
+    }
+  } catch (e) {
+    console.error('[Incidents] Unarchive error:', e);
+    showToast('Erreur réseau', 'error');
+  }
 }
 
 // ─── Responders Rendering ────────────────────────────────────
@@ -1794,6 +1903,7 @@ function updateIncidentMarkers(incidentData) {
   // Also apply incident type filter
   const visibleIncidents = incidentData.filter(inc => {
     if (inc.status === 'resolved') return false;
+    if (inc.archived) return false;
     if (mapIncidentTypeFilter !== 'all' && inc.type !== mapIncidentTypeFilter) return false;
     return true;
   });
@@ -1861,6 +1971,7 @@ function updateIncidentMarkers(incidentData) {
       ${correlationLine}
       <div class="popup-actions">
         <button class="popup-btn assign" onclick="openDetailModal('${inc.id}')">Détails</button>
+        <button class="popup-btn ack" onclick="archiveIncident('${inc.id}')">Archiver</button>
         <button class="popup-btn delete" onclick="deleteIncident('${inc.id}')">Supprimer</button>
       </div>
       ${actions}
@@ -3487,6 +3598,9 @@ async function openDetailModal(incidentId) {
   if (status === 'resolved') {
     actionsHtml.push(`<button class="btn btn-secondary" onclick="closeDetailModal()">Close</button>`);
   }
+  actionsHtml.push(inc.archived
+    ? `<button class="btn btn-primary" onclick="unarchiveIncident('${inc.id}')">Désarchiver</button>`
+    : `<button class="btn btn-secondary" onclick="archiveIncident('${inc.id}')">🗄️ Archiver</button>`);
   actionsHtml.push(`<button class="btn btn-danger" onclick="deleteIncident('${inc.id}')">🗑️ Supprimer</button>`);
   document.getElementById('detailActions').innerHTML = actionsHtml.join('');
   

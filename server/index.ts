@@ -464,6 +464,9 @@ interface Alert {
   revealedUserIds?: string[]; // Ghost-mode users who confirmed becoming visible for this incident
   possibleDuplicates?: { id: string; confidence: 'same-reporter' | 'family' | 'proximity' }[]; // auto-suggested correlations, dispatcher confirms or dismisses
   linkedIncidentIds?: string[]; // dispatcher-confirmed links to other incidents (bidirectional)
+  origin?: 'dispatch' | 'mobile'; // who created it — console/dispatcher action vs. a mobile app user report
+  archived?: boolean; // hidden from the normal active views but kept, findable via the Archives view
+  archivedAt?: number;
 }
 
 interface AdminIncident {
@@ -487,6 +490,9 @@ interface AdminIncident {
   photos?: string[];
   possibleDuplicates?: { id: string; confidence: 'same-reporter' | 'family' | 'proximity' }[];
   linkedIncidentIds?: string[];
+  origin?: 'dispatch' | 'mobile';
+  archived?: boolean;
+  archivedAt?: number;
 }
 
 interface AuditEntry {
@@ -1121,6 +1127,7 @@ async function handleCreateAlert(ws: any, userId: string, userRole: string, aler
     description: alertData.description || '',
     createdBy: userId,
     reporterId: userId,
+    origin: 'mobile',
     createdAt: Date.now(),
     status: 'active',
     respondingUsers: [],
@@ -2102,6 +2109,55 @@ app.put('/alerts/:id/resolve', requireRole('dispatcher'), (req, res) => {
   res.json({ success: true });
 });
 
+// Archiving hides an incident from the normal active views (list, map, table)
+// without deleting it — it stays fully queryable via the Archives view. Status
+// (resolved/cancelled/etc.) is untouched; archived is an orthogonal flag.
+app.put('/alerts/:id/archive', requireRole('dispatcher'), (req, res) => {
+  const alert = alerts.get(req.params.id as string);
+  if (!alert) return res.status(404).json({ error: 'Alert not found' });
+  alert.archived = true;
+  alert.archivedAt = Date.now();
+  alerts.set(alert.id, alert);
+  persistAlerts();
+  addAuditEntry('incident', 'Incident Archived', req.supabaseUser?.id || 'Dispatch Console', `Archived ${alert.id}`);
+  broadcastMessage({ type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
+  res.json({ success: true });
+});
+
+app.put('/alerts/:id/unarchive', requireRole('dispatcher'), (req, res) => {
+  const alert = alerts.get(req.params.id as string);
+  if (!alert) return res.status(404).json({ error: 'Alert not found' });
+  alert.archived = false;
+  alert.archivedAt = undefined;
+  alerts.set(alert.id, alert);
+  persistAlerts();
+  addAuditEntry('incident', 'Incident Unarchived', req.supabaseUser?.id || 'Dispatch Console', `Unarchived ${alert.id}`);
+  broadcastMessage({ type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
+  res.json({ success: true });
+});
+
+// Mobile app: a user's own archived alerts history — separate from the
+// console's /admin/incidents since it's scoped to the authenticated caller
+// and doesn't require dispatcher/admin access.
+app.get('/api/my-alerts/archive', requireAuth, (req, res) => {
+  const userId = req.supabaseUser!.id;
+  const mine = Array.from(alerts.values())
+    .filter(a => a.archived && (a.reporterId === userId || a.createdBy === userId))
+    .sort((a, b) => (b.archivedAt || 0) - (a.archivedAt || 0))
+    .map(a => ({
+      id: a.id,
+      type: a.type,
+      severity: a.severity,
+      status: a.status,
+      address: a.location?.address || 'Unknown',
+      description: a.description,
+      timestamp: a.createdAt,
+      archivedAt: a.archivedAt,
+      photos: a.photos || [],
+    }));
+  res.json(mine);
+});
+
 // Dispatcher confirms two incidents are reports of the same real-world event.
 // Bidirectional link; drops the pair from possibleDuplicates on both sides
 // since it's now a confirmed correlation rather than a suggestion.
@@ -2191,6 +2247,7 @@ app.post('/dispatch/incidents', async (req, res) => {
     location: location || { latitude: 0, longitude: 0, address: 'Unknown' },
     description: description || '',
     createdBy: createdBy || 'Dispatch Console',
+    origin: 'dispatch',
     createdAt: Date.now(),
     status: 'active',
     respondingUsers: [],
@@ -2238,6 +2295,7 @@ app.post('/alerts', requireAuth, async (req, res) => {
     description: description || '',
     createdBy: createdBy || 'system',
     reporterId: req.supabaseUser?.id || createdBy || undefined,
+    origin: 'mobile',
     createdAt: Date.now(),
     status: 'active',
     respondingUsers: [],
@@ -2491,6 +2549,7 @@ app.post('/api/sos', async (req, res) => {
     description: description || `SOS Alert from ${userName || 'Unknown'}`,
     createdBy: userName || userId || 'mobile-user',
     reporterId: userId || undefined,
+    origin: 'mobile',
     createdAt: Date.now(),
     status: 'active',
     respondingUsers: [],
@@ -3142,6 +3201,11 @@ app.get('/admin/incidents', (req, res) => {
     photos: a.photos || [],
     possibleDuplicates: a.possibleDuplicates || [],
     linkedIncidentIds: a.linkedIncidentIds || [],
+    // Legacy alerts predate the origin field — infer from reporterId as a
+    // best-effort fallback rather than defaulting everything to 'dispatch'.
+    origin: a.origin || (a.reporterId ? 'mobile' : 'dispatch'),
+    archived: a.archived || false,
+    archivedAt: a.archivedAt,
   }));
   res.json(incidents);
 });
@@ -3596,6 +3660,7 @@ app.post('/dispatch/broadcast', async (req, res) => {
     },
     description: message,
     createdBy: by || 'Dispatch Console',
+    origin: 'dispatch',
     createdAt: Date.now(),
     status: 'active',
     respondingUsers: [],
@@ -4685,6 +4750,7 @@ app.post('/api/patrol/reports/:id/escalate-to-incident', async (req, res) => {
     description: `Ronde escaladée — ${severityConfig.label} (rapport ${report.id})`,
     createdBy: report.createdByName,
     reporterId: report.createdBy,
+    origin: 'dispatch',
     createdAt: Date.now(),
     status: 'active',
     respondingUsers: [],
@@ -5344,6 +5410,9 @@ async function loadAlertsFromSupabase(): Promise<void> {
           revealedUserIds: a.revealed_user_ids || [],
           possibleDuplicates: a.possible_duplicates || [],
           linkedIncidentIds: a.linked_incident_ids || [],
+          origin: a.origin || undefined,
+          archived: a.archived || false,
+          archivedAt: a.archived_at || undefined,
         });
       });
       console.log(`[Supabase] Loaded ${data.length} alerts`);
@@ -5373,6 +5442,9 @@ async function saveAlertToSupabase(alert: Alert): Promise<void> {
       revealed_user_ids: alert.revealedUserIds || [],
       possible_duplicates: alert.possibleDuplicates || [],
       linked_incident_ids: alert.linkedIncidentIds || [],
+      origin: alert.origin || null,
+      archived: alert.archived || false,
+      archived_at: alert.archivedAt || null,
     });
     if (error) console.error('[Supabase] saveAlertToSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] saveAlertToSupabase error:', e); }
