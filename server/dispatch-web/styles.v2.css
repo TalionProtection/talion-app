@@ -332,6 +332,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 /* ─── Modal ───────────────────────────────────────────────── */
 .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: var(--overlay-bg); z-index: 100; align-items: center; justify-content: center; }
 .modal-overlay.active { display: flex; }
+/* Modals opened from a marker popup on the map (detail/assign/resolve) must
+   clear Leaflet's own panes/controls and the map's floating panels
+   (geofence/sector/active-zones, all z-index 1000-1200) or they render
+   invisibly behind the map. */
+#detailModal.modal-overlay,
+#assignModal.modal-overlay,
+#resolveModal.modal-overlay { z-index: 2000; }
 .modal { background: var(--bg-modal); border-radius: 16px; padding: 24px; width: 420px; max-width: 90vw; max-height: 80vh; overflow-y: auto; border: 1px solid var(--border-main); transition: background 0.3s; }
 .modal-title { font-size: 18px; font-weight: 700; color: var(--text-primary); margin-bottom: 8px; }
 .modal-subtitle { font-size: 13px; color: var(--text-muted); margin-bottom: 16px; }
