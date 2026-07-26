@@ -473,6 +473,7 @@ interface AdminIncident {
   status: string;
   reportedBy: string;
   address: string;
+  location?: { latitude: number; longitude: number };
   description?: string;
   timestamp: number;
   resolvedAt?: number;
@@ -3097,6 +3098,7 @@ app.get('/admin/incidents', (req, res) => {
     status: a.status,
     reportedBy: a.createdBy,
     address: a.location.address,
+    location: { latitude: a.location.latitude, longitude: a.location.longitude },
     description: a.description,
     timestamp: a.createdAt,
     resolvedAt: a.status === 'resolved' ? a.createdAt + Math.floor(Math.random() * 3600000) : undefined,

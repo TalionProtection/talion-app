@@ -1758,99 +1758,106 @@ function updateIncidentMarkers(incidentData) {
 
   if (!mapFilters.incidents) return;
 
-  // We need full alert data with coordinates
-  // incidentData from /admin/incidents has address but not lat/lng
-  // Fetch from /alerts for coordinate data
-  fetch(`${API_BASE}/alerts`).then(r => r.json()).then(alerts => {
-    // Cache alerts for ETA calculation in detail modal
-    window._cachedAlerts = alerts;
-    // Also get all alerts (including resolved) from admin/incidents for status
-    const allAlerts = new Map();
-    incidentData.forEach(i => allAlerts.set(i.id, i));
+  // Filter out resolved incidents — they should not appear on the map
+  // Also apply incident type filter
+  const visibleIncidents = incidentData.filter(inc => {
+    if (inc.status === 'resolved') return false;
+    if (mapIncidentTypeFilter !== 'all' && inc.type !== mapIncidentTypeFilter) return false;
+    return true;
+  });
 
-    // Use /alerts for active ones with coords, plus seed data coords
-    const alertsWithCoords = Array.from(alerts);
+  const markerPosById = {};
 
-    // Also add incidents from admin that have known addresses (Geneva seed coords)
-    const KNOWN_COORDS = {
-      'Avenue de Champel 24, 1206 Genève': [46.1925, 6.1535],
-      'Route de Florissant 62, 1206 Genève': [46.1955, 6.1675],
-      'Route de Malagnou 32, 1208 Genève': [46.2005, 6.1615],
-      'Chemin des Crêts-de-Champel 2, 1206 Genève': [46.1970, 6.1690],
-      'Route de Thonon 85, 1222 Vésenaz': [46.2315, 6.2055],
-      'Chemin de la Capite 12, 1222 Vésenaz': [46.2300, 6.2040],
-      'Avenue de Miremont 30, 1206 Genève': [46.1945, 6.1665],
-      'Chemin du Velours 10, 1208 Genève': [46.2030, 6.1600],
-    };
+  visibleIncidents.forEach(inc => {
+    const lat = inc.location?.latitude;
+    const lng = inc.location?.longitude;
+    if (lat == null || lng == null || (lat === 0 && lng === 0)) return; // no usable coordinates
 
-    // Filter out resolved incidents — they should not appear on the map
-    // Also apply incident type filter
-    const visibleIncidents = incidentData.filter(inc => {
-      if (inc.status === 'resolved') return false;
-      if (mapIncidentTypeFilter !== 'all' && inc.type !== mapIncidentTypeFilter) return false;
-      return true;
+    const color = SEVERITY_COLORS[inc.severity] || '#6b7280';
+    const emoji = TYPE_EMOJIS[inc.type] || '🚨';
+    const size = inc.severity === 'critical' ? 36 : inc.severity === 'high' ? 32 : 28;
+    const agingTier = incidentAgingTier(inc);
+
+    const marker = L.marker([lat, lng], {
+      icon: createCircleIcon(color, size, emoji),
+      zIndexOffset: inc.severity === 'critical' ? 1000 : inc.severity === 'high' ? 500 : (agingTier ? 300 : 0),
     });
 
-    visibleIncidents.forEach(inc => {
-      const alertData = alertsWithCoords.find(a => a.id === inc.id);
-      let lat, lng;
-      if (alertData && alertData.location) {
-        lat = alertData.location.latitude;
-        lng = alertData.location.longitude;
-      } else if (KNOWN_COORDS[inc.address]) {
-        [lat, lng] = KNOWN_COORDS[inc.address];
-      } else {
-        return; // skip if no coords
-      }
-
-      const color = SEVERITY_COLORS[inc.severity] || '#6b7280';
-      const emoji = TYPE_EMOJIS[inc.type] || '🚨';
-      const size = inc.severity === 'critical' ? 36 : inc.severity === 'high' ? 32 : 28;
-
-      const marker = L.marker([lat, lng], {
-        icon: createCircleIcon(color, size, emoji),
-        zIndexOffset: inc.severity === 'critical' ? 1000 : inc.severity === 'high' ? 500 : 0,
+    // Pulse ring for active critical incidents AND for any unacknowledged
+    // incident aging past the warning/critical threshold — a tactical cue
+    // that something needs attention right now, not just severity at creation.
+    if ((inc.status === 'active' && inc.severity === 'critical') || agingTier) {
+      const ringColor = agingTier === 'critical' ? '#ef4444' : agingTier === 'warning' ? '#f59e0b' : '#dc2626';
+      const pulseCircle = L.circleMarker([lat, lng], {
+        radius: 25, color: ringColor, fillColor: ringColor, fillOpacity: 0.15, weight: 2, opacity: 0.4,
+        className: 'pulse-marker',
       });
+      pulseCircle.addTo(dispatchMap);
+      mapIncidentMarkers.push(pulseCircle);
+    }
 
-      // Pulse animation for active critical
-      if (inc.status === 'active' && inc.severity === 'critical') {
-        const pulseCircle = L.circleMarker([lat, lng], {
-          radius: 25, color: '#dc2626', fillColor: '#dc2626', fillOpacity: 0.15, weight: 2, opacity: 0.4,
-          className: 'pulse-marker',
-        });
-        pulseCircle.addTo(dispatchMap);
-        mapIncidentMarkers.push(pulseCircle);
-      }
+    const statusBadge = `<span class="popup-badge ${inc.status}">${inc.status}</span>`;
+    const sevBadge = `<span class="popup-badge ${inc.severity}">${inc.severity}</span>`;
+    const agingBadge = agingTier
+      ? `<span class="popup-badge ${inc.status}" style="background:${agingTier === 'critical' ? '#ef4444' : '#f59e0b'};">⏳ ${formatAgeMinutes(inc)}</span>`
+      : '';
+    const actions = inc.status === 'active'
+      ? `<div class="popup-actions">
+          <button class="popup-btn ack" onclick="acknowledgeIncident('${inc.id}')">ACK</button>
+          <button class="popup-btn assign" onclick="openAssignModal('${inc.id}')">Assign</button>
+        </div>`
+      : inc.status === 'acknowledged'
+      ? `<div class="popup-actions">
+          <button class="popup-btn resolve" onclick="openResolveModal('${inc.id}')">Resolve</button>
+          <button class="popup-btn assign" onclick="openAssignModal('${inc.id}')">Assign</button>
+        </div>`
+      : '';
 
-      const statusBadge = `<span class="popup-badge ${inc.status}">${inc.status}</span>`;
-      const sevBadge = `<span class="popup-badge ${inc.severity}">${inc.severity}</span>`;
-      const actions = inc.status === 'active'
-        ? `<div class="popup-actions">
-            <button class="popup-btn ack" onclick="acknowledgeIncident('${inc.id}')">ACK</button>
-            <button class="popup-btn assign" onclick="openAssignModal('${inc.id}')">Assign</button>
-          </div>`
-        : inc.status === 'acknowledged'
-        ? `<div class="popup-actions">
-            <button class="popup-btn resolve" onclick="openResolveModal('${inc.id}')">Resolve</button>
-            <button class="popup-btn assign" onclick="openAssignModal('${inc.id}')">Assign</button>
-          </div>`
-        : '';
+    const dupCount = (inc.possibleDuplicates || []).length;
+    const linkedCount = (inc.linkedIncidentIds || []).length;
+    const correlationLine = (dupCount + linkedCount) > 0
+      ? `<div class="popup-detail">🔗 ${linkedCount > 0 ? `Lié à ${linkedCount} incident(s)` : ''}${linkedCount > 0 && dupCount > 0 ? ' · ' : ''}${dupCount > 0 ? `${dupCount} doublon(s) possible(s)` : ''}</div>`
+      : '';
 
-      marker.bindPopup(`
-        <div class="popup-title">${emoji} ${formatIncidentId(inc.id)} \u2014 ${typeLabel(inc.type)}</div>
-        <div>${sevBadge} ${statusBadge}</div>
-        <div class="popup-detail">\ud83d\udccd ${inc.address}</div>
-        <div class="popup-detail">\ud83d\udc64 Signal\u00e9 par: ${inc.reportedBy}</div>
-        <div class="popup-detail">\u23f1 ${formatTimeAgo(inc.timestamp)}</div>
-        ${inc.assignedCount > 0 ? `<div class="popup-detail">\ud83d\udc6e ${inc.assignedCount} intervenant(s) assign\u00e9(s)</div>` : ''}
-        ${actions}
-      `, { maxWidth: 280 });
+    marker.bindPopup(`
+      <div class="popup-title">${emoji} ${formatIncidentId(inc.id)} — ${typeLabel(inc.type)}</div>
+      <div>${sevBadge} ${statusBadge} ${agingBadge}</div>
+      <div class="popup-detail">📍 ${inc.address}</div>
+      <div class="popup-detail">👤 Signalé par: ${inc.reportedBy}</div>
+      <div class="popup-detail">⏱ ${formatTimeAgo(inc.timestamp)}</div>
+      ${inc.assignedCount > 0 ? `<div class="popup-detail">👮 ${inc.assignedCount} intervenant(s) assigné(s)</div>` : ''}
+      ${correlationLine}
+      <div class="popup-actions"><button class="popup-btn assign" onclick="openDetailModal('${inc.id}')">Détails</button></div>
+      ${actions}
+    `, { maxWidth: 280 });
 
-      marker.addTo(dispatchMap);
-      mapIncidentMarkers.push(marker);
+    marker.addTo(dispatchMap);
+    mapIncidentMarkers.push(marker);
+    markerPosById[inc.id] = [lat, lng];
+  });
+
+  // Tactical correlation lines: dashed connector between incidents that are
+  // confirmed-linked or flagged as possible duplicates of each other, so a
+  // dispatcher can see clustered/related reports (e.g. several family members
+  // reporting the same event) at a glance rather than reading each popup.
+  const drawnPairs = new Set();
+  visibleIncidents.forEach(inc => {
+    const from = markerPosById[inc.id];
+    if (!from) return;
+    const relatedIds = [...(inc.linkedIncidentIds || []), ...(inc.possibleDuplicates || []).map(d => d.id)];
+    relatedIds.forEach(otherId => {
+      const to = markerPosById[otherId];
+      if (!to) return;
+      const pairKey = [inc.id, otherId].sort().join('|');
+      if (drawnPairs.has(pairKey)) return;
+      drawnPairs.add(pairKey);
+      const isConfirmed = (inc.linkedIncidentIds || []).includes(otherId);
+      const line = L.polyline([from, to], {
+        color: isConfirmed ? '#8b5cf6' : '#6b7280',
+        weight: 2, opacity: 0.6, dashArray: isConfirmed ? '2 6' : '4 8',
+      }).addTo(dispatchMap);
+      mapIncidentMarkers.push(line);
     });
-  }).catch(err => {
-    console.error('[Map] Failed to load alert coords:', err);
   });
 }
 
@@ -3306,15 +3313,20 @@ async function openDetailModal(incidentId) {
   
   const incIdForUnassign = inc.id;
   const incStatusForUnassign = status;
-  // Get incident coordinates for ETA calculation
+  // Get incident coordinates for ETA calculation — `inc` here is the full
+  // alert fetched from /alerts/:id, so its own location is authoritative.
   let incLat = null, incLng = null;
   try {
-    // Try to get from cached alert data
-    const cachedAlerts = window._cachedAlerts || [];
-    const alertData = cachedAlerts.find(a => a.id === inc.id);
-    if (alertData && alertData.location) {
-      incLat = alertData.location.latitude;
-      incLng = alertData.location.longitude;
+    if (inc.location) {
+      incLat = inc.location.latitude;
+      incLng = inc.location.longitude;
+    } else {
+      const cachedAlerts = window._cachedAlerts || [];
+      const alertData = cachedAlerts.find(a => a.id === inc.id);
+      if (alertData && alertData.location) {
+        incLat = alertData.location.latitude;
+        incLng = alertData.location.longitude;
+      }
     }
   } catch(e) {}
 
