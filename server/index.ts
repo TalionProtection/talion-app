@@ -3550,24 +3550,7 @@ app.get('/dispatch/map/users', (req, res) => {
       };
     });
 
-  // Demo users with Geneva locations (Champel, Florissant, Malagnou, Vésenaz)
-  const demoUserLocations = [
-    { id: 'user-001', name: 'Thomas Leroy', role: 'user', status: 'active', location: { latitude: 46.1940, longitude: 6.1560 }, lastSeen: now - 3 * 3600000 },
-    { id: 'user-002', name: 'Julie Morel', role: 'user', status: 'active', location: { latitude: 46.1950, longitude: 6.1670 }, lastSeen: now - 6 * 3600000 },
-    { id: 'user-004', name: 'Lea Leroy', role: 'user', status: 'active', location: { latitude: 46.2020, longitude: 6.1640 }, lastSeen: now - 45 * 60000 },
-    { id: 'user-005', name: 'Hugo Leroy', role: 'user', status: 'active', location: { latitude: 46.2320, longitude: 6.2070 }, lastSeen: now - 2 * 86400000 },
-    { id: 'disp-001', name: 'Jean Moreau', role: 'dispatcher', status: 'active', location: { latitude: 46.1955, longitude: 6.1675 }, lastSeen: now - 12 * 60000 },
-    { id: 'disp-002', name: 'Sophie Laurent', role: 'dispatcher', status: 'active', location: { latitude: 46.2005, longitude: 6.1615 }, lastSeen: now - 2 * 3600000 },
-    { id: 'admin-001', name: 'Marie Dupont', role: 'admin', status: 'active', location: { latitude: 46.1925, longitude: 6.1535 }, lastSeen: now - 5 * 60000 },
-  ];
-
-  // Merge: real users override demo ones by id
-  const mergedIds = new Set(connectedUsersList.map(u => u.id));
-  const merged = [
-    ...connectedUsersList,
-    ...demoUserLocations.filter(d => !mergedIds.has(d.id)),
-  ];
-  res.json(merged);
+  res.json(connectedUsersList);
 });
 
 // Map: all entities combined (incidents + responders + users)
