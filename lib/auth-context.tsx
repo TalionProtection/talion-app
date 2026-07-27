@@ -54,16 +54,30 @@ export interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+// Bounds a promise that could otherwise hang forever — e.g. the Supabase JS
+// client's internal auth lock occasionally getting stuck on React Native,
+// which previously left the login screen spinning until the app was force-quit
+// and reopened. Rejecting instead surfaces a retryable error.
+function withTimeout<T>(promise: Promise<T>, ms: number, timeoutMessage: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(timeoutMessage)), ms);
+    promise.then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
+  });
+}
+
 // ─── Helper: fetch profile from the correct table ────────────────────────────
 // Staff (responder, dispatcher, admin) live in admin_users
 // Clients live in users
 async function fetchUserProfile(userId: string): Promise<User | null> {
   // Try admin_users first (staff)
-  const { data: adminUser } = await supabase
+  const { data: adminUser, error: adminUserError } = await supabase
     .from('admin_users')
     .select('*')
     .eq('id', userId)
     .single();
+  if (adminUserError && adminUserError.code !== 'PGRST116') {
+    console.warn('[Auth] fetchUserProfile admin_users error:', adminUserError.message);
+  }
 
   if (adminUser) {
     return {
@@ -83,11 +97,14 @@ async function fetchUserProfile(userId: string): Promise<User | null> {
   }
 
   // Try users table (clients)
-  const { data: clientUser } = await supabase
+  const { data: clientUser, error: clientUserError } = await supabase
     .from('users')
     .select('*')
     .eq('id', userId)
     .single();
+  if (clientUserError && clientUserError.code !== 'PGRST116') {
+    console.warn('[Auth] fetchUserProfile users error:', clientUserError.message);
+  }
 
   if (clientUser) {
     return {
@@ -132,12 +149,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setIsLoading(false);
     });
 
-    // Listen for auth changes (token refresh, sign out, etc.)
+    // Listen for auth changes (token refresh, sign out, etc.). login() below
+    // already fetches the profile and sets it directly on sign-in — this only
+    // needs to react to changes login() didn't cause itself (token refresh
+    // elsewhere, sign-out), so skip re-fetching for a user we already have.
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
       setSession(session);
       if (session?.user) {
-        const profile = await fetchUserProfile(session.user.id);
-        setUser(profile);
+        setUser((prev) => {
+          if (prev?.id === session.user.id) return prev;
+          fetchUserProfile(session.user.id).then(setUser);
+          return prev;
+        });
       } else {
         setUser(null);
       }
@@ -147,20 +170,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = async (email: string, password: string) => {
-  setIsLoading(true);
-  try {
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    console.log('Supabase auth result:', JSON.stringify({ error, userId: data?.user?.id })); // ← ajoute cette ligne
-    if (error) throw new Error(error.message);
+    setIsLoading(true);
+    try {
+      // Bounded so a stuck Supabase auth lock (a known React Native issue —
+      // previously left this spinning until the app was force-quit) surfaces
+      // as a retryable error instead of hanging forever.
+      const { data, error } = await withTimeout(
+        supabase.auth.signInWithPassword({ email, password }),
+        15000,
+        'La connexion prend trop de temps. Réessayez.'
+      );
+      if (error) throw new Error(error.message);
 
-    const profile = await fetchUserProfile(data.user.id);
-    if (!profile) throw new Error('Profil introuvable. Contactez un administrateur.');
-    setUser(profile);
-    setSession(data.session);
-  } finally {
-    setIsLoading(false);
-  }
-};
+      const profile = await withTimeout(
+        fetchUserProfile(data.user.id),
+        15000,
+        'Impossible de charger votre profil. Réessayez.'
+      );
+      if (!profile) throw new Error('Profil introuvable. Contactez un administrateur.');
+      setUser(profile);
+      setSession(data.session);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   const logout = async () => {
     setIsLoading(true);
