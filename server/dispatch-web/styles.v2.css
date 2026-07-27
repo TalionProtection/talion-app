@@ -267,6 +267,25 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .place-add-btn { font-size: 11px; padding: 2px 8px; border-radius: 10px; border: 1px dashed var(--border-hover); background: transparent; color: var(--text-muted); cursor: pointer; }
 .place-add-btn:hover { border-color: #3b82f6; color: #3b82f6; }
 .family-member-actions { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
+
+/* ─── Interventions calendar & known-people panels ──────────────────── */
+.interventions-panel { margin: 0 24px 16px; background: var(--bg-card, var(--bg-panel)); border: 1px solid var(--border-main); border-radius: 12px; }
+.interventions-panel-header {
+  font-size: 12px; font-weight: 700; color: var(--text-muted); text-transform: uppercase;
+  padding: 12px 16px; cursor: pointer; user-select: none; display: flex; justify-content: space-between; align-items: center;
+}
+.interventions-panel-header:hover { color: var(--text-primary); }
+.interventions-upcoming-list { padding: 0 16px 12px; display: flex; flex-direction: column; gap: 8px; }
+.intervention-row { padding: 8px 10px; border-radius: 8px; background: var(--bg-panel-header); }
+.intervention-row-detail { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.intervention-category { font-size: 11px; color: var(--text-faint); }
+.provider-row {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;
+  padding: 10px 12px; border-radius: 8px; background: var(--bg-panel-header); margin-bottom: 6px;
+}
+.provider-row-name { font-size: 13px; font-weight: 700; color: var(--text-primary); }
+.provider-row-category { font-size: 11px; font-weight: 500; color: var(--text-muted); }
+.provider-row-detail { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
 .family-member-actions .btn-sm { white-space: nowrap; }
 .inc-desc { font-size: 13px; color: var(--text-secondary); margin-bottom: 8px; line-height: 1.4; }
 .inc-meta { font-size: 12px; color: var(--text-faint); margin-bottom: 10px; }

@@ -653,6 +653,12 @@
           <button class="btn btn-sm" onclick="loadFamilyGroups()">&#x21BB; Rafraîchir</button>
         </div>
       </div>
+      <div class="interventions-panel">
+        <div class="interventions-panel-header" onclick="toggleInterventionsPanel()">
+          📅 Interventions à venir (7 jours) <span id="interventionsCaret">▾</span>
+        </div>
+        <div id="interventionsUpcomingList" class="interventions-upcoming-list" style="display:none;"></div>
+      </div>
       <div id="familyGroupsList" class="family-groups-list"></div>
     </section>
   </main>
@@ -704,6 +710,61 @@
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
         <button class="btn btn-secondary" onclick="closeAddPlaceModal()">Annuler</button>
         <button class="btn btn-primary" onclick="savePlace()">Enregistrer</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Known People & Planned Interventions Modal -->
+  <div class="modal-overlay" id="providersModal" style="display:none;">
+    <div class="modal" style="max-width:520px;">
+      <h3 class="modal-title" id="providersModalTitle">🔧 Prestataires</h3>
+
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <span style="font-size:12px;font-weight:700;color:var(--text-muted);text-transform:uppercase;">Personnes connues</span>
+        <button class="btn btn-sm" onclick="toggleAddPersonForm()">+ Ajouter</button>
+      </div>
+      <div id="addPersonForm" class="form-group" style="display:none;background:var(--bg-panel);border-radius:8px;padding:10px;">
+        <input type="text" id="personName" class="form-control" placeholder="Nom" style="margin-bottom:8px;">
+        <select id="personCategory" class="form-control" style="margin-bottom:8px;">
+          <option value="jardinier">🌳 Jardinier</option>
+          <option value="piscine">🏊 Piscine</option>
+          <option value="plombier">🔧 Plombier</option>
+          <option value="electricien">⚡ Électricien</option>
+          <option value="menage">🧹 Ménage</option>
+          <option value="securite">🔒 Sécurité</option>
+          <option value="entrepreneur">🏗️ Entrepreneur</option>
+          <option value="livraison">📦 Livraison</option>
+          <option value="visiteur">👤 Visiteur</option>
+          <option value="autre">❓ Autre</option>
+        </select>
+        <input type="text" id="personCompany" class="form-control" placeholder="Société (optionnel)" style="margin-bottom:8px;">
+        <input type="text" id="personPhone" class="form-control" placeholder="Téléphone" style="margin-bottom:8px;">
+        <input type="text" id="personPlate" class="form-control" placeholder="Plaque d'immatriculation" style="margin-bottom:8px;">
+        <textarea id="personNotes" class="form-control" placeholder="Notes" style="margin-bottom:8px;min-height:50px;"></textarea>
+        <button class="btn btn-primary" style="width:100%;" onclick="saveKnownPerson()">Enregistrer</button>
+      </div>
+      <div id="knownPeopleList" style="margin-bottom:16px;"></div>
+
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <span style="font-size:12px;font-weight:700;color:var(--text-muted);text-transform:uppercase;">Interventions prévues</span>
+        <button class="btn btn-sm" onclick="toggleAddInterventionForm()">+ Planifier</button>
+      </div>
+      <div id="addInterventionForm" class="form-group" style="display:none;background:var(--bg-panel);border-radius:8px;padding:10px;">
+        <select id="interventionPersonId" class="form-control" style="margin-bottom:8px;"></select>
+        <div style="display:flex;gap:8px;margin-bottom:8px;">
+          <input type="date" id="interventionDate" class="form-control" style="flex:1;">
+          <input type="time" id="interventionTime" class="form-control" value="09:00" style="flex:1;">
+        </div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:8px;cursor:pointer;">
+          <input type="checkbox" id="interventionRecurring"> Se répète chaque semaine, ce jour-là
+        </label>
+        <textarea id="interventionNotes" class="form-control" placeholder="Notes" style="margin-bottom:8px;min-height:50px;"></textarea>
+        <button class="btn btn-primary" style="width:100%;" onclick="saveIntervention()">Planifier</button>
+      </div>
+      <div id="interventionsListContainer"></div>
+
+      <div style="display:flex;justify-content:flex-end;margin-top:16px;">
+        <button class="btn btn-secondary" onclick="closeProvidersModal()">Fermer</button>
       </div>
     </div>
   </div>

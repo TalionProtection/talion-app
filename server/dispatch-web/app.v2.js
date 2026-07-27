@@ -1239,6 +1239,224 @@ async function loadFamilyGroups() {
     familyGroups = [];
   }
   renderFamilyGroups();
+  loadUpcomingInterventions();
+}
+
+// ─── Cross-residence interventions calendar ────────────────────────────
+function toggleInterventionsPanel() {
+  const el = document.getElementById('interventionsUpcomingList');
+  const caret = document.getElementById('interventionsCaret');
+  if (!el) return;
+  const isHidden = el.style.display === 'none';
+  el.style.display = isHidden ? 'block' : 'none';
+  if (caret) caret.textContent = isHidden ? '▴' : '▾';
+}
+
+async function loadUpcomingInterventions() {
+  const container = document.getElementById('interventionsUpcomingList');
+  if (!container) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/interventions/upcoming`);
+    const occurrences = res.ok ? await res.json() : [];
+    if (occurrences.length === 0) {
+      container.innerHTML = '<div class="empty-state" style="padding:12px;"><p>Aucune intervention prévue cette semaine</p></div>';
+      return;
+    }
+    container.innerHTML = occurrences.map(o => `
+      <div class="intervention-row">
+        <div class="intervention-row-main">
+          <strong>${escapeHtml(o.personName)}</strong>${o.category ? ` <span class="intervention-category">${escapeHtml(o.category)}</span>` : ''}
+          <div class="intervention-row-detail">${new Date(o.scheduledStart).toLocaleString('fr-FR', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</div>
+          <div class="intervention-row-detail">📍 ${escapeHtml(o.ownerName || '')} — ${escapeHtml(o.addressLabel || '')}</div>
+        </div>
+      </div>`).join('');
+  } catch (e) {
+    console.error('[Interventions] Load error:', e);
+    container.innerHTML = '<div class="empty-state" style="padding:12px;"><p>Erreur de chargement</p></div>';
+  }
+}
+
+// ─── Known People & Planned Interventions (per residence) ─────────────
+const PROVIDER_CATEGORY_LABEL = {
+  jardinier: '🌳 Jardinier', piscine: '🏊 Piscine', plombier: '🔧 Plombier', electricien: '⚡ Électricien',
+  menage: '🧹 Ménage', securite: '🔒 Sécurité', entrepreneur: '🏗️ Entrepreneur', livraison: '📦 Livraison',
+  visiteur: '👤 Visiteur', autre: '❓ Autre',
+};
+let providersAddressId = null;
+let providersKnownPeople = [];
+let providersInterventions = [];
+
+async function openProvidersModal(addressId, addressLabel) {
+  providersAddressId = addressId;
+  document.getElementById('providersModalTitle').textContent = `🔧 Prestataires — ${addressLabel}`;
+  document.getElementById('addPersonForm').style.display = 'none';
+  document.getElementById('addInterventionForm').style.display = 'none';
+  document.getElementById('providersModal').style.display = 'flex';
+  await loadProviders();
+}
+
+function closeProvidersModal() {
+  document.getElementById('providersModal').style.display = 'none';
+  providersAddressId = null;
+}
+
+async function loadProviders() {
+  if (!providersAddressId) return;
+  try {
+    const [peopleRes, ivRes] = await Promise.all([
+      fetch(`${API_BASE}/api/addresses/${providersAddressId}/people`),
+      fetch(`${API_BASE}/api/addresses/${providersAddressId}/interventions`),
+    ]);
+    providersKnownPeople = peopleRes.ok ? await peopleRes.json() : [];
+    providersInterventions = ivRes.ok ? await ivRes.json() : [];
+  } catch (e) {
+    providersKnownPeople = []; providersInterventions = [];
+  }
+  renderKnownPeople();
+  renderInterventions();
+}
+
+function renderKnownPeople() {
+  const container = document.getElementById('knownPeopleList');
+  if (providersKnownPeople.length === 0) {
+    container.innerHTML = '<p style="color:var(--text-muted);font-size:12px;">Aucune personne enregistrée</p>';
+  } else {
+    container.innerHTML = providersKnownPeople.map(p => `
+      <div class="provider-row">
+        <div>
+          <div class="provider-row-name">${escapeHtml(p.name)} <span class="provider-row-category">${PROVIDER_CATEGORY_LABEL[p.category] || escapeHtml(p.category)}</span></div>
+          ${p.company ? `<div class="provider-row-detail">${escapeHtml(p.company)}</div>` : ''}
+          ${p.phone ? `<div class="provider-row-detail">📞 ${escapeHtml(p.phone)}</div>` : ''}
+          ${p.vehiclePlate ? `<div class="provider-row-detail">🚗 ${escapeHtml(p.vehiclePlate)}</div>` : ''}
+          ${p.notes ? `<div class="provider-row-detail">${escapeHtml(p.notes)}</div>` : ''}
+        </div>
+        <button class="btn btn-danger btn-sm" onclick="deleteKnownPerson('${p.id}')">🗑️</button>
+      </div>`).join('');
+  }
+  const select = document.getElementById('interventionPersonId');
+  select.innerHTML = providersKnownPeople.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('') || '<option value="">Aucun prestataire — ajoutez-en un d\'abord</option>';
+}
+
+function renderInterventions() {
+  const container = document.getElementById('interventionsListContainer');
+  if (providersInterventions.length === 0) {
+    container.innerHTML = '<p style="color:var(--text-muted);font-size:12px;">Aucune intervention prévue</p>';
+    return;
+  }
+  container.innerHTML = providersInterventions.map(iv => `
+    <div class="provider-row">
+      <div>
+        <div class="provider-row-name">${escapeHtml(iv.personName)}</div>
+        <div class="provider-row-detail">${formatInterventionDate(iv.scheduledStart, iv.recurrence)}</div>
+        ${iv.notes ? `<div class="provider-row-detail">${escapeHtml(iv.notes)}</div>` : ''}
+      </div>
+      <button class="btn btn-danger btn-sm" onclick="deleteIntervention('${iv.id}')">🗑️</button>
+    </div>`).join('');
+}
+
+function formatInterventionDate(ts, recurrence) {
+  const d = new Date(ts);
+  const dateStr = d.toLocaleDateString('fr-FR');
+  const timeStr = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+  if (recurrence && recurrence.frequency === 'weekly') {
+    const days = ['dim', 'lun', 'mar', 'mer', 'jeu', 'ven', 'sam'];
+    return `Tous les ${recurrence.daysOfWeek.map(d2 => days[d2]).join(', ')} à ${timeStr}`;
+  }
+  return `${dateStr} à ${timeStr}`;
+}
+
+function toggleAddPersonForm() {
+  const form = document.getElementById('addPersonForm');
+  form.style.display = form.style.display === 'none' ? 'block' : 'none';
+}
+
+function toggleAddInterventionForm() {
+  const form = document.getElementById('addInterventionForm');
+  form.style.display = form.style.display === 'none' ? 'block' : 'none';
+}
+
+async function saveKnownPerson() {
+  const name = document.getElementById('personName').value.trim();
+  if (!name) { showToast('Nom requis', 'error'); return; }
+  try {
+    const res = await fetch(`${API_BASE}/api/addresses/${providersAddressId}/people`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name, category: document.getElementById('personCategory').value,
+        company: document.getElementById('personCompany').value.trim() || undefined,
+        phone: document.getElementById('personPhone').value.trim() || undefined,
+        vehiclePlate: document.getElementById('personPlate').value.trim() || undefined,
+        notes: document.getElementById('personNotes').value.trim() || undefined,
+      }),
+    });
+    if (!res.ok) throw new Error('failed');
+    document.getElementById('personName').value = '';
+    document.getElementById('personCompany').value = '';
+    document.getElementById('personPhone').value = '';
+    document.getElementById('personPlate').value = '';
+    document.getElementById('personNotes').value = '';
+    document.getElementById('addPersonForm').style.display = 'none';
+    showToast('Personne ajoutée', 'success');
+    await loadProviders();
+  } catch (e) {
+    showToast('Erreur', 'error');
+  }
+}
+
+async function deleteKnownPerson(personId) {
+  if (!confirm('Retirer cette personne ?')) return;
+  try {
+    await fetch(`${API_BASE}/api/addresses/${providersAddressId}/people/${personId}`, { method: 'DELETE' });
+    showToast('Personne retirée', 'success');
+    await loadProviders();
+  } catch (e) {
+    showToast('Erreur', 'error');
+  }
+}
+
+async function saveIntervention() {
+  const personId = document.getElementById('interventionPersonId').value;
+  const person = providersKnownPeople.find(p => p.id === personId);
+  if (!person) { showToast('Choisissez un prestataire', 'error'); return; }
+  const dateVal = document.getElementById('interventionDate').value;
+  const timeVal = document.getElementById('interventionTime').value || '09:00';
+  if (!dateVal) { showToast('Date requise', 'error'); return; }
+  const scheduledStart = new Date(`${dateVal}T${timeVal}:00`).getTime();
+  const recurring = document.getElementById('interventionRecurring').checked;
+  try {
+    const res = await fetch(`${API_BASE}/api/addresses/${providersAddressId}/interventions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        personId: person.id, personName: person.name, category: person.category, scheduledStart,
+        recurrence: recurring ? { frequency: 'weekly', daysOfWeek: [new Date(scheduledStart).getDay()] } : undefined,
+        notes: document.getElementById('interventionNotes').value.trim() || undefined,
+      }),
+    });
+    if (!res.ok) throw new Error('failed');
+    document.getElementById('interventionDate').value = '';
+    document.getElementById('interventionNotes').value = '';
+    document.getElementById('interventionRecurring').checked = false;
+    document.getElementById('addInterventionForm').style.display = 'none';
+    showToast('Intervention planifiée', 'success');
+    await loadProviders();
+    loadUpcomingInterventions();
+  } catch (e) {
+    showToast('Erreur', 'error');
+  }
+}
+
+async function deleteIntervention(interventionId) {
+  if (!confirm('Annuler cette intervention ?')) return;
+  try {
+    await fetch(`${API_BASE}/api/addresses/${providersAddressId}/interventions/${interventionId}`, { method: 'DELETE' });
+    showToast('Intervention annulée', 'success');
+    await loadProviders();
+    loadUpcomingInterventions();
+  } catch (e) {
+    showToast('Erreur', 'error');
+  }
 }
 
 function renderFamilyGroups() {
@@ -1281,6 +1499,7 @@ function renderFamilyGroups() {
                 ${m.addresses.map(a => `
                   <span class="addr-chip place-chip${a.temporary ? ' place-chip-temp' : ''}" title="Cliquer pour modifier" onclick="openEditPlaceModal('${m.id}','${a.id}')">
                     ${a.isPrimary ? '⭐ ' : ''}${getPlaceIcon(a.label)} ${escapeHtml(a.label)}${a.temporary && a.expiresAt ? ` (jusqu'au ${formatShortDate(a.expiresAt)})` : ''}
+                    <span class="place-chip-delete" title="Prestataires" onclick="event.stopPropagation(); openProvidersModal('${a.id}', '${escapeHtml(a.label).replace(/'/g, "\\'")}')">🔧</span>
                     <span class="place-chip-delete" title="Supprimer ce lieu" onclick="event.stopPropagation(); deletePlace('${m.id}','${a.id}')">&times;</span>
                   </span>
                 `).join('')}
