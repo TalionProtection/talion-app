@@ -349,7 +349,7 @@ export default function MessagesScreen() {
   const fetchContacts = useCallback(async () => {
     if (!user?.id) return;
     try {
-      const data = await apiGet<{ family: ServerUser[]; dispatch: ServerUser[]; others: ServerUser[] }>(`/api/messaging/contacts?userId=${user.id}`);
+      const data = await apiGet<{ family: ServerUser[]; dispatch: ServerUser[]; others: ServerUser[] }>(`/api/contacts?userId=${user.id}`);
       setContacts(data);
     } catch (e) {
       console.warn('[Messages] Failed to fetch contacts:', e);

@@ -4338,13 +4338,13 @@ app.get('/api/users', (req, res) => {
   res.json(allUsers);
 });
 
-// GET /api/messaging/contacts?userId=X - the same directory as /api/users, but
+// GET /api/contacts?userId=X - the same directory as /api/users, but
 // split into sections for the "new conversation" contact picker: the caller's
 // direct family (spouse/child/parent/sibling — same relation set the presence
 // system already uses), Dispatch (dispatcher + admin, so a responder always has
 // a specific person to reach), and everyone else. Lets the picker show curated
 // sections instead of one flat, undifferentiated list of every user.
-app.get('/api/messaging/contacts', (req, res) => {
+app.get('/api/contacts', (req, res) => {
   const callerId = req.query.userId as string;
   const familyIds = new Set(callerId ? getFamilyMemberIds(callerId) : []);
   const toContact = (u: AdminUser) => ({ id: u.id, name: u.name, email: u.email, role: u.role, tags: u.tags || [] });
