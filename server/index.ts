@@ -5732,6 +5732,8 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
     loadUserAddressesFromSupabase(),
     loadConversationsFromSupabase(),
     loadMessagesFromSupabase(),
+    loadKnownPeopleFromSupabase(),
+    loadPlannedInterventionsFromSupabase(),
   ]);
   console.log('[Startup] All Supabase data loaded — ready to serve requests');
 
@@ -6360,6 +6362,340 @@ async function loadUserAddressesFromSupabase(): Promise<void> {
     }
   } catch (e) { console.error('[Supabase] loadUserAddressesFromSupabase error:', e); }
 }
+
+// ─── Known People & Planned Interventions (per residence) ────────────────
+// Service providers/contractors/visitors known at a residence (gardener, pool
+// maintenance, plumber, etc.) and their scheduled visits — so staff reviewing
+// an incident or on-site can recognize an expected person/vehicle, and dispatch
+// can see a cross-residence calendar of who's expected where.
+
+interface KnownPerson {
+  id: string;
+  addressId: string;
+  userId: string; // residence owner
+  name: string;
+  category: string; // freeform, e.g. 'jardinier'|'piscine'|'plombier'|'electricien'|'menage'|'securite'|'entrepreneur'|'livraison'|'visiteur'|'autre'
+  company?: string;
+  phone?: string;
+  email?: string;
+  vehiclePlate?: string;
+  vehicleDescription?: string;
+  photoUrl?: string;
+  notes?: string;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface PlannedIntervention {
+  id: string;
+  addressId: string;
+  userId: string;
+  personId?: string;
+  personName: string; // denormalized snapshot — stays displayable even if the linked person is later deleted
+  category?: string;
+  scheduledStart: number;
+  scheduledEnd?: number;
+  recurrence?: { frequency: 'weekly'; daysOfWeek: number[] }; // simple weekly recurrence, 0=Sun..6=Sat
+  status: 'scheduled' | 'completed' | 'cancelled';
+  notes?: string;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+const knownPeople = new Map<string, KnownPerson[]>(); // addressId -> people
+const plannedInterventions = new Map<string, PlannedIntervention[]>(); // addressId -> interventions
+
+async function loadKnownPeopleFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('known_people').select('*');
+    if (error) { console.error('[Supabase] Failed to load known_people:', error.message); return; }
+    if (data && data.length > 0) {
+      knownPeople.clear();
+      data.forEach((p: any) => {
+        const person: KnownPerson = {
+          id: p.id, addressId: p.address_id, userId: p.user_id, name: p.name, category: p.category,
+          company: p.company || undefined, phone: p.phone || undefined, email: p.email || undefined,
+          vehiclePlate: p.vehicle_plate || undefined, vehicleDescription: p.vehicle_description || undefined,
+          photoUrl: p.photo_url || undefined, notes: p.notes || undefined,
+          createdBy: p.created_by, createdAt: p.created_at, updatedAt: p.updated_at,
+        };
+        if (!knownPeople.has(person.addressId)) knownPeople.set(person.addressId, []);
+        knownPeople.get(person.addressId)!.push(person);
+      });
+      console.log(`[Supabase] Loaded ${data.length} known people`);
+    }
+  } catch (e) { console.error('[Supabase] loadKnownPeopleFromSupabase error:', e); }
+}
+
+async function loadPlannedInterventionsFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('planned_interventions').select('*');
+    if (error) { console.error('[Supabase] Failed to load planned_interventions:', error.message); return; }
+    if (data && data.length > 0) {
+      plannedInterventions.clear();
+      data.forEach((iv: any) => {
+        const intervention: PlannedIntervention = {
+          id: iv.id, addressId: iv.address_id, userId: iv.user_id, personId: iv.person_id || undefined,
+          personName: iv.person_name, category: iv.category || undefined,
+          scheduledStart: iv.scheduled_start, scheduledEnd: iv.scheduled_end || undefined,
+          recurrence: iv.recurrence || undefined, status: iv.status, notes: iv.notes || undefined,
+          createdBy: iv.created_by, createdAt: iv.created_at, updatedAt: iv.updated_at,
+        };
+        if (!plannedInterventions.has(intervention.addressId)) plannedInterventions.set(intervention.addressId, []);
+        plannedInterventions.get(intervention.addressId)!.push(intervention);
+      });
+      console.log(`[Supabase] Loaded ${data.length} planned interventions`);
+    }
+  } catch (e) { console.error('[Supabase] loadPlannedInterventionsFromSupabase error:', e); }
+}
+
+// A caller may view/manage a residence's known people & interventions if they own it,
+// are a direct family member of the owner, or are staff — matching the access rules
+// already established for addresses/presence elsewhere in this file.
+function resolveAddressOwner(addressId: string): string | undefined {
+  for (const [uid, addrs] of userAddresses) {
+    if (addrs.some(a => a.id === addressId)) return uid;
+  }
+  return undefined;
+}
+function canViewAddressAssets(ownerId: string, caller: { id: string; role: string }): boolean {
+  return caller.id === ownerId || getFamilyMemberIds(ownerId).includes(caller.id) ||
+    caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder';
+}
+function canEditAddressAssets(ownerId: string, caller: { id: string; role: string }): boolean {
+  return caller.id === ownerId || getFamilyMemberIds(ownerId).includes(caller.id) ||
+    caller.role === 'dispatcher' || caller.role === 'admin';
+}
+
+// GET /api/addresses/:addressId/people
+app.get('/api/addresses/:addressId/people', requireAuth, (req, res) => {
+  const ownerId = resolveAddressOwner((req.params.addressId as string));
+  if (!ownerId) return res.status(404).json({ error: 'Address not found' });
+  if (!canViewAddressAssets(ownerId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
+  res.json(knownPeople.get((req.params.addressId as string)) || []);
+});
+
+// POST /api/addresses/:addressId/people
+app.post('/api/addresses/:addressId/people', requireAuth, async (req, res) => {
+  const addressId = (req.params.addressId as string);
+  const ownerId = resolveAddressOwner(addressId);
+  if (!ownerId) return res.status(404).json({ error: 'Address not found' });
+  const caller = req.supabaseUser!;
+  if (!canEditAddressAssets(ownerId, caller)) return res.status(403).json({ error: 'Not authorized' });
+  const { name, category, company, phone, email, vehiclePlate, vehicleDescription, photoUrl, notes } = req.body;
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  const now = Date.now();
+  const person: KnownPerson = {
+    id: uuidv4(), addressId, userId: ownerId, name, category: category || 'autre',
+    company: company || undefined, phone: phone || undefined, email: email || undefined,
+    vehiclePlate: vehiclePlate || undefined, vehicleDescription: vehicleDescription || undefined,
+    photoUrl: photoUrl || undefined, notes: notes || undefined,
+    createdBy: caller.id, createdAt: now, updatedAt: now,
+  };
+  if (!knownPeople.has(addressId)) knownPeople.set(addressId, []);
+  knownPeople.get(addressId)!.push(person);
+  const { error } = await supabaseAdmin.from('known_people').insert({
+    id: person.id, address_id: addressId, user_id: ownerId, name: person.name, category: person.category,
+    company: person.company || null, phone: person.phone || null, email: person.email || null,
+    vehicle_plate: person.vehiclePlate || null, vehicle_description: person.vehicleDescription || null,
+    photo_url: person.photoUrl || null, notes: person.notes || null,
+    created_by: person.createdBy, created_at: now, updated_at: now,
+  });
+  if (error) console.error('[Supabase] Failed to persist known person:', error.message);
+  res.status(201).json(person);
+});
+
+// PUT /api/addresses/:addressId/people/:personId
+app.put('/api/addresses/:addressId/people/:personId', requireAuth, async (req, res) => {
+  const addressId = (req.params.addressId as string);
+  const ownerId = resolveAddressOwner(addressId);
+  if (!ownerId) return res.status(404).json({ error: 'Address not found' });
+  const caller = req.supabaseUser!;
+  if (!canEditAddressAssets(ownerId, caller)) return res.status(403).json({ error: 'Not authorized' });
+  const people = knownPeople.get(addressId) || [];
+  const idx = people.findIndex(p => p.id === (req.params.personId as string));
+  if (idx === -1) return res.status(404).json({ error: 'Person not found' });
+  const { name, category, company, phone, email, vehiclePlate, vehicleDescription, photoUrl, notes } = req.body;
+  const updated: KnownPerson = {
+    ...people[idx],
+    name: name ?? people[idx].name,
+    category: category ?? people[idx].category,
+    company: company !== undefined ? company : people[idx].company,
+    phone: phone !== undefined ? phone : people[idx].phone,
+    email: email !== undefined ? email : people[idx].email,
+    vehiclePlate: vehiclePlate !== undefined ? vehiclePlate : people[idx].vehiclePlate,
+    vehicleDescription: vehicleDescription !== undefined ? vehicleDescription : people[idx].vehicleDescription,
+    photoUrl: photoUrl !== undefined ? photoUrl : people[idx].photoUrl,
+    notes: notes !== undefined ? notes : people[idx].notes,
+    updatedAt: Date.now(),
+  };
+  people[idx] = updated;
+  const { error } = await supabaseAdmin.from('known_people').update({
+    name: updated.name, category: updated.category, company: updated.company || null,
+    phone: updated.phone || null, email: updated.email || null, vehicle_plate: updated.vehiclePlate || null,
+    vehicle_description: updated.vehicleDescription || null, photo_url: updated.photoUrl || null,
+    notes: updated.notes || null, updated_at: updated.updatedAt,
+  }).eq('id', updated.id);
+  if (error) console.error('[Supabase] Failed to persist known person update:', error.message);
+  res.json(updated);
+});
+
+// DELETE /api/addresses/:addressId/people/:personId
+app.delete('/api/addresses/:addressId/people/:personId', requireAuth, async (req, res) => {
+  const addressId = (req.params.addressId as string);
+  const ownerId = resolveAddressOwner(addressId);
+  if (!ownerId) return res.status(404).json({ error: 'Address not found' });
+  const caller = req.supabaseUser!;
+  if (!canEditAddressAssets(ownerId, caller)) return res.status(403).json({ error: 'Not authorized' });
+  const people = knownPeople.get(addressId) || [];
+  const idx = people.findIndex(p => p.id === (req.params.personId as string));
+  if (idx === -1) return res.status(404).json({ error: 'Person not found' });
+  people.splice(idx, 1);
+  const { error } = await supabaseAdmin.from('known_people').delete().eq('id', (req.params.personId as string));
+  if (error) console.error('[Supabase] Failed to persist known person deletion:', error.message);
+  res.json({ success: true });
+});
+
+// GET /api/addresses/:addressId/interventions
+app.get('/api/addresses/:addressId/interventions', requireAuth, (req, res) => {
+  const ownerId = resolveAddressOwner((req.params.addressId as string));
+  if (!ownerId) return res.status(404).json({ error: 'Address not found' });
+  if (!canViewAddressAssets(ownerId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
+  res.json(plannedInterventions.get((req.params.addressId as string)) || []);
+});
+
+// POST /api/addresses/:addressId/interventions
+app.post('/api/addresses/:addressId/interventions', requireAuth, async (req, res) => {
+  const addressId = (req.params.addressId as string);
+  const ownerId = resolveAddressOwner(addressId);
+  if (!ownerId) return res.status(404).json({ error: 'Address not found' });
+  const caller = req.supabaseUser!;
+  if (!canEditAddressAssets(ownerId, caller)) return res.status(403).json({ error: 'Not authorized' });
+  const { personId, personName, category, scheduledStart, scheduledEnd, recurrence, notes } = req.body;
+  if (!scheduledStart) return res.status(400).json({ error: 'scheduledStart is required' });
+  let resolvedPersonName = personName;
+  if (personId && !resolvedPersonName) {
+    const person = (knownPeople.get(addressId) || []).find(p => p.id === personId);
+    resolvedPersonName = person?.name;
+  }
+  if (!resolvedPersonName) return res.status(400).json({ error: 'personId or personName is required' });
+  const now = Date.now();
+  const intervention: PlannedIntervention = {
+    id: uuidv4(), addressId, userId: ownerId, personId: personId || undefined, personName: resolvedPersonName,
+    category: category || undefined, scheduledStart: Number(scheduledStart),
+    scheduledEnd: scheduledEnd ? Number(scheduledEnd) : undefined,
+    recurrence: recurrence || undefined, status: 'scheduled', notes: notes || undefined,
+    createdBy: caller.id, createdAt: now, updatedAt: now,
+  };
+  if (!plannedInterventions.has(addressId)) plannedInterventions.set(addressId, []);
+  plannedInterventions.get(addressId)!.push(intervention);
+  const { error } = await supabaseAdmin.from('planned_interventions').insert({
+    id: intervention.id, address_id: addressId, user_id: ownerId, person_id: intervention.personId || null,
+    person_name: intervention.personName, category: intervention.category || null,
+    scheduled_start: intervention.scheduledStart, scheduled_end: intervention.scheduledEnd || null,
+    recurrence: intervention.recurrence || null, status: intervention.status, notes: intervention.notes || null,
+    created_by: caller.id, created_at: now, updated_at: now,
+  });
+  if (error) console.error('[Supabase] Failed to persist intervention:', error.message);
+  res.status(201).json(intervention);
+});
+
+// PUT /api/addresses/:addressId/interventions/:interventionId
+app.put('/api/addresses/:addressId/interventions/:interventionId', requireAuth, async (req, res) => {
+  const addressId = (req.params.addressId as string);
+  const ownerId = resolveAddressOwner(addressId);
+  if (!ownerId) return res.status(404).json({ error: 'Address not found' });
+  const caller = req.supabaseUser!;
+  if (!canEditAddressAssets(ownerId, caller)) return res.status(403).json({ error: 'Not authorized' });
+  const list = plannedInterventions.get(addressId) || [];
+  const idx = list.findIndex(iv => iv.id === (req.params.interventionId as string));
+  if (idx === -1) return res.status(404).json({ error: 'Intervention not found' });
+  const { personId, personName, category, scheduledStart, scheduledEnd, recurrence, status, notes } = req.body;
+  const updated: PlannedIntervention = {
+    ...list[idx],
+    personId: personId !== undefined ? personId : list[idx].personId,
+    personName: personName ?? list[idx].personName,
+    category: category !== undefined ? category : list[idx].category,
+    scheduledStart: scheduledStart !== undefined ? Number(scheduledStart) : list[idx].scheduledStart,
+    scheduledEnd: scheduledEnd !== undefined ? Number(scheduledEnd) : list[idx].scheduledEnd,
+    recurrence: recurrence !== undefined ? recurrence : list[idx].recurrence,
+    status: status ?? list[idx].status,
+    notes: notes !== undefined ? notes : list[idx].notes,
+    updatedAt: Date.now(),
+  };
+  list[idx] = updated;
+  const { error } = await supabaseAdmin.from('planned_interventions').update({
+    person_id: updated.personId || null, person_name: updated.personName, category: updated.category || null,
+    scheduled_start: updated.scheduledStart, scheduled_end: updated.scheduledEnd || null,
+    recurrence: updated.recurrence || null, status: updated.status, notes: updated.notes || null,
+    updated_at: updated.updatedAt,
+  }).eq('id', updated.id);
+  if (error) console.error('[Supabase] Failed to persist intervention update:', error.message);
+  res.json(updated);
+});
+
+// DELETE /api/addresses/:addressId/interventions/:interventionId
+app.delete('/api/addresses/:addressId/interventions/:interventionId', requireAuth, async (req, res) => {
+  const addressId = (req.params.addressId as string);
+  const ownerId = resolveAddressOwner(addressId);
+  if (!ownerId) return res.status(404).json({ error: 'Address not found' });
+  const caller = req.supabaseUser!;
+  if (!canEditAddressAssets(ownerId, caller)) return res.status(403).json({ error: 'Not authorized' });
+  const list = plannedInterventions.get(addressId) || [];
+  const idx = list.findIndex(iv => iv.id === (req.params.interventionId as string));
+  if (idx === -1) return res.status(404).json({ error: 'Intervention not found' });
+  list.splice(idx, 1);
+  const { error } = await supabaseAdmin.from('planned_interventions').delete().eq('id', (req.params.interventionId as string));
+  if (error) console.error('[Supabase] Failed to persist intervention deletion:', error.message);
+  res.json({ success: true });
+});
+
+// GET /api/interventions/upcoming?from=&to= — cross-residence calendar for staff situational
+// awareness ("who's expected where today"), expanding simple weekly recurrences into
+// concrete occurrences within [from, to]. Defaults to the next 7 days.
+app.get('/api/interventions/upcoming', requireAuth, (req, res) => {
+  const caller = req.supabaseUser!;
+  const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder';
+  if (!isStaff) return res.status(403).json({ error: 'Staff only' });
+  const from = req.query.from ? Number(req.query.from) : Date.now();
+  const to = req.query.to ? Number(req.query.to) : from + 7 * 24 * 60 * 60 * 1000;
+  const occurrences: any[] = [];
+
+  for (const [addressId, list] of plannedInterventions) {
+    for (const iv of list) {
+      if (iv.status === 'cancelled') continue;
+      const owner = adminUsers.get(iv.userId);
+      const addr = (userAddresses.get(iv.userId) || []).find(a => a.id === addressId);
+      const base = {
+        interventionId: iv.id, addressId, addressLabel: addr?.label, address: addr?.address,
+        ownerName: owner?.name, personName: iv.personName, category: iv.category, status: iv.status, notes: iv.notes,
+      };
+      if (iv.recurrence?.frequency === 'weekly' && iv.recurrence.daysOfWeek?.length) {
+        const startTime = new Date(iv.scheduledStart);
+        const durationMs = (iv.scheduledEnd || iv.scheduledStart) - iv.scheduledStart;
+        const cursor = new Date(Math.max(from, iv.scheduledStart));
+        cursor.setHours(0, 0, 0, 0);
+        const end = new Date(to);
+        while (cursor.getTime() <= end.getTime()) {
+          if (iv.recurrence.daysOfWeek.includes(cursor.getDay())) {
+            const occStart = new Date(cursor);
+            occStart.setHours(startTime.getHours(), startTime.getMinutes(), 0, 0);
+            if (occStart.getTime() >= from && occStart.getTime() <= to) {
+              occurrences.push({ ...base, scheduledStart: occStart.getTime(), scheduledEnd: durationMs > 0 ? occStart.getTime() + durationMs : undefined });
+            }
+          }
+          cursor.setDate(cursor.getDate() + 1);
+        }
+      } else if (iv.scheduledStart >= from && iv.scheduledStart <= to) {
+        occurrences.push({ ...base, scheduledStart: iv.scheduledStart, scheduledEnd: iv.scheduledEnd });
+      }
+    }
+  }
+  occurrences.sort((a, b) => a.scheduledStart - b.scheduledStart);
+  res.json(occurrences);
+});
 
 // ─── User Addresses REST API ──────────────────────────────────────────────
 

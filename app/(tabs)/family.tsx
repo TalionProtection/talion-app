@@ -80,6 +80,46 @@ interface LocationHistoryEntry {
   timestamp: number;
 }
 
+interface KnownPerson {
+  id: string;
+  addressId: string;
+  name: string;
+  category: string;
+  company?: string;
+  phone?: string;
+  email?: string;
+  vehiclePlate?: string;
+  vehicleDescription?: string;
+  notes?: string;
+}
+
+interface PlannedIntervention {
+  id: string;
+  addressId: string;
+  personId?: string;
+  personName: string;
+  category?: string;
+  scheduledStart: number;
+  scheduledEnd?: number;
+  recurrence?: { frequency: 'weekly'; daysOfWeek: number[] };
+  status: 'scheduled' | 'completed' | 'cancelled';
+  notes?: string;
+}
+
+const PROVIDER_CATEGORIES: { key: string; label: string; icon: string }[] = [
+  { key: 'jardinier', label: 'Jardinier', icon: '🌳' },
+  { key: 'piscine', label: 'Piscine', icon: '🏊' },
+  { key: 'plombier', label: 'Plombier', icon: '🔧' },
+  { key: 'electricien', label: 'Électricien', icon: '⚡' },
+  { key: 'menage', label: 'Ménage', icon: '🧹' },
+  { key: 'securite', label: 'Sécurité', icon: '🔒' },
+  { key: 'entrepreneur', label: 'Entrepreneur', icon: '🏗️' },
+  { key: 'livraison', label: 'Livraison', icon: '📦' },
+  { key: 'visiteur', label: 'Visiteur', icon: '👤' },
+  { key: 'autre', label: 'Autre', icon: '❓' },
+];
+const PROVIDER_CATEGORY_LABEL: Record<string, string> = Object.fromEntries(PROVIDER_CATEGORIES.map(c => [c.key, `${c.icon} ${c.label}`]));
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function timeAgo(ts: number | null): string {
@@ -196,6 +236,33 @@ export default function FamilyScreen() {
   const [curfewRecurrence, setCurfewRecurrence] = useState<'once' | 'daily'>('once');
   const [curfewAlertWhen, setCurfewAlertWhen] = useState<'exit' | 'entry' | 'both'>('exit');
   const [curfewSaving, setCurfewSaving] = useState(false);
+
+  // Providers/visitors known at a residence (gardener, plumber, etc.) + their
+  // planned visits — managed per-address, reachable from a member's card.
+  const [showProvidersModal, setShowProvidersModal] = useState(false);
+  const [providersTarget, setProvidersTarget] = useState<FamilyMember | null>(null);
+  const [providersAddresses, setProvidersAddresses] = useState<{ id: string; label: string; address: string; isPrimary: boolean }[]>([]);
+  const [selectedProviderAddressId, setSelectedProviderAddressId] = useState<string | null>(null);
+  const [knownPeopleList, setKnownPeopleList] = useState<KnownPerson[]>([]);
+  const [interventionsList, setInterventionsList] = useState<PlannedIntervention[]>([]);
+  const [providersLoading, setProvidersLoading] = useState(false);
+
+  const [showAddPersonForm, setShowAddPersonForm] = useState(false);
+  const [personName, setPersonName] = useState('');
+  const [personCategory, setPersonCategory] = useState('jardinier');
+  const [personCompany, setPersonCompany] = useState('');
+  const [personPhone, setPersonPhone] = useState('');
+  const [personPlate, setPersonPlate] = useState('');
+  const [personNotes, setPersonNotes] = useState('');
+  const [personSaving, setPersonSaving] = useState(false);
+
+  const [showAddInterventionForm, setShowAddInterventionForm] = useState(false);
+  const [interventionPersonId, setInterventionPersonId] = useState<string | null>(null);
+  const [interventionDate, setInterventionDate] = useState(''); // JJ/MM/AAAA
+  const [interventionTime, setInterventionTime] = useState('09:00');
+  const [interventionRecurringWeekly, setInterventionRecurringWeekly] = useState(false);
+  const [interventionNotes, setInterventionNotes] = useState('');
+  const [interventionSaving, setInterventionSaving] = useState(false);
 
   // Address autocomplete
   const [addressSuggestions, setAddressSuggestions] = useState<Array<{ display_name: string; lat: string; lon: string }>>([]);
@@ -412,6 +479,175 @@ export default function FamilyScreen() {
       setMemberPresence(targetId, 'inside', placeLabel);
     }
   }, [placePickerTargetId, setMyPresence, setMemberPresence]);
+
+  // ─── Providers & Planned Interventions ─────────────────────────────────
+
+  const loadAddressAssets = useCallback(async (addressId: string) => {
+    setProvidersLoading(true);
+    try {
+      const [peopleRes, ivRes] = await Promise.all([
+        fetchWithTimeout(`${BASE}/api/addresses/${addressId}/people`, { headers: { Accept: 'application/json', ...(await authHeader()) }, timeout: 10000 }),
+        fetchWithTimeout(`${BASE}/api/addresses/${addressId}/interventions`, { headers: { Accept: 'application/json', ...(await authHeader()) }, timeout: 10000 }),
+      ]);
+      setKnownPeopleList(peopleRes.ok ? await peopleRes.json() : []);
+      setInterventionsList(ivRes.ok ? await ivRes.json() : []);
+    } catch (e) {
+      console.error('[Family] Error loading address assets:', e);
+      setKnownPeopleList([]);
+      setInterventionsList([]);
+    }
+    setProvidersLoading(false);
+  }, [BASE]);
+
+  const openProvidersModal = useCallback(async (member: FamilyMember) => {
+    setProvidersTarget(member);
+    setShowProvidersModal(true);
+    setSelectedProviderAddressId(null);
+    setKnownPeopleList([]);
+    setInterventionsList([]);
+    setProvidersLoading(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/users/${member.userId}/addresses`, { timeout: 10000 });
+      const data = await res.json();
+      const addrs = Array.isArray(data) ? data.map((a: any) => ({ id: a.id, label: a.label, address: a.address, isPrimary: a.isPrimary })) : [];
+      setProvidersAddresses(addrs);
+      if (addrs.length === 1) {
+        setSelectedProviderAddressId(addrs[0].id);
+        await loadAddressAssets(addrs[0].id);
+      }
+    } catch (e) {
+      console.error('[Family] Error fetching addresses for providers:', e);
+      setProvidersAddresses([]);
+    }
+    setProvidersLoading(false);
+  }, [BASE, loadAddressAssets]);
+
+  const selectProviderAddress = useCallback((addressId: string) => {
+    setSelectedProviderAddressId(addressId);
+    loadAddressAssets(addressId);
+  }, [loadAddressAssets]);
+
+  const resetPersonForm = () => {
+    setPersonName(''); setPersonCategory('jardinier'); setPersonCompany('');
+    setPersonPhone(''); setPersonPlate(''); setPersonNotes(''); setShowAddPersonForm(false);
+  };
+
+  const handleAddPerson = useCallback(async () => {
+    if (!selectedProviderAddressId || !personName.trim()) return;
+    setPersonSaving(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/addresses/${selectedProviderAddressId}/people`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({
+          name: personName.trim(), category: personCategory,
+          company: personCompany.trim() || undefined, phone: personPhone.trim() || undefined,
+          vehiclePlate: personPlate.trim() || undefined, notes: personNotes.trim() || undefined,
+        }),
+        timeout: 10000,
+      });
+      if (res.ok) {
+        resetPersonForm();
+        loadAddressAssets(selectedProviderAddressId);
+      } else {
+        Alert.alert('Erreur', 'Impossible d\'ajouter cette personne');
+      }
+    } catch (e) {
+      console.error('[Family] Error adding known person:', e);
+      Alert.alert('Erreur', 'Erreur réseau');
+    }
+    setPersonSaving(false);
+  }, [BASE, selectedProviderAddressId, personName, personCategory, personCompany, personPhone, personPlate, personNotes, loadAddressAssets]);
+
+  const handleDeletePerson = useCallback((person: KnownPerson) => {
+    if (!selectedProviderAddressId) return;
+    Alert.alert('Supprimer', `Retirer ${person.name} de la liste ?`, [
+      { text: 'Annuler', style: 'cancel' },
+      {
+        text: 'Supprimer', style: 'destructive', onPress: async () => {
+          try {
+            await fetchWithTimeout(`${BASE}/api/addresses/${selectedProviderAddressId}/people/${person.id}`, {
+              method: 'DELETE', headers: await authHeader(), timeout: 10000,
+            });
+            loadAddressAssets(selectedProviderAddressId);
+          } catch (e) {
+            console.error('[Family] Error deleting known person:', e);
+          }
+        },
+      },
+    ]);
+  }, [BASE, selectedProviderAddressId, loadAddressAssets]);
+
+  const resetInterventionForm = () => {
+    setInterventionPersonId(null); setInterventionDate(''); setInterventionTime('09:00');
+    setInterventionRecurringWeekly(false); setInterventionNotes(''); setShowAddInterventionForm(false);
+  };
+
+  const handleAddIntervention = useCallback(async () => {
+    if (!selectedProviderAddressId) return;
+    const person = knownPeopleList.find(p => p.id === interventionPersonId);
+    if (!person) { Alert.alert('Erreur', 'Choisissez un prestataire'); return; }
+    const dateMatch = interventionDate.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (!dateMatch) { Alert.alert('Erreur', 'Date au format JJ/MM/AAAA'); return; }
+    const timeMatch = interventionTime.match(/^(\d{1,2}):(\d{2})$/);
+    if (!timeMatch) { Alert.alert('Erreur', 'Heure au format HH:MM'); return; }
+    const [, day, month, year] = dateMatch;
+    const [, hour, minute] = timeMatch;
+    const scheduledStart = new Date(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute)).getTime();
+    setInterventionSaving(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/addresses/${selectedProviderAddressId}/interventions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({
+          personId: person.id, personName: person.name, category: person.category, scheduledStart,
+          recurrence: interventionRecurringWeekly ? { frequency: 'weekly', daysOfWeek: [new Date(scheduledStart).getDay()] } : undefined,
+          notes: interventionNotes.trim() || undefined,
+        }),
+        timeout: 10000,
+      });
+      if (res.ok) {
+        resetInterventionForm();
+        loadAddressAssets(selectedProviderAddressId);
+      } else {
+        Alert.alert('Erreur', 'Impossible de planifier cette intervention');
+      }
+    } catch (e) {
+      console.error('[Family] Error adding intervention:', e);
+      Alert.alert('Erreur', 'Erreur réseau');
+    }
+    setInterventionSaving(false);
+  }, [BASE, selectedProviderAddressId, knownPeopleList, interventionPersonId, interventionDate, interventionTime, interventionRecurringWeekly, interventionNotes, loadAddressAssets]);
+
+  const handleDeleteIntervention = useCallback((intervention: PlannedIntervention) => {
+    if (!selectedProviderAddressId) return;
+    Alert.alert('Annuler', `Annuler l'intervention de ${intervention.personName} ?`, [
+      { text: 'Non', style: 'cancel' },
+      {
+        text: 'Oui', style: 'destructive', onPress: async () => {
+          try {
+            await fetchWithTimeout(`${BASE}/api/addresses/${selectedProviderAddressId}/interventions/${intervention.id}`, {
+              method: 'DELETE', headers: await authHeader(), timeout: 10000,
+            });
+            loadAddressAssets(selectedProviderAddressId);
+          } catch (e) {
+            console.error('[Family] Error deleting intervention:', e);
+          }
+        },
+      },
+    ]);
+  }, [BASE, selectedProviderAddressId, loadAddressAssets]);
+
+  const formatInterventionDate = (ts: number, recurrence?: { frequency: 'weekly'; daysOfWeek: number[] }) => {
+    const d = new Date(ts);
+    const dateStr = d.toLocaleDateString('fr-FR');
+    const timeStr = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+    if (recurrence?.frequency === 'weekly') {
+      const days = ['dim', 'lun', 'mar', 'mer', 'jeu', 'ven', 'sam'];
+      return `Tous les ${recurrence.daysOfWeek.map(d2 => days[d2]).join(', ')} à ${timeStr}`;
+    }
+    return `${dateStr} à ${timeStr}`;
+  };
 
   const fetchPerimeters = useCallback(async () => {
     if (!userId) return;
@@ -806,6 +1042,13 @@ export default function FamilyScreen() {
         >
           <IconSymbol name="bell.fill" size={16} color="#1e3a5f" />
           <Text style={styles.actionBtnText}>Couvre-feu</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.actionBtn}
+          onPress={() => openProvidersModal(item)}
+        >
+          <IconSymbol name="person.2.fill" size={16} color="#1e3a5f" />
+          <Text style={styles.actionBtnText}>Prestataires</Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -1213,6 +1456,142 @@ export default function FamilyScreen() {
               <Text style={styles.placePickerCancelText}>Annuler</Text>
             </TouchableOpacity>
           </View>
+        </View>
+      </Modal>
+
+      {/* Providers & Planned Interventions Modal */}
+      <Modal visible={showProvidersModal} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowProvidersModal(false)}>
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Prestataires — {providersTarget?.name}</Text>
+            <TouchableOpacity onPress={() => setShowProvidersModal(false)}>
+              <IconSymbol name="xmark.circle.fill" size={28} color="#6B7280" />
+            </TouchableOpacity>
+          </View>
+
+          {providersAddresses.length > 1 && (
+            <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
+              <Text style={styles.formLabel}>Résidence</Text>
+              <View style={styles.memberSelector}>
+                {providersAddresses.map(a => (
+                  <TouchableOpacity key={a.id} style={[styles.memberChip, selectedProviderAddressId === a.id && styles.memberChipActive]} onPress={() => selectProviderAddress(a.id)}>
+                    <Text style={[styles.memberChipText, selectedProviderAddressId === a.id && styles.memberChipTextActive]}>{a.isPrimary ? '⭐ ' : ''}{a.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          )}
+
+          {providersAddresses.length === 0 && !providersLoading ? (
+            <View style={styles.emptyState}>
+              <Text style={styles.emptySubtitle}>Aucune résidence enregistrée pour ce membre.</Text>
+            </View>
+          ) : !selectedProviderAddressId ? (
+            providersLoading && <ActivityIndicator size="large" color="#1e3a5f" style={{ marginTop: 40 }} />
+          ) : (
+            <ScrollView style={{ padding: 16 }}>
+              {providersLoading ? (
+                <ActivityIndicator size="large" color="#1e3a5f" style={{ marginTop: 20 }} />
+              ) : (
+                <>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <Text style={styles.formLabel}>Personnes connues</Text>
+                    <TouchableOpacity onPress={() => setShowAddPersonForm(v => !v)}>
+                      <Text style={styles.providerAddLink}>{showAddPersonForm ? 'Annuler' : '+ Ajouter'}</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {showAddPersonForm && (
+                    <View style={styles.providerFormCard}>
+                      <TextInput style={styles.textInput} value={personName} onChangeText={setPersonName} placeholder="Nom" placeholderTextColor="#9CA3AF" />
+                      <View style={styles.memberSelector}>
+                        {PROVIDER_CATEGORIES.map(c => (
+                          <TouchableOpacity key={c.key} style={[styles.memberChip, personCategory === c.key && styles.memberChipActive]} onPress={() => setPersonCategory(c.key)}>
+                            <Text style={[styles.memberChipText, personCategory === c.key && styles.memberChipTextActive]}>{c.icon} {c.label}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                      <TextInput style={styles.textInput} value={personCompany} onChangeText={setPersonCompany} placeholder="Société (optionnel)" placeholderTextColor="#9CA3AF" />
+                      <TextInput style={styles.textInput} value={personPhone} onChangeText={setPersonPhone} placeholder="Téléphone" placeholderTextColor="#9CA3AF" keyboardType="phone-pad" />
+                      <TextInput style={styles.textInput} value={personPlate} onChangeText={setPersonPlate} placeholder="Plaque d'immatriculation" placeholderTextColor="#9CA3AF" autoCapitalize="characters" />
+                      <TextInput style={[styles.textInput, { height: 70 }]} value={personNotes} onChangeText={setPersonNotes} placeholder="Notes" placeholderTextColor="#9CA3AF" multiline />
+                      <TouchableOpacity style={[styles.createBtn, personSaving && { opacity: 0.6 }]} onPress={handleAddPerson} disabled={personSaving || !personName.trim()}>
+                        {personSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.createBtnText}>Enregistrer</Text>}
+                      </TouchableOpacity>
+                    </View>
+                  )}
+
+                  {knownPeopleList.length === 0 ? (
+                    <Text style={styles.emptySubtitle}>Aucune personne enregistrée pour cette résidence.</Text>
+                  ) : (
+                    knownPeopleList.map(p => (
+                      <View key={p.id} style={styles.providerRow}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.providerName}>{p.name}  <Text style={styles.providerCategory}>{PROVIDER_CATEGORY_LABEL[p.category] || p.category}</Text></Text>
+                          {!!p.company && <Text style={styles.providerDetail}>{p.company}</Text>}
+                          {!!p.phone && <Text style={styles.providerDetail}>📞 {p.phone}</Text>}
+                          {!!p.vehiclePlate && <Text style={styles.providerDetail}>🚗 {p.vehiclePlate}</Text>}
+                          {!!p.notes && <Text style={styles.providerDetail}>{p.notes}</Text>}
+                        </View>
+                        <TouchableOpacity onPress={() => handleDeletePerson(p)}>
+                          <IconSymbol name="trash.fill" size={18} color="#EF4444" />
+                        </TouchableOpacity>
+                      </View>
+                    ))
+                  )}
+
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 24, marginBottom: 8 }}>
+                    <Text style={styles.formLabel}>Interventions prévues</Text>
+                    <TouchableOpacity onPress={() => setShowAddInterventionForm(v => !v)} disabled={knownPeopleList.length === 0}>
+                      <Text style={[styles.providerAddLink, knownPeopleList.length === 0 && { color: '#9CA3AF' }]}>{showAddInterventionForm ? 'Annuler' : '+ Planifier'}</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {showAddInterventionForm && (
+                    <View style={styles.providerFormCard}>
+                      <Text style={styles.formHint}>Prestataire</Text>
+                      <View style={styles.memberSelector}>
+                        {knownPeopleList.map(p => (
+                          <TouchableOpacity key={p.id} style={[styles.memberChip, interventionPersonId === p.id && styles.memberChipActive]} onPress={() => setInterventionPersonId(p.id)}>
+                            <Text style={[styles.memberChipText, interventionPersonId === p.id && styles.memberChipTextActive]}>{p.name}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                      <View style={{ flexDirection: 'row', gap: 8 }}>
+                        <TextInput style={[styles.textInput, { flex: 1 }]} value={interventionDate} onChangeText={setInterventionDate} placeholder="JJ/MM/AAAA" placeholderTextColor="#9CA3AF" keyboardType="numbers-and-punctuation" />
+                        <TextInput style={[styles.textInput, { flex: 1 }]} value={interventionTime} onChangeText={setInterventionTime} placeholder="HH:MM" placeholderTextColor="#9CA3AF" />
+                      </View>
+                      <TouchableOpacity style={styles.providerCheckboxRow} onPress={() => setInterventionRecurringWeekly(v => !v)}>
+                        <Text style={styles.providerCheckboxIcon}>{interventionRecurringWeekly ? '☑' : '☐'}</Text>
+                        <Text style={styles.formHint}>Se répète chaque semaine, ce jour-là</Text>
+                      </TouchableOpacity>
+                      <TextInput style={[styles.textInput, { height: 70 }]} value={interventionNotes} onChangeText={setInterventionNotes} placeholder="Notes" placeholderTextColor="#9CA3AF" multiline />
+                      <TouchableOpacity style={[styles.createBtn, interventionSaving && { opacity: 0.6 }]} onPress={handleAddIntervention} disabled={interventionSaving || !interventionPersonId}>
+                        {interventionSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.createBtnText}>Planifier</Text>}
+                      </TouchableOpacity>
+                    </View>
+                  )}
+
+                  {interventionsList.length === 0 ? (
+                    <Text style={styles.emptySubtitle}>Aucune intervention prévue.</Text>
+                  ) : (
+                    interventionsList.map(iv => (
+                      <View key={iv.id} style={styles.providerRow}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.providerName}>{iv.personName}</Text>
+                          <Text style={styles.providerDetail}>{formatInterventionDate(iv.scheduledStart, iv.recurrence)}</Text>
+                          {!!iv.notes && <Text style={styles.providerDetail}>{iv.notes}</Text>}
+                        </View>
+                        <TouchableOpacity onPress={() => handleDeleteIntervention(iv)}>
+                          <IconSymbol name="trash.fill" size={18} color="#EF4444" />
+                        </TouchableOpacity>
+                      </View>
+                    ))
+                  )}
+                </>
+              )}
+            </ScrollView>
+          )}
         </View>
       </Modal>
 
@@ -2154,6 +2533,20 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 16,
   },
+  providerAddLink: { color: '#1e3a5f', fontWeight: '600', fontSize: 14 },
+  providerFormCard: {
+    backgroundColor: '#F9FAFB', borderRadius: 12, padding: 12, marginBottom: 12, gap: 8,
+    borderWidth: 1, borderColor: '#E5E7EB',
+  },
+  providerRow: {
+    flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', borderRadius: 10,
+    padding: 12, marginBottom: 8, borderWidth: 1, borderColor: '#E5E7EB', gap: 8,
+  },
+  providerName: { fontSize: 15, fontWeight: '600', color: '#1F2937' },
+  providerCategory: { fontSize: 12, fontWeight: '500', color: '#6B7280' },
+  providerDetail: { fontSize: 13, color: '#6B7280', marginTop: 2 },
+  providerCheckboxRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4 },
+  providerCheckboxIcon: { fontSize: 20, color: '#1e3a5f' },
   // GPS button
   gpsBtn: {
     flexDirection: 'row',
