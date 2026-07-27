@@ -893,13 +893,17 @@
         <button class="btn btn-primary" onclick="saveBlackbookEntry()">💾 Enregistrer</button>
       </div>
 
-      <div id="blackbookExistingSections" style="display:none;">
-        <hr style="border-color:var(--border-subtle);margin:16px 0;">
+      <hr style="border-color:var(--border-subtle);margin:16px 0;">
 
+      <div id="blackbookNewEntryHint" style="font-size:12px;color:var(--text-muted);background:var(--bg-panel);border-radius:8px;padding:10px;margin-bottom:16px;">
+        📷 Enregistrez d'abord la fiche ci-dessus pour pouvoir ajouter des photos et des signalements.
+      </div>
+
+      <div id="blackbookExistingSections" style="display:none;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
           <span style="font-size:12px;font-weight:700;color:var(--text-muted);text-transform:uppercase;">Photos</span>
           <label class="btn btn-sm" style="cursor:pointer;">
-            📷 Ajouter
+            📷 Ajouter une photo
             <input type="file" id="bbPhotoInput" accept="image/*" multiple style="display:none;" onchange="uploadBlackbookPhotos()">
           </label>
         </div>

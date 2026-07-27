@@ -1824,6 +1824,7 @@ async function openBlackbookDetail(entryId) {
     document.getElementById('blackbookDeleteBtn').style.display = 'none';
     document.getElementById('bbStatusField').style.display = 'none';
     document.getElementById('blackbookExistingSections').style.display = 'none';
+    document.getElementById('blackbookNewEntryHint').style.display = 'block';
     ['bbFirstName', 'bbLastName', 'bbAliases', 'bbDateOfBirth', 'bbPhysicalDescription', 'bbTags', 'bbNotes'].forEach(id => document.getElementById(id).value = '');
     document.getElementById('bbRiskLevel').value = 'medium';
     renderBlackbookVehicles();
@@ -1836,6 +1837,7 @@ async function openBlackbookDetail(entryId) {
     document.getElementById('blackbookDeleteBtn').style.display = 'inline-flex';
     document.getElementById('bbStatusField').style.display = 'block';
     document.getElementById('blackbookExistingSections').style.display = 'block';
+    document.getElementById('blackbookNewEntryHint').style.display = 'none';
     document.getElementById('bbFirstName').value = entry.firstName || '';
     document.getElementById('bbLastName').value = entry.lastName || '';
     document.getElementById('bbAliases').value = (entry.aliases || []).join(', ');
