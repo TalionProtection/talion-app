@@ -1323,7 +1323,15 @@ function computeAutoPresence(userId: string): { status: 'inside' | 'outside' | '
 
   let result: { status: 'inside' | 'outside' | 'unknown'; matchedLabel?: string };
   if (!loc || addresses.length === 0) {
-    result = { status: 'unknown' };
+    // No live location yet — e.g. right after a server restart, before this
+    // user's phone has sent its next GPS ping (the `users` runtime map is
+    // never persisted, by design — only this last-confirmed state is).
+    // Keep showing the last confirmed status instead of dropping to
+    // "unknown", which used to erase a perfectly good known status on every
+    // restart even though the persisted state was right there.
+    result = prevState && (prevState.status === 'inside' || prevState.status === 'outside')
+      ? { status: prevState.status, matchedLabel: prevState.label }
+      : { status: 'unknown' };
   } else {
     let matched: typeof addresses[number] | undefined;
     for (const addr of addresses) {
