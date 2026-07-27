@@ -160,6 +160,16 @@ export default function DispatcherScreen() {
   const [profileLocationContext, setProfileLocationContext] = useState<any>(null);
   const [profileResidenceContext, setProfileResidenceContext] = useState<any>(null);
 
+  // "Visites" — searchable list of every planned intervention across every
+  // residence (name, company, vehicle plate), mirroring the dispatch console's
+  // Visites tab. Read-only here; editing happens via the Familles tab's
+  // per-residence provider panel.
+  const [showVisitsModal, setShowVisitsModal] = useState(false);
+  const [visitsLoading, setVisitsLoading] = useState(false);
+  const [visitsData, setVisitsData] = useState<any[]>([]);
+  const [visitsSearch, setVisitsSearch] = useState('');
+  const [visitsRangeDays, setVisitsRangeDays] = useState(30);
+
   // Fetch responders from server
   const fetchResponders = useCallback(async () => {
     try {
@@ -390,6 +400,44 @@ export default function DispatcherScreen() {
     setProfileLoading(false);
   };
 
+  const loadVisits = useCallback(async (rangeDays: number) => {
+    setVisitsLoading(true);
+    try {
+      const baseUrl = getApiBaseUrl();
+      const now = Date.now();
+      const DAY_MS = 24 * 60 * 60 * 1000;
+      const from = rangeDays < 0 ? now + rangeDays * DAY_MS : now;
+      const to = rangeDays < 0 ? now : now + rangeDays * DAY_MS;
+      const res = await fetchWithTimeout(`${baseUrl}/api/interventions/upcoming?from=${from}&to=${to}`, { timeout: 10000, headers: await authHeader() });
+      setVisitsData(res.ok ? await res.json() : []);
+    } catch (e) {
+      setVisitsData([]);
+    }
+    setVisitsLoading(false);
+  }, []);
+
+  const openVisitsModal = useCallback(() => {
+    setShowVisitsModal(true);
+    setVisitsSearch('');
+    loadVisits(visitsRangeDays);
+  }, [loadVisits, visitsRangeDays]);
+
+  const filteredVisits = useMemo(() => {
+    const query = visitsSearch.trim().toLowerCase();
+    if (!query) return visitsData;
+    return visitsData.filter((o: any) => {
+      const haystack = [o.personName, o.personCompany, o.personVehiclePlate, o.personPhone, o.addressLabel, o.ownerName]
+        .filter(Boolean).join(' ').toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [visitsData, visitsSearch]);
+
+  const VISIT_CATEGORY_LABEL: Record<string, string> = {
+    jardinier: '🌳 Jardinier', piscine: '🏊 Piscine', plombier: '🔧 Plombier', electricien: '⚡ Électricien',
+    menage: '🧹 Ménage', securite: '🔒 Sécurité', entrepreneur: '🏗️ Entrepreneur', livraison: '📦 Livraison',
+    visiteur: '👤 Visiteur', autre: '❓ Autre',
+  };
+
   const filteredIncidents = useMemo(() => {
     return incidents
       .filter((i) => {
@@ -461,6 +509,12 @@ export default function DispatcherScreen() {
         <TouchableOpacity style={styles.broadcastButton} onPress={() => setShowBroadcastModal(true)}>
           <Text style={styles.broadcastButtonIcon}>{'\u{1F4E2}'}</Text>
           <Text style={styles.broadcastButtonText}>Zone Broadcast</Text>
+        </TouchableOpacity>
+
+        {/* Visits Button */}
+        <TouchableOpacity style={[styles.broadcastButton, { backgroundColor: '#374151' }]} onPress={openVisitsModal}>
+          <Text style={styles.broadcastButtonIcon}>{'\u{1F527}'}</Text>
+          <Text style={styles.broadcastButtonText}>Visites & Prestataires</Text>
         </TouchableOpacity>
 
         {/* Refresh Button */}
@@ -1085,6 +1139,72 @@ export default function DispatcherScreen() {
               </View>
             )}
             <TouchableOpacity style={styles.modalCloseBtn} onPress={() => setShowUserProfile(false)}>
+              <Text style={styles.modalCloseBtnText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Visits Modal — searchable across every residence */}
+      <Modal visible={showVisitsModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { maxHeight: '90%' }]}>
+            <Text style={{ fontSize: 18, fontWeight: '700', color: '#1f2937', marginBottom: 12 }}>🔧 Visites & Prestataires</Text>
+
+            <TextInput
+              style={{ backgroundColor: '#f3f4f6', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, marginBottom: 8 }}
+              placeholder="Nom, société, plaque, résidence, famille..."
+              placeholderTextColor="#9ca3af"
+              value={visitsSearch}
+              onChangeText={setVisitsSearch}
+            />
+
+            <View style={{ flexDirection: 'row', gap: 6, marginBottom: 12 }}>
+              {[{ label: '7j', value: 7 }, { label: '30j', value: 30 }, { label: '90j', value: 90 }, { label: '-30j', value: -30 }].map(r => (
+                <TouchableOpacity
+                  key={r.label}
+                  style={{
+                    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8,
+                    backgroundColor: visitsRangeDays === r.value ? '#1e3a5f' : '#f3f4f6',
+                  }}
+                  onPress={() => { setVisitsRangeDays(r.value); loadVisits(r.value); }}
+                >
+                  <Text style={{ fontSize: 12, fontWeight: '600', color: visitsRangeDays === r.value ? '#fff' : '#374151' }}>{r.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {visitsLoading ? (
+              <ActivityIndicator size="large" color="#1e3a5f" style={{ marginTop: 24 }} />
+            ) : (
+              <ScrollView showsVerticalScrollIndicator={false}>
+                {filteredVisits.length === 0 ? (
+                  <Text style={{ textAlign: 'center', color: '#9ca3af', marginTop: 24 }}>Aucune visite trouvée</Text>
+                ) : (
+                  filteredVisits.map((o: any) => (
+                    <View key={o.interventionId + '-' + o.scheduledStart} style={{ backgroundColor: '#f9fafb', borderRadius: 10, padding: 12, marginBottom: 8 }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                        <Text style={{ fontSize: 14, fontWeight: '700', color: '#1f2937' }}>{o.personName}</Text>
+                        <Text style={{ fontSize: 11, color: '#6b7280' }}>{VISIT_CATEGORY_LABEL[o.category] || o.category}</Text>
+                      </View>
+                      {!!o.personCompany && <Text style={{ fontSize: 12, color: '#6b7280', marginTop: 2 }}>{o.personCompany}</Text>}
+                      <Text style={{ fontSize: 12, color: '#6b7280', marginTop: 2 }}>
+                        {new Date(o.scheduledStart).toLocaleString('fr-FR', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                        {o.recurrence ? ' 🔁' : ''}
+                      </Text>
+                      {(o.personPhone || o.personVehiclePlate) && (
+                        <Text style={{ fontSize: 12, color: '#6b7280', marginTop: 2 }}>
+                          {o.personPhone ? `📞 ${o.personPhone}` : ''}{o.personPhone && o.personVehiclePlate ? '  ·  ' : ''}{o.personVehiclePlate ? `🚗 ${o.personVehiclePlate}` : ''}
+                        </Text>
+                      )}
+                      <Text style={{ fontSize: 12, color: '#9ca3af', marginTop: 2 }}>📍 {o.ownerName} — {o.addressLabel}</Text>
+                    </View>
+                  ))
+                )}
+              </ScrollView>
+            )}
+
+            <TouchableOpacity style={styles.modalCloseBtn} onPress={() => setShowVisitsModal(false)}>
               <Text style={styles.modalCloseBtnText}>Close</Text>
             </TouchableOpacity>
           </View>
