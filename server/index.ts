@@ -6869,15 +6869,16 @@ app.get('/api/alerts/:id/context', async (req, res) => {
       }
     }
   }
-  if (!user) return res.json({ alert, user: null, addresses: [], family: [], locationContext: null });
+  if (!user) return res.json({ alert, user: null, addresses: [], family: [], locationContext: null, residenceContext: null });
 
   // Get user addresses
   const addresses = userAddresses.get(resolvedUserId) || [];
 
   // Detect proximity to known addresses
   let locationContext = null;
+  let matchedAddress: UserAddress | null = null;
   if (alert.location?.latitude && alert.location?.longitude && addresses.length > 0) {
-    let closest = null;
+    let closest: UserAddress | null = null;
     let minDist = Infinity;
     for (const addr of addresses) {
       if (!addr.latitude || !addr.longitude) continue;
@@ -6885,6 +6886,7 @@ app.get('/api/alerts/:id/context', async (req, res) => {
       if (dist < minDist) { minDist = dist; closest = addr; }
     }
     if (closest && minDist < 500) {
+      matchedAddress = closest;
       locationContext = {
         type: 'known_address',
         label: closest.label,
@@ -6894,6 +6896,25 @@ app.get('/api/alerts/:id/context', async (req, res) => {
         isHomeJacking: minDist < 100,
       };
     }
+  }
+
+  // Known providers/visitors at the matched residence, and who's expected there
+  // today — so staff on scene can recognize an expected vehicle/person.
+  let residenceContext: { addressId: string; knownPeople: KnownPerson[]; todayInterventions: PlannedIntervention[] } | null = null;
+  if (matchedAddress) {
+    const now = new Date();
+    const todayStart = new Date(now); todayStart.setHours(0, 0, 0, 0);
+    const todayEnd = new Date(now); todayEnd.setHours(23, 59, 59, 999);
+    const todayInterventions = (plannedInterventions.get(matchedAddress.id) || []).filter(iv => {
+      if (iv.status === 'cancelled') return false;
+      if (iv.recurrence?.frequency === 'weekly') return iv.recurrence.daysOfWeek.includes(now.getDay());
+      return iv.scheduledStart >= todayStart.getTime() && iv.scheduledStart <= todayEnd.getTime();
+    });
+    residenceContext = {
+      addressId: matchedAddress.id,
+      knownPeople: knownPeople.get(matchedAddress.id) || [],
+      todayInterventions,
+    };
   }
 
   // Get family members
@@ -6918,6 +6939,6 @@ app.get('/api/alerts/:id/context', async (req, res) => {
   const reporterPresence = computeEffectivePresence(resolvedUserId, true);
 
   const { passwordHash, ...safeUser } = user;
-  res.json({ user: { ...safeUser, hasPassword: !!user.passwordHash }, addresses, family, locationContext, reporterPresence });
+  res.json({ user: { ...safeUser, hasPassword: !!user.passwordHash }, addresses, family, locationContext, reporterPresence, residenceContext });
 });
 // livekit-server-sdk installed

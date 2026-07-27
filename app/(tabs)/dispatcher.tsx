@@ -158,6 +158,7 @@ export default function DispatcherScreen() {
   const [profileFamily, setProfileFamily] = useState<any[]>([]);
   const [profileAddresses, setProfileAddresses] = useState<any[]>([]);
   const [profileLocationContext, setProfileLocationContext] = useState<any>(null);
+  const [profileResidenceContext, setProfileResidenceContext] = useState<any>(null);
 
   // Fetch responders from server
   const fetchResponders = useCallback(async () => {
@@ -342,6 +343,7 @@ export default function DispatcherScreen() {
     setProfileFamily([]);
     setProfileAddresses([]);
     setProfileLocationContext(null);
+    setProfileResidenceContext(null);
     try {
       const baseUrl = getApiBaseUrl();
       const res = await fetchWithTimeout(`${baseUrl}/admin/users/${userId}`, { timeout: 10000 });
@@ -367,6 +369,7 @@ export default function DispatcherScreen() {
     setProfileFamily([]);
     setProfileAddresses([]);
     setProfileLocationContext(null);
+    setProfileResidenceContext(null);
     try {
       const baseUrl = getApiBaseUrl();
       const res = await fetchWithTimeout(`${baseUrl}/api/alerts/${alertId}/context`, { timeout: 10000 });
@@ -377,6 +380,7 @@ export default function DispatcherScreen() {
         setProfileFamily(data.family || []);
         setProfileAddresses(data.addresses || []);
         setProfileLocationContext(data.locationContext || null);
+        setProfileResidenceContext(data.residenceContext || null);
       } else {
         setProfileUser(null);
       }
@@ -898,6 +902,35 @@ export default function DispatcherScreen() {
                       {profileLocationContext.label} · {profileLocationContext.distanceMeters}m
                       {profileLocationContext.alarmCode ? ` · Code alarme: ${profileLocationContext.alarmCode}` : ''}
                     </Text>
+                  </View>
+                )}
+
+                {/* Known providers/visitors at the matched residence, and who's expected
+                    there today — so a responder on scene can recognize an expected
+                    vehicle/person (e.g. "that white van is the gardener's"). */}
+                {profileResidenceContext && (profileResidenceContext.knownPeople.length > 0 || profileResidenceContext.todayInterventions.length > 0) && (
+                  <View style={{ backgroundColor: '#f9fafb', borderRadius: 10, padding: 12, marginBottom: 12 }}>
+                    <Text style={{ fontSize: 13, fontWeight: '600', color: '#374151', marginBottom: 8 }}>Prestataires connus à cette adresse</Text>
+                    {profileResidenceContext.knownPeople.map((p: any) => (
+                      <View key={p.id} style={{ marginBottom: 6 }}>
+                        <Text style={{ fontSize: 12, color: '#1f2937', fontWeight: '600' }}>{p.name} <Text style={{ fontWeight: '500', color: '#6b7280' }}>({p.category})</Text></Text>
+                        {(p.vehiclePlate || p.phone) && (
+                          <Text style={{ fontSize: 11, color: '#6b7280' }}>
+                            {p.vehiclePlate ? `🚗 ${p.vehiclePlate}` : ''}{p.vehiclePlate && p.phone ? '  ·  ' : ''}{p.phone ? `📞 ${p.phone}` : ''}
+                          </Text>
+                        )}
+                      </View>
+                    ))}
+                    {profileResidenceContext.todayInterventions.length > 0 && (
+                      <>
+                        <Text style={{ fontSize: 12, fontWeight: '600', color: '#374151', marginTop: 6, marginBottom: 4 }}>Attendu(s) aujourd'hui</Text>
+                        {profileResidenceContext.todayInterventions.map((iv: any) => (
+                          <Text key={iv.id} style={{ fontSize: 12, color: '#16a34a', fontWeight: '600' }}>
+                            ✓ {iv.personName} — {new Date(iv.scheduledStart).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
+                          </Text>
+                        ))}
+                      </>
+                    )}
                   </View>
                 )}
 
