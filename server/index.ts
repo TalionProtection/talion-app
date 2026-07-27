@@ -6724,6 +6724,314 @@ app.get('/api/interventions/upcoming', requireAuth, (req, res) => {
   res.json(occurrences);
 });
 
+// ─── Blackbook: suspicious persons registry ────────────────────────────────
+// Not tied to any one residence — a person can be sighted at multiple
+// properties, so this is its own top-level entity (unlike KnownPerson, which
+// is address-scoped). Staff-only (responder/dispatcher/admin): field staff
+// log sightings, dispatch/admin manage the full record.
+
+interface BlackbookSighting {
+  id: string;
+  timestamp: number;
+  category: 'prise_info' | 'intrusion' | 'menaces' | 'envoi_courrier' | 'reperage' | 'autre';
+  location?: { latitude?: number; longitude?: number; address?: string };
+  notes?: string;
+  reportedBy: string;
+  reportedByName: string;
+}
+
+interface BlackbookVehicle {
+  plate?: string;
+  description?: string;
+}
+
+interface BlackbookEntry {
+  id: string;
+  firstName: string;
+  lastName: string;
+  aliases: string[];
+  dateOfBirth?: string; // YYYY-MM-DD
+  physicalDescription?: string;
+  riskLevel: 'low' | 'medium' | 'high' | 'critical';
+  status: 'active' | 'resolved' | 'archived';
+  photos: string[];
+  vehicles: BlackbookVehicle[];
+  tags: string[];
+  notes?: string;
+  sightings: BlackbookSighting[];
+  linkedIncidentIds: string[];
+  linkedUserId?: string; // family/residence this person is associated with, if any
+  createdBy: string;
+  createdByName: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+const blackbookEntries = new Map<string, BlackbookEntry>();
+const BLACKBOOK_CATEGORY_LABELS: Record<string, string> = {
+  prise_info: "Prise d'info", intrusion: 'Intrusion', menaces: 'Menaces',
+  envoi_courrier: 'Envoi de courrier', reperage: 'Repérage', autre: 'Autre',
+};
+
+async function loadBlackbookFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('blackbook_entries').select('*');
+    if (error) { console.error('[Supabase] Failed to load blackbook_entries:', error.message); return; }
+    if (data && data.length > 0) {
+      blackbookEntries.clear();
+      data.forEach((e: any) => {
+        blackbookEntries.set(e.id, {
+          id: e.id, firstName: e.first_name, lastName: e.last_name, aliases: e.aliases || [],
+          dateOfBirth: e.date_of_birth || undefined, physicalDescription: e.physical_description || undefined,
+          riskLevel: e.risk_level, status: e.status, photos: e.photos || [], vehicles: e.vehicles || [],
+          tags: e.tags || [], notes: e.notes || undefined, sightings: e.sightings || [],
+          linkedIncidentIds: e.linked_incident_ids || [], linkedUserId: e.linked_user_id || undefined,
+          createdBy: e.created_by, createdByName: e.created_by_name, createdAt: e.created_at, updatedAt: e.updated_at,
+        });
+      });
+      console.log(`[Supabase] Loaded ${data.length} blackbook entries`);
+    }
+  } catch (e) { console.error('[Supabase] loadBlackbookFromSupabase error:', e); }
+}
+
+async function saveBlackbookEntryToSupabase(entry: BlackbookEntry): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('blackbook_entries').upsert({
+      id: entry.id, first_name: entry.firstName, last_name: entry.lastName, aliases: entry.aliases,
+      date_of_birth: entry.dateOfBirth || null, physical_description: entry.physicalDescription || null,
+      risk_level: entry.riskLevel, status: entry.status, photos: entry.photos, vehicles: entry.vehicles,
+      tags: entry.tags, notes: entry.notes || null, sightings: entry.sightings,
+      linked_incident_ids: entry.linkedIncidentIds, linked_user_id: entry.linkedUserId || null,
+      created_by: entry.createdBy, created_by_name: entry.createdByName, created_at: entry.createdAt, updated_at: entry.updatedAt,
+    });
+    if (error) console.error('[Supabase] Failed to persist blackbook entry:', error.message);
+  } catch (e) { console.error('[Supabase] saveBlackbookEntryToSupabase error:', e); }
+}
+
+async function deleteBlackbookEntryFromSupabase(id: string): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('blackbook_entries').delete().eq('id', id);
+    if (error) console.error('[Supabase] Failed to delete blackbook entry:', error.message);
+  } catch (e) { console.error('[Supabase] deleteBlackbookEntryFromSupabase error:', e); }
+}
+
+function isBlackbookStaff(role: string): boolean {
+  return role === 'responder' || role === 'dispatcher' || role === 'admin';
+}
+
+// GET /api/blackbook — full list; client handles search/sort/filter (same
+// pattern as the Visites tab — dataset is small enough this stays instant).
+app.get('/api/blackbook', requireAuth, (req, res) => {
+  if (!isBlackbookStaff(req.supabaseUser!.role)) return res.status(403).json({ error: 'Staff only' });
+  res.json(Array.from(blackbookEntries.values()).sort((a, b) => b.updatedAt - a.updatedAt));
+});
+
+// GET /api/blackbook/:id
+app.get('/api/blackbook/:id', requireAuth, (req, res) => {
+  if (!isBlackbookStaff(req.supabaseUser!.role)) return res.status(403).json({ error: 'Staff only' });
+  const entry = blackbookEntries.get(req.params.id as string);
+  if (!entry) return res.status(404).json({ error: 'Entry not found' });
+  res.json(entry);
+});
+
+// POST /api/blackbook
+app.post('/api/blackbook', requireAuth, async (req, res) => {
+  const caller = req.supabaseUser!;
+  if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
+  const { firstName, lastName, aliases, dateOfBirth, physicalDescription, riskLevel, vehicles, tags, notes, linkedUserId } = req.body;
+  if (!firstName && !lastName) return res.status(400).json({ error: 'firstName or lastName is required' });
+  const now = Date.now();
+  const callerUser = adminUsers.get(caller.id);
+  const entry: BlackbookEntry = {
+    id: uuidv4(), firstName: firstName || '', lastName: lastName || '',
+    aliases: Array.isArray(aliases) ? aliases : [],
+    dateOfBirth: dateOfBirth || undefined, physicalDescription: physicalDescription || undefined,
+    riskLevel: riskLevel || 'medium', status: 'active', photos: [],
+    vehicles: Array.isArray(vehicles) ? vehicles : [], tags: Array.isArray(tags) ? tags : [],
+    notes: notes || undefined, sightings: [], linkedIncidentIds: [], linkedUserId: linkedUserId || undefined,
+    createdBy: caller.id, createdByName: callerUser?.name || caller.id, createdAt: now, updatedAt: now,
+  };
+  blackbookEntries.set(entry.id, entry);
+  saveBlackbookEntryToSupabase(entry).catch(() => {});
+  addAuditEntry('system', 'Blackbook: fiche créée', entry.createdByName, `${entry.firstName} ${entry.lastName}`.trim(), caller.id);
+  res.status(201).json(entry);
+});
+
+// PUT /api/blackbook/:id
+app.put('/api/blackbook/:id', requireAuth, async (req, res) => {
+  const caller = req.supabaseUser!;
+  if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
+  const entry = blackbookEntries.get(req.params.id as string);
+  if (!entry) return res.status(404).json({ error: 'Entry not found' });
+  const { firstName, lastName, aliases, dateOfBirth, physicalDescription, riskLevel, status, vehicles, tags, notes, linkedUserId, linkedIncidentIds } = req.body;
+  if (firstName !== undefined) entry.firstName = firstName;
+  if (lastName !== undefined) entry.lastName = lastName;
+  if (aliases !== undefined) entry.aliases = aliases;
+  if (dateOfBirth !== undefined) entry.dateOfBirth = dateOfBirth || undefined;
+  if (physicalDescription !== undefined) entry.physicalDescription = physicalDescription || undefined;
+  if (riskLevel !== undefined) entry.riskLevel = riskLevel;
+  if (status !== undefined) entry.status = status;
+  if (vehicles !== undefined) entry.vehicles = vehicles;
+  if (tags !== undefined) entry.tags = tags;
+  if (notes !== undefined) entry.notes = notes || undefined;
+  if (linkedUserId !== undefined) entry.linkedUserId = linkedUserId || undefined;
+  if (linkedIncidentIds !== undefined) entry.linkedIncidentIds = linkedIncidentIds;
+  entry.updatedAt = Date.now();
+  blackbookEntries.set(entry.id, entry);
+  saveBlackbookEntryToSupabase(entry).catch(() => {});
+  res.json(entry);
+});
+
+// DELETE /api/blackbook/:id — dispatcher/admin only, a field responder shouldn't
+// be able to erase a shared record they didn't create.
+app.delete('/api/blackbook/:id', requireAuth, async (req, res) => {
+  const caller = req.supabaseUser!;
+  if (caller.role !== 'dispatcher' && caller.role !== 'admin') return res.status(403).json({ error: 'Dispatcher/admin only' });
+  const entry = blackbookEntries.get(req.params.id as string);
+  if (!entry) return res.status(404).json({ error: 'Entry not found' });
+  blackbookEntries.delete(entry.id);
+  deleteBlackbookEntryFromSupabase(entry.id).catch(() => {});
+  addAuditEntry('system', 'Blackbook: fiche supprimée', adminUsers.get(caller.id)?.name || caller.id, `${entry.firstName} ${entry.lastName}`.trim(), caller.id);
+  res.json({ success: true });
+});
+
+// POST /api/blackbook/:id/sightings — log a new sighting (location/time/category/notes)
+app.post('/api/blackbook/:id/sightings', requireAuth, async (req, res) => {
+  const caller = req.supabaseUser!;
+  if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
+  const entry = blackbookEntries.get(req.params.id as string);
+  if (!entry) return res.status(404).json({ error: 'Entry not found' });
+  const { timestamp, category, location, notes } = req.body;
+  const callerUser = adminUsers.get(caller.id);
+  const sighting: BlackbookSighting = {
+    id: uuidv4(), timestamp: timestamp ? Number(timestamp) : Date.now(),
+    category: category || 'autre', location: location || undefined, notes: notes || undefined,
+    reportedBy: caller.id, reportedByName: callerUser?.name || caller.id,
+  };
+  entry.sightings.push(sighting);
+  entry.updatedAt = Date.now();
+  blackbookEntries.set(entry.id, entry);
+  saveBlackbookEntryToSupabase(entry).catch(() => {});
+  res.status(201).json(sighting);
+});
+
+// DELETE /api/blackbook/:id/sightings/:sightingId
+app.delete('/api/blackbook/:id/sightings/:sightingId', requireAuth, async (req, res) => {
+  const caller = req.supabaseUser!;
+  if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
+  const entry = blackbookEntries.get(req.params.id as string);
+  if (!entry) return res.status(404).json({ error: 'Entry not found' });
+  const idx = entry.sightings.findIndex(s => s.id === (req.params.sightingId as string));
+  if (idx === -1) return res.status(404).json({ error: 'Sighting not found' });
+  entry.sightings.splice(idx, 1);
+  entry.updatedAt = Date.now();
+  blackbookEntries.set(entry.id, entry);
+  saveBlackbookEntryToSupabase(entry).catch(() => {});
+  res.json({ success: true });
+});
+
+// POST /api/blackbook/:id/photos — multipart upload, up to 6 photos per call
+app.post('/api/blackbook/:id/photos', requireAuth, upload.array('photos', 6), async (req: any, res) => {
+  const caller = req.supabaseUser!;
+  if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
+  const entry = blackbookEntries.get(req.params.id as string);
+  if (!entry) return res.status(404).json({ error: 'Entry not found' });
+  if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files uploaded' });
+  const newUrls: string[] = req.files.map((f: any) => `/uploads/${f.filename}`);
+  entry.photos.push(...newUrls);
+  entry.updatedAt = Date.now();
+  blackbookEntries.set(entry.id, entry);
+  saveBlackbookEntryToSupabase(entry).catch(() => {});
+  res.json({ photos: entry.photos });
+});
+
+// DELETE /api/blackbook/:id/photos — body: { url }
+app.delete('/api/blackbook/:id/photos', requireAuth, async (req, res) => {
+  const caller = req.supabaseUser!;
+  if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
+  const entry = blackbookEntries.get(req.params.id as string);
+  if (!entry) return res.status(404).json({ error: 'Entry not found' });
+  const { url } = req.body;
+  entry.photos = entry.photos.filter(p => p !== url);
+  entry.updatedAt = Date.now();
+  blackbookEntries.set(entry.id, entry);
+  saveBlackbookEntryToSupabase(entry).catch(() => {});
+  res.json({ photos: entry.photos });
+});
+
+// GET /api/blackbook/:id/pdf — full dossier: identity, description, vehicles,
+// notes, photos, and the complete sighting history.
+app.get('/api/blackbook/:id/pdf', requireAuth, (req, res) => {
+  const caller = req.supabaseUser!;
+  if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
+  const entry = blackbookEntries.get(req.params.id as string);
+  if (!entry) return res.status(404).json({ error: 'Entry not found' });
+
+  const PDFDocument = require('pdfkit');
+  const fileName = `blackbook-${(entry.lastName || 'sans-nom').replace(/[^a-zA-Z0-9-]/g, '_')}.pdf`;
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+
+  const doc = new PDFDocument({ margin: 50 });
+  doc.pipe(res);
+
+  const RISK_LABELS: Record<string, string> = { low: 'Faible', medium: 'Moyen', high: 'Élevé', critical: 'Critique' };
+  const STATUS_LABELS: Record<string, string> = { active: 'Surveillance active', resolved: 'Résolu', archived: 'Archivé' };
+
+  doc.fontSize(20).font('Helvetica-Bold').text(`${entry.firstName} ${entry.lastName}`.trim() || 'Sans nom');
+  if (entry.aliases.length > 0) doc.fontSize(11).font('Helvetica-Oblique').text(`Alias : ${entry.aliases.join(', ')}`);
+  doc.moveDown(0.5);
+  doc.fontSize(12).font('Helvetica');
+  if (entry.dateOfBirth) doc.text(`Date de naissance : ${entry.dateOfBirth}`);
+  doc.text(`Niveau de risque : ${RISK_LABELS[entry.riskLevel] || entry.riskLevel}`);
+  doc.text(`Statut : ${STATUS_LABELS[entry.status] || entry.status}`);
+  if (entry.tags.length > 0) doc.text(`Tags : ${entry.tags.join(', ')}`);
+  doc.text(`Créé par ${entry.createdByName} le ${new Date(entry.createdAt).toLocaleDateString('fr-FR')}`);
+
+  if (entry.physicalDescription) {
+    doc.moveDown(0.5).font('Helvetica-Bold').text('Description physique');
+    doc.font('Helvetica').text(entry.physicalDescription);
+  }
+  if (entry.vehicles.length > 0) {
+    doc.moveDown(0.5).font('Helvetica-Bold').text('Véhicule(s)');
+    doc.font('Helvetica');
+    entry.vehicles.forEach(v => doc.text(`- ${[v.plate, v.description].filter(Boolean).join(' — ')}`));
+  }
+  if (entry.notes) {
+    doc.moveDown(0.5).font('Helvetica-Bold').text('Notes');
+    doc.font('Helvetica').text(entry.notes);
+  }
+
+  doc.moveDown(1).font('Helvetica-Bold').fontSize(14).text('Historique des signalements');
+  doc.fontSize(11);
+  const sortedSightings = [...entry.sightings].sort((a, b) => b.timestamp - a.timestamp);
+  if (sortedSightings.length === 0) {
+    doc.font('Helvetica').text('Aucun signalement enregistré.');
+  } else {
+    sortedSightings.forEach(s => {
+      doc.moveDown(0.4);
+      doc.font('Helvetica-Bold').text(`${new Date(s.timestamp).toLocaleString('fr-FR')} — ${BLACKBOOK_CATEGORY_LABELS[s.category] || s.category}`);
+      doc.font('Helvetica');
+      if (s.location?.address) doc.text(`Lieu : ${s.location.address}`);
+      if (s.notes) doc.text(s.notes);
+      doc.fontSize(9).font('Helvetica-Oblique').text(`Signalé par ${s.reportedByName}`);
+      doc.fontSize(11);
+    });
+  }
+
+  for (const photoUrl of entry.photos) {
+    try {
+      const photoPath = path.join(PROJECT_ROOT, photoUrl.replace(/^\//, ''));
+      if (fs.existsSync(photoPath)) {
+        doc.addPage();
+        doc.image(photoPath, { fit: [480, 650], align: 'center', valign: 'center' });
+      }
+    } catch (e) { /* skip unreadable photo, don't fail the whole export */ }
+  }
+
+  doc.end();
+});
+
 // ─── User Addresses REST API ──────────────────────────────────────────────
 
 // GET /api/users/:id/addresses

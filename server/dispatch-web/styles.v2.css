@@ -286,6 +286,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .provider-row-name { font-size: 13px; font-weight: 700; color: var(--text-primary); }
 .provider-row-category { font-size: 11px; font-weight: 500; color: var(--text-muted); }
 .provider-row-detail { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.tag-chip { display: inline-block; font-size: 10px; padding: 2px 7px; border-radius: 10px; background: var(--bg-chip); color: var(--text-secondary); margin: 1px; }
 
 /* ─── Visits Tab ─────────────────────────────────────────────────────── */
 .visits-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

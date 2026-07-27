@@ -715,7 +715,7 @@ function switchTab(tab) {
   document.querySelector(`.nav-item[data-tab="${tab}"]`)?.classList.add('active');
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.getElementById(`tab-${tab}`)?.classList.add('active');
-  const titles = { overview: "Vue d'ensemble", incidents: "Gestion des incidents", responders: "Unités d'intervention", broadcast: "Diffusion", map: "Carte en direct", messages: "Messages", patrol: "Rapports de Ronde", ptt: "Push-to-Talk", archives: "Archives", families: "Familles", visits: "Visites" };
+  const titles = { overview: "Vue d'ensemble", incidents: "Gestion des incidents", responders: "Unités d'intervention", broadcast: "Diffusion", map: "Carte en direct", messages: "Messages", patrol: "Rapports de Ronde", ptt: "Push-to-Talk", archives: "Archives", families: "Familles", visits: "Visites", blackbook: "Blackbook" };
   document.getElementById('pageTitle').textContent = titles[tab] || tab;
   if (tab === 'map') {
     setTimeout(() => { if (dispatchMap) { dispatchMap.invalidateSize(); } else { initMap(); } }, 100);
@@ -731,6 +731,9 @@ function switchTab(tab) {
   }
   if (tab === 'visits') {
     refreshVisitsSubtab();
+  }
+  if (tab === 'blackbook') {
+    loadBlackbook();
   }
 }
 
@@ -1666,6 +1669,351 @@ async function deleteIntervention(interventionId) {
     loadUpcomingInterventions();
   } catch (e) {
     showToast('Erreur', 'error');
+  }
+}
+
+// ─── Blackbook: suspicious persons registry ────────────────────────────
+const BLACKBOOK_CATEGORY_LABELS = {
+  prise_info: "Prise d'info", intrusion: 'Intrusion', menaces: 'Menaces',
+  envoi_courrier: 'Envoi de courrier', reperage: 'Repérage', autre: 'Autre',
+};
+const BLACKBOOK_RISK_LABELS = { low: '🟢 Faible', medium: '🟡 Moyen', high: '🟠 Élevé', critical: '🔴 Critique' };
+const BLACKBOOK_STATUS_LABELS = { active: 'Surveillance active', resolved: 'Résolu', archived: 'Archivé' };
+
+let blackbookData = [];
+let blackbookSort = { key: 'lastSeenAt', dir: -1 };
+let currentBlackbookEntry = null; // null while creating a new entry
+let currentBlackbookVehicles = [];
+
+function blackbookLastSighting(entry) {
+  if (!entry.sightings || entry.sightings.length === 0) return null;
+  return entry.sightings.reduce((latest, s) => (!latest || s.timestamp > latest.timestamp ? s : latest), null);
+}
+
+async function loadBlackbook() {
+  try {
+    const res = await fetch(`${API_BASE}/api/blackbook`);
+    const data = res.ok ? await res.json() : [];
+    blackbookData = data.map(e => {
+      const last = blackbookLastSighting(e);
+      return { ...e, lastSeenAt: last?.timestamp || 0, lastSeenLocation: last?.location?.address || '', lastSeenCategory: last?.category };
+    });
+  } catch (e) {
+    console.error('[Blackbook] Load error:', e);
+    blackbookData = [];
+  }
+  renderBlackbookTable();
+}
+
+function sortBlackbookBy(key) {
+  if (blackbookSort.key === key) blackbookSort.dir *= -1;
+  else blackbookSort = { key, dir: 1 };
+  renderBlackbookTable();
+}
+
+function renderBlackbookTable() {
+  const tbody = document.getElementById('blackbookTableBody');
+  const emptyState = document.getElementById('blackbookEmptyState');
+  if (!tbody) return;
+
+  const query = (document.getElementById('blackbookSearch')?.value || '').trim().toLowerCase();
+  const riskFilter = document.getElementById('blackbookRiskFilter')?.value || '';
+  const statusFilter = document.getElementById('blackbookStatusFilter')?.value || '';
+
+  let rows = blackbookData.filter(e => {
+    if (riskFilter && e.riskLevel !== riskFilter) return false;
+    if (statusFilter && e.status !== statusFilter) return false;
+    if (!query) return true;
+    const haystack = [
+      e.firstName, e.lastName, (e.aliases || []).join(' '), e.notes, e.lastSeenLocation,
+      ...(e.vehicles || []).map(v => `${v.plate || ''} ${v.description || ''}`),
+      ...(e.tags || []),
+    ].filter(Boolean).join(' ').toLowerCase();
+    return haystack.includes(query);
+  });
+
+  rows.sort((a, b) => {
+    const av = a[blackbookSort.key] ?? '';
+    const bv = b[blackbookSort.key] ?? '';
+    if (av < bv) return -1 * blackbookSort.dir;
+    if (av > bv) return 1 * blackbookSort.dir;
+    return 0;
+  });
+
+  document.getElementById('blackbookCount').textContent = `${rows.length} fiche${rows.length !== 1 ? 's' : ''}`;
+
+  if (rows.length === 0) {
+    tbody.innerHTML = '';
+    if (emptyState) emptyState.style.display = 'block';
+    return;
+  }
+  if (emptyState) emptyState.style.display = 'none';
+
+  tbody.innerHTML = rows.map(e => `
+    <tr onclick="openBlackbookDetail('${e.id}')" title="Cliquer pour ouvrir la fiche">
+      <td><strong>${escapeHtml(e.firstName)} ${escapeHtml(e.lastName)}</strong></td>
+      <td>${(e.aliases || []).map(escapeHtml).join(', ') || '—'}</td>
+      <td>${BLACKBOOK_RISK_LABELS[e.riskLevel] || e.riskLevel}</td>
+      <td>${BLACKBOOK_STATUS_LABELS[e.status] || e.status}</td>
+      <td>${e.lastSeenAt ? new Date(e.lastSeenAt).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) + (e.lastSeenCategory ? ' — ' + (BLACKBOOK_CATEGORY_LABELS[e.lastSeenCategory] || e.lastSeenCategory) : '') : '—'}</td>
+      <td>${escapeHtml(e.lastSeenLocation || '—')}</td>
+      <td>${(e.tags || []).map(t => `<span class="tag-chip">${escapeHtml(t)}</span>`).join(' ') || '—'}</td>
+    </tr>`).join('');
+}
+
+function renderBlackbookVehicles() {
+  const container = document.getElementById('bbVehiclesList');
+  container.innerHTML = currentBlackbookVehicles.map((v, i) => `
+    <div style="display:flex;gap:6px;">
+      <input type="text" class="form-control" placeholder="Plaque" value="${escapeHtml(v.plate || '')}" style="flex:1;" oninput="currentBlackbookVehicles[${i}].plate = this.value">
+      <input type="text" class="form-control" placeholder="Description (marque, modèle, couleur)" value="${escapeHtml(v.description || '')}" style="flex:2;" oninput="currentBlackbookVehicles[${i}].description = this.value">
+      <button type="button" class="btn btn-danger btn-sm" onclick="removeBlackbookVehicleRow(${i})">✕</button>
+    </div>`).join('');
+}
+
+function addBlackbookVehicleRow() {
+  currentBlackbookVehicles.push({ plate: '', description: '' });
+  renderBlackbookVehicles();
+}
+
+function removeBlackbookVehicleRow(i) {
+  currentBlackbookVehicles.splice(i, 1);
+  renderBlackbookVehicles();
+}
+
+function renderBlackbookPhotos() {
+  const container = document.getElementById('bbPhotosGallery');
+  const photos = currentBlackbookEntry?.photos || [];
+  if (photos.length === 0) {
+    container.innerHTML = '<p style="color:var(--text-muted);font-size:12px;">Aucune photo</p>';
+    return;
+  }
+  container.innerHTML = photos.map(url => `
+    <div style="position:relative;">
+      <img src="${API_BASE}${url}" style="width:90px;height:90px;object-fit:cover;border-radius:8px;border:1px solid var(--border-main);">
+      <button onclick="deleteBlackbookPhoto('${url}')" style="position:absolute;top:-6px;right:-6px;background:#ef4444;color:#fff;border:none;border-radius:50%;width:20px;height:20px;cursor:pointer;font-size:11px;line-height:1;">✕</button>
+    </div>`).join('');
+}
+
+function renderBlackbookSightings() {
+  const container = document.getElementById('bbSightingsList');
+  const sightings = (currentBlackbookEntry?.sightings || []).slice().sort((a, b) => b.timestamp - a.timestamp);
+  if (sightings.length === 0) {
+    container.innerHTML = '<p style="color:var(--text-muted);font-size:12px;">Aucun signalement enregistré</p>';
+    return;
+  }
+  container.innerHTML = sightings.map(s => `
+    <div class="provider-row">
+      <div>
+        <div class="provider-row-name">${new Date(s.timestamp).toLocaleString('fr-FR')} — ${BLACKBOOK_CATEGORY_LABELS[s.category] || s.category}</div>
+        ${s.location?.address ? `<div class="provider-row-detail">📍 ${escapeHtml(s.location.address)}</div>` : ''}
+        ${s.notes ? `<div class="provider-row-detail">${escapeHtml(s.notes)}</div>` : ''}
+        <div class="provider-row-detail" style="font-style:italic;">Signalé par ${escapeHtml(s.reportedByName)}</div>
+      </div>
+      <button class="btn btn-danger btn-sm" onclick="deleteSighting('${s.id}')">🗑️</button>
+    </div>`).join('');
+}
+
+async function openBlackbookDetail(entryId) {
+  currentBlackbookVehicles = [];
+  document.getElementById('addSightingForm').style.display = 'none';
+  if (!entryId) {
+    currentBlackbookEntry = null;
+    document.getElementById('blackbookModalTitle').textContent = 'Nouvelle fiche';
+    document.getElementById('blackbookPdfBtn').style.display = 'none';
+    document.getElementById('blackbookDeleteBtn').style.display = 'none';
+    document.getElementById('bbStatusField').style.display = 'none';
+    document.getElementById('blackbookExistingSections').style.display = 'none';
+    ['bbFirstName', 'bbLastName', 'bbAliases', 'bbDateOfBirth', 'bbPhysicalDescription', 'bbTags', 'bbNotes'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('bbRiskLevel').value = 'medium';
+    renderBlackbookVehicles();
+  } else {
+    const entry = blackbookData.find(e => e.id === entryId) || await (await fetch(`${API_BASE}/api/blackbook/${entryId}`)).json();
+    currentBlackbookEntry = entry;
+    currentBlackbookVehicles = (entry.vehicles || []).map(v => ({ ...v }));
+    document.getElementById('blackbookModalTitle').textContent = `${entry.firstName} ${entry.lastName}`.trim() || 'Fiche';
+    document.getElementById('blackbookPdfBtn').style.display = 'inline-flex';
+    document.getElementById('blackbookDeleteBtn').style.display = 'inline-flex';
+    document.getElementById('bbStatusField').style.display = 'block';
+    document.getElementById('blackbookExistingSections').style.display = 'block';
+    document.getElementById('bbFirstName').value = entry.firstName || '';
+    document.getElementById('bbLastName').value = entry.lastName || '';
+    document.getElementById('bbAliases').value = (entry.aliases || []).join(', ');
+    document.getElementById('bbDateOfBirth').value = entry.dateOfBirth || '';
+    document.getElementById('bbRiskLevel').value = entry.riskLevel || 'medium';
+    document.getElementById('bbStatus').value = entry.status || 'active';
+    document.getElementById('bbPhysicalDescription').value = entry.physicalDescription || '';
+    document.getElementById('bbTags').value = (entry.tags || []).join(', ');
+    document.getElementById('bbNotes').value = entry.notes || '';
+    renderBlackbookVehicles();
+    renderBlackbookPhotos();
+    renderBlackbookSightings();
+  }
+  document.getElementById('blackbookModal').style.display = 'flex';
+}
+
+function closeBlackbookModal() {
+  document.getElementById('blackbookModal').style.display = 'none';
+  currentBlackbookEntry = null;
+}
+
+async function saveBlackbookEntry() {
+  const body = {
+    firstName: document.getElementById('bbFirstName').value.trim(),
+    lastName: document.getElementById('bbLastName').value.trim(),
+    aliases: document.getElementById('bbAliases').value.split(',').map(s => s.trim()).filter(Boolean),
+    dateOfBirth: document.getElementById('bbDateOfBirth').value || undefined,
+    riskLevel: document.getElementById('bbRiskLevel').value,
+    physicalDescription: document.getElementById('bbPhysicalDescription').value.trim() || undefined,
+    tags: document.getElementById('bbTags').value.split(',').map(s => s.trim()).filter(Boolean),
+    vehicles: currentBlackbookVehicles.filter(v => v.plate || v.description),
+    notes: document.getElementById('bbNotes').value.trim() || undefined,
+  };
+  if (!body.firstName && !body.lastName) { showToast('Nom ou prénom requis', 'error'); return; }
+  try {
+    if (currentBlackbookEntry) {
+      body.status = document.getElementById('bbStatus').value;
+      const res = await fetch(`${API_BASE}/api/blackbook/${currentBlackbookEntry.id}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error('failed');
+      showToast('Fiche mise à jour', 'success');
+      closeBlackbookModal();
+      loadBlackbook();
+    } else {
+      const res = await fetch(`${API_BASE}/api/blackbook`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error('failed');
+      const created = await res.json();
+      showToast('Fiche créée — vous pouvez maintenant ajouter photos et signalements', 'success');
+      await loadBlackbook();
+      openBlackbookDetail(created.id);
+    }
+  } catch (e) {
+    showToast('Erreur', 'error');
+  }
+}
+
+async function deleteBlackbookEntry() {
+  if (!currentBlackbookEntry) return;
+  if (!confirm(`Supprimer définitivement la fiche de ${currentBlackbookEntry.firstName} ${currentBlackbookEntry.lastName} ?`)) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/blackbook/${currentBlackbookEntry.id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('failed');
+    showToast('Fiche supprimée', 'success');
+    closeBlackbookModal();
+    loadBlackbook();
+  } catch (e) {
+    showToast('Erreur', 'error');
+  }
+}
+
+async function uploadBlackbookPhotos() {
+  if (!currentBlackbookEntry) return;
+  const input = document.getElementById('bbPhotoInput');
+  if (!input.files || input.files.length === 0) return;
+  const formData = new FormData();
+  for (const file of input.files) formData.append('photos', file);
+  try {
+    const res = await fetch(`${API_BASE}/api/blackbook/${currentBlackbookEntry.id}/photos`, { method: 'POST', body: formData });
+    if (!res.ok) throw new Error('failed');
+    const data = await res.json();
+    currentBlackbookEntry.photos = data.photos;
+    renderBlackbookPhotos();
+    showToast('Photo(s) ajoutée(s)', 'success');
+  } catch (e) {
+    showToast('Erreur upload photo', 'error');
+  }
+  input.value = '';
+}
+
+async function deleteBlackbookPhoto(url) {
+  if (!currentBlackbookEntry) return;
+  if (!confirm('Supprimer cette photo ?')) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/blackbook/${currentBlackbookEntry.id}/photos`, {
+      method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
+    });
+    if (!res.ok) throw new Error('failed');
+    const data = await res.json();
+    currentBlackbookEntry.photos = data.photos;
+    renderBlackbookPhotos();
+  } catch (e) {
+    showToast('Erreur', 'error');
+  }
+}
+
+function toggleAddSightingForm() {
+  const form = document.getElementById('addSightingForm');
+  form.style.display = form.style.display === 'none' ? 'block' : 'none';
+  if (form.style.display === 'block' && !document.getElementById('sightingDate').value) {
+    document.getElementById('sightingDate').value = new Date().toISOString().slice(0, 10);
+  }
+}
+
+async function saveSighting() {
+  if (!currentBlackbookEntry) return;
+  const dateVal = document.getElementById('sightingDate').value;
+  const timeVal = document.getElementById('sightingTime').value || '12:00';
+  if (!dateVal) { showToast('Date requise', 'error'); return; }
+  const timestamp = new Date(`${dateVal}T${timeVal}:00`).getTime();
+  const locationText = document.getElementById('sightingLocation').value.trim();
+  try {
+    const res = await fetch(`${API_BASE}/api/blackbook/${currentBlackbookEntry.id}/sightings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        timestamp, category: document.getElementById('sightingCategory').value,
+        location: locationText ? { address: locationText } : undefined,
+        notes: document.getElementById('sightingNotes').value.trim() || undefined,
+      }),
+    });
+    if (!res.ok) throw new Error('failed');
+    const sighting = await res.json();
+    currentBlackbookEntry.sightings = [...(currentBlackbookEntry.sightings || []), sighting];
+    document.getElementById('sightingLocation').value = '';
+    document.getElementById('sightingNotes').value = '';
+    document.getElementById('addSightingForm').style.display = 'none';
+    renderBlackbookSightings();
+    showToast('Signalement ajouté', 'success');
+  } catch (e) {
+    showToast('Erreur', 'error');
+  }
+}
+
+async function deleteSighting(sightingId) {
+  if (!currentBlackbookEntry) return;
+  if (!confirm('Supprimer ce signalement ?')) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/blackbook/${currentBlackbookEntry.id}/sightings/${sightingId}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('failed');
+    currentBlackbookEntry.sightings = (currentBlackbookEntry.sightings || []).filter(s => s.id !== sightingId);
+    renderBlackbookSightings();
+  } catch (e) {
+    showToast('Erreur', 'error');
+  }
+}
+
+async function exportBlackbookPdf() {
+  if (!currentBlackbookEntry) return;
+  // window.open() wouldn't carry the Authorization header this (protected)
+  // route needs — fetch it as a blob through the authenticated fetch instead
+  // and trigger the download from there.
+  try {
+    const res = await fetch(`${API_BASE}/api/blackbook/${currentBlackbookEntry.id}/pdf`);
+    if (!res.ok) throw new Error('failed');
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `blackbook-${(currentBlackbookEntry.lastName || 'sans-nom').replace(/[^a-zA-Z0-9-]/g, '_')}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (e) {
+    showToast('Erreur export PDF', 'error');
   }
 }
 

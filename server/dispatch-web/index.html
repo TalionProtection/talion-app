@@ -54,6 +54,9 @@
       <a href="#" class="nav-item" data-tab="visits">
         <span class="nav-icon">&#x1F527;</span> Visites
       </a>
+      <a href="#" class="nav-item" data-tab="blackbook">
+        <span class="nav-icon">&#x1F575;&#xFE0F;</span> Blackbook
+      </a>
     </nav>
     <div class="sidebar-footer">
       <a href="/admin-console/" class="console-link">&#x1F6E1; Admin Console</a>
@@ -739,6 +742,50 @@
         <div id="peopleEmptyState" class="empty-state" style="display:none;"><div class="empty-icon">👥</div><p>Aucune personne trouvée</p></div>
       </div>
     </section>
+
+    <!-- Blackbook Tab: registry of suspicious persons -->
+    <section class="tab-content" id="tab-blackbook">
+      <div class="toolbar">
+        <div class="toolbar-stats">
+          <span class="stat-badge stat-blue" id="blackbookCount">0 fiche(s)</span>
+          <button class="btn btn-sm" onclick="loadBlackbook()">&#x21BB; Rafraîchir</button>
+          <button class="btn btn-primary btn-sm" onclick="openBlackbookDetail(null)">&#x2795; Nouvelle fiche</button>
+        </div>
+        <div class="visits-filters">
+          <input type="text" id="blackbookSearch" class="form-control" placeholder="🔍 Nom, alias, plaque, lieu, notes..." oninput="renderBlackbookTable()" style="min-width:260px;">
+          <select id="blackbookRiskFilter" class="form-control" onchange="renderBlackbookTable()">
+            <option value="">Tous risques</option>
+            <option value="critical">🔴 Critique</option>
+            <option value="high">🟠 Élevé</option>
+            <option value="medium">🟡 Moyen</option>
+            <option value="low">🟢 Faible</option>
+          </select>
+          <select id="blackbookStatusFilter" class="form-control" onchange="renderBlackbookTable()">
+            <option value="active" selected>Surveillance active</option>
+            <option value="resolved">Résolu</option>
+            <option value="archived">Archivé</option>
+            <option value="">Tous statuts</option>
+          </select>
+        </div>
+      </div>
+      <div class="visits-table-wrap">
+        <table class="visits-table">
+          <thead>
+            <tr>
+              <th onclick="sortBlackbookBy('lastName')">Nom ⇅</th>
+              <th>Alias</th>
+              <th onclick="sortBlackbookBy('riskLevel')">Risque ⇅</th>
+              <th onclick="sortBlackbookBy('status')">Statut ⇅</th>
+              <th onclick="sortBlackbookBy('lastSeenAt')">Dernier signalement ⇅</th>
+              <th>Lieu</th>
+              <th>Tags</th>
+            </tr>
+          </thead>
+          <tbody id="blackbookTableBody"></tbody>
+        </table>
+        <div id="blackbookEmptyState" class="empty-state" style="display:none;"><div class="empty-icon">🕵️</div><p>Aucune fiche trouvée</p></div>
+      </div>
+    </section>
   </main>
 
   <!-- Presence "which place" picker (2nd step after clicking Présent) -->
@@ -794,6 +841,96 @@
 
   <!-- Known People & Planned Interventions Modal -->
   <!-- Residence Picker (step before adding a new person/visit from scratch) -->
+  <!-- Blackbook Detail/Edit Modal -->
+  <div class="modal-overlay" id="blackbookModal" style="display:none;">
+    <div class="modal" style="max-width:620px;max-height:88vh;overflow-y:auto;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+        <h3 class="modal-title" id="blackbookModalTitle" style="margin:0;">Nouvelle fiche</h3>
+        <div style="display:flex;gap:6px;">
+          <button class="btn btn-secondary btn-sm" id="blackbookPdfBtn" style="display:none;" onclick="exportBlackbookPdf()">📄 Export PDF</button>
+          <button class="btn btn-danger btn-sm" id="blackbookDeleteBtn" style="display:none;" onclick="deleteBlackbookEntry()">🗑️ Supprimer</button>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px;">
+        <div class="form-group"><label>Prénom</label><input type="text" id="bbFirstName" class="form-control"></div>
+        <div class="form-group"><label>Nom</label><input type="text" id="bbLastName" class="form-control"></div>
+      </div>
+      <div class="form-group"><label>Alias (séparés par des virgules)</label><input type="text" id="bbAliases" class="form-control" placeholder="Ex: Le Grand, Fifi"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+        <div class="form-group"><label>Date de naissance</label><input type="date" id="bbDateOfBirth" class="form-control"></div>
+        <div class="form-group">
+          <label>Niveau de risque</label>
+          <select id="bbRiskLevel" class="form-control">
+            <option value="low">🟢 Faible</option>
+            <option value="medium" selected>🟡 Moyen</option>
+            <option value="high">🟠 Élevé</option>
+            <option value="critical">🔴 Critique</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group" id="bbStatusField" style="display:none;">
+        <label>Statut</label>
+        <select id="bbStatus" class="form-control">
+          <option value="active">Surveillance active</option>
+          <option value="resolved">Résolu</option>
+          <option value="archived">Archivé</option>
+        </select>
+      </div>
+      <div class="form-group"><label>Description physique</label><textarea id="bbPhysicalDescription" class="form-control" placeholder="Taille, corpulence, signes distinctifs, tenue habituelle..." style="min-height:60px;"></textarea></div>
+      <div class="form-group"><label>Tags (séparés par des virgules)</label><input type="text" id="bbTags" class="form-control" placeholder="Ex: véhicule volé, vu près école"></div>
+
+      <div class="form-group">
+        <label>Véhicule(s)</label>
+        <div id="bbVehiclesList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:6px;"></div>
+        <button type="button" class="btn btn-sm" onclick="addBlackbookVehicleRow()">+ Ajouter un véhicule</button>
+      </div>
+
+      <div class="form-group"><label>Notes libres</label><textarea id="bbNotes" class="form-control" placeholder="Toute information utile..." style="min-height:70px;"></textarea></div>
+
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin:12px 0;">
+        <button class="btn btn-secondary" onclick="closeBlackbookModal()">Annuler</button>
+        <button class="btn btn-primary" onclick="saveBlackbookEntry()">💾 Enregistrer</button>
+      </div>
+
+      <div id="blackbookExistingSections" style="display:none;">
+        <hr style="border-color:var(--border-subtle);margin:16px 0;">
+
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <span style="font-size:12px;font-weight:700;color:var(--text-muted);text-transform:uppercase;">Photos</span>
+          <label class="btn btn-sm" style="cursor:pointer;">
+            📷 Ajouter
+            <input type="file" id="bbPhotoInput" accept="image/*" multiple style="display:none;" onchange="uploadBlackbookPhotos()">
+          </label>
+        </div>
+        <div id="bbPhotosGallery" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;"></div>
+
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <span style="font-size:12px;font-weight:700;color:var(--text-muted);text-transform:uppercase;">Signalements</span>
+          <button class="btn btn-sm" onclick="toggleAddSightingForm()">+ Ajouter</button>
+        </div>
+        <div id="addSightingForm" style="display:none;background:var(--bg-panel);border-radius:8px;padding:10px;margin-bottom:12px;">
+          <div style="display:flex;gap:8px;margin-bottom:8px;">
+            <input type="date" id="sightingDate" class="form-control" style="flex:1;">
+            <input type="time" id="sightingTime" class="form-control" value="12:00" style="flex:1;">
+          </div>
+          <select id="sightingCategory" class="form-control" style="margin-bottom:8px;">
+            <option value="prise_info">Prise d'info</option>
+            <option value="intrusion">Intrusion</option>
+            <option value="menaces">Menaces</option>
+            <option value="envoi_courrier">Envoi de courrier</option>
+            <option value="reperage">Repérage</option>
+            <option value="autre" selected>Autre</option>
+          </select>
+          <input type="text" id="sightingLocation" class="form-control" placeholder="Lieu (adresse ou description)" style="margin-bottom:8px;">
+          <textarea id="sightingNotes" class="form-control" placeholder="Notes sur ce signalement" style="margin-bottom:8px;min-height:50px;"></textarea>
+          <button class="btn btn-primary" style="width:100%;" onclick="saveSighting()">Enregistrer le signalement</button>
+        </div>
+        <div id="bbSightingsList"></div>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-overlay" id="residencePickerModal" style="display:none;">
     <div class="modal" style="max-width:480px;">
       <h3 class="modal-title">Choisir une résidence</h3>
