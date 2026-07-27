@@ -715,7 +715,7 @@ function switchTab(tab) {
   document.querySelector(`.nav-item[data-tab="${tab}"]`)?.classList.add('active');
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.getElementById(`tab-${tab}`)?.classList.add('active');
-  const titles = { overview: "Vue d'ensemble", incidents: "Gestion des incidents", responders: "Unités d'intervention", broadcast: "Diffusion", map: "Carte en direct", messages: "Messages", patrol: "Rapports de Ronde", ptt: "Push-to-Talk", archives: "Archives", families: "Familles" };
+  const titles = { overview: "Vue d'ensemble", incidents: "Gestion des incidents", responders: "Unités d'intervention", broadcast: "Diffusion", map: "Carte en direct", messages: "Messages", patrol: "Rapports de Ronde", ptt: "Push-to-Talk", archives: "Archives", families: "Familles", visits: "Visites" };
   document.getElementById('pageTitle').textContent = titles[tab] || tab;
   if (tab === 'map') {
     setTimeout(() => { if (dispatchMap) { dispatchMap.invalidateSize(); } else { initMap(); } }, 100);
@@ -728,6 +728,9 @@ function switchTab(tab) {
   }
   if (tab === 'families') {
     loadFamilyGroups();
+  }
+  if (tab === 'visits') {
+    loadVisits();
   }
 }
 
@@ -1274,6 +1277,80 @@ async function loadUpcomingInterventions() {
     console.error('[Interventions] Load error:', e);
     container.innerHTML = '<div class="empty-state" style="padding:12px;"><p>Erreur de chargement</p></div>';
   }
+}
+
+// ─── Visits Tab: searchable/sortable table of every planned visit ─────
+let visitsData = [];
+let visitsSort = { key: 'scheduledStart', dir: 1 };
+
+async function loadVisits() {
+  const rangeVal = parseInt(document.getElementById('visitsRangeFilter')?.value || '30', 10);
+  const now = Date.now();
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const from = rangeVal < 0 ? now + rangeVal * DAY_MS : now;
+  const to = rangeVal < 0 ? now : now + rangeVal * DAY_MS;
+  try {
+    const res = await fetch(`${API_BASE}/api/interventions/upcoming?from=${from}&to=${to}`);
+    visitsData = res.ok ? await res.json() : [];
+  } catch (e) {
+    console.error('[Visits] Load error:', e);
+    visitsData = [];
+  }
+  renderVisitsTable();
+}
+
+function sortVisitsBy(key) {
+  if (visitsSort.key === key) visitsSort.dir *= -1;
+  else visitsSort = { key, dir: 1 };
+  renderVisitsTable();
+}
+
+function renderVisitsTable() {
+  const tbody = document.getElementById('visitsTableBody');
+  const emptyState = document.getElementById('visitsEmptyState');
+  if (!tbody) return;
+
+  const query = (document.getElementById('visitsSearch')?.value || '').trim().toLowerCase();
+  const categoryFilter = document.getElementById('visitsCategoryFilter')?.value || '';
+
+  let rows = visitsData.filter(o => {
+    if (categoryFilter && o.category !== categoryFilter) return false;
+    if (!query) return true;
+    const haystack = [o.personName, o.personCompany, o.personVehiclePlate, o.personPhone, o.addressLabel, o.address, o.ownerName]
+      .filter(Boolean).join(' ').toLowerCase();
+    return haystack.includes(query);
+  });
+
+  rows.sort((a, b) => {
+    const av = a[visitsSort.key] ?? '';
+    const bv = b[visitsSort.key] ?? '';
+    if (av < bv) return -1 * visitsSort.dir;
+    if (av > bv) return 1 * visitsSort.dir;
+    return 0;
+  });
+
+  document.getElementById('visitsCount').textContent = `${rows.length} visite${rows.length !== 1 ? 's' : ''}`;
+
+  if (rows.length === 0) {
+    tbody.innerHTML = '';
+    if (emptyState) emptyState.style.display = 'block';
+    return;
+  }
+  if (emptyState) emptyState.style.display = 'none';
+
+  const STATUS_LABEL = { scheduled: '🕓 Prévue', completed: '✅ Terminée', cancelled: '❌ Annulée' };
+  tbody.innerHTML = rows.map(o => `
+    <tr onclick="openProvidersModal('${o.addressId}', '${escapeHtml(o.addressLabel || '').replace(/'/g, "\\'")}')" title="Cliquer pour gérer cette résidence">
+      <td>${new Date(o.scheduledStart).toLocaleString('fr-FR', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}${o.recurrence ? ' 🔁' : ''}</td>
+      <td><strong>${escapeHtml(o.personName)}</strong></td>
+      <td>${escapeHtml(o.personCompany || '—')}</td>
+      <td>${PROVIDER_CATEGORY_LABEL[o.category] || escapeHtml(o.category || '—')}</td>
+      <td>${escapeHtml(o.personPhone || '—')}</td>
+      <td>${escapeHtml(o.personVehiclePlate || '—')}</td>
+      <td>${escapeHtml(o.addressLabel || '—')}</td>
+      <td>${escapeHtml(o.ownerName || '—')}</td>
+      <td>${STATUS_LABEL[o.status] || o.status}</td>
+    </tr>`).join('');
 }
 
 // ─── Known People & Planned Interventions (per residence) ─────────────

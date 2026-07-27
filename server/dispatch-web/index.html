@@ -51,6 +51,9 @@
       <a href="#" class="nav-item" data-tab="families">
         <span class="nav-icon">&#x1F3E0;</span> Familles
       </a>
+      <a href="#" class="nav-item" data-tab="visits">
+        <span class="nav-icon">&#x1F527;</span> Visites
+      </a>
     </nav>
     <div class="sidebar-footer">
       <a href="/admin-console/" class="console-link">&#x1F6E1; Admin Console</a>
@@ -660,6 +663,57 @@
         <div id="interventionsUpcomingList" class="interventions-upcoming-list" style="display:none;"></div>
       </div>
       <div id="familyGroupsList" class="family-groups-list"></div>
+    </section>
+
+    <!-- Visits Tab: searchable/sortable table of all planned interventions across every residence -->
+    <section class="tab-content" id="tab-visits">
+      <div class="toolbar">
+        <div class="toolbar-stats">
+          <span class="stat-badge stat-blue" id="visitsCount">0 visite(s)</span>
+          <button class="btn btn-sm" onclick="loadVisits()">&#x21BB; Rafraîchir</button>
+        </div>
+        <div class="visits-filters">
+          <input type="text" id="visitsSearch" class="form-control" placeholder="🔍 Nom, société, plaque, résidence, famille..." oninput="renderVisitsTable()" style="min-width:280px;">
+          <select id="visitsRangeFilter" class="form-control" onchange="loadVisits()">
+            <option value="7">7 prochains jours</option>
+            <option value="30" selected>30 prochains jours</option>
+            <option value="90">90 prochains jours</option>
+            <option value="-30">30 derniers jours</option>
+          </select>
+          <select id="visitsCategoryFilter" class="form-control" onchange="renderVisitsTable()">
+            <option value="">Toutes catégories</option>
+            <option value="jardinier">🌳 Jardinier</option>
+            <option value="piscine">🏊 Piscine</option>
+            <option value="plombier">🔧 Plombier</option>
+            <option value="electricien">⚡ Électricien</option>
+            <option value="menage">🧹 Ménage</option>
+            <option value="securite">🔒 Sécurité</option>
+            <option value="entrepreneur">🏗️ Entrepreneur</option>
+            <option value="livraison">📦 Livraison</option>
+            <option value="visiteur">👤 Visiteur</option>
+            <option value="autre">❓ Autre</option>
+          </select>
+        </div>
+      </div>
+      <div class="visits-table-wrap">
+        <table class="visits-table">
+          <thead>
+            <tr>
+              <th onclick="sortVisitsBy('scheduledStart')">Date / Heure ⇅</th>
+              <th onclick="sortVisitsBy('personName')">Personne ⇅</th>
+              <th onclick="sortVisitsBy('personCompany')">Société ⇅</th>
+              <th onclick="sortVisitsBy('category')">Catégorie ⇅</th>
+              <th onclick="sortVisitsBy('personPhone')">Téléphone</th>
+              <th onclick="sortVisitsBy('personVehiclePlate')">Plaque ⇅</th>
+              <th onclick="sortVisitsBy('addressLabel')">Résidence ⇅</th>
+              <th onclick="sortVisitsBy('ownerName')">Famille ⇅</th>
+              <th>Statut</th>
+            </tr>
+          </thead>
+          <tbody id="visitsTableBody"></tbody>
+        </table>
+        <div id="visitsEmptyState" class="empty-state" style="display:none;"><div class="empty-icon">🔧</div><p>Aucune visite trouvée</p></div>
+      </div>
     </section>
   </main>
 

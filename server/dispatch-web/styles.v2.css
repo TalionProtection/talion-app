@@ -286,6 +286,18 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .provider-row-name { font-size: 13px; font-weight: 700; color: var(--text-primary); }
 .provider-row-category { font-size: 11px; font-weight: 500; color: var(--text-muted); }
 .provider-row-detail { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+/* ─── Visits Tab ─────────────────────────────────────────────────────── */
+.visits-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.visits-table-wrap { padding: 0 24px 24px; overflow-x: auto; }
+.visits-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.visits-table th {
+  text-align: left; padding: 8px 10px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--text-muted); border-bottom: 1px solid var(--border-main); cursor: pointer; user-select: none; white-space: nowrap;
+}
+.visits-table th:hover { color: var(--text-primary); }
+.visits-table td { padding: 8px 10px; border-bottom: 1px solid var(--border-subtle); vertical-align: middle; color: var(--text-body); white-space: nowrap; }
+.visits-table tr:hover { background: var(--bg-hover); cursor: pointer; }
 .family-member-actions .btn-sm { white-space: nowrap; }
 .inc-desc { font-size: 13px; color: var(--text-secondary); margin-bottom: 8px; line-height: 1.4; }
 .inc-meta { font-size: 12px; color: var(--text-faint); margin-bottom: 10px; }

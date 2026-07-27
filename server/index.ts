@@ -6668,9 +6668,11 @@ app.get('/api/interventions/upcoming', requireAuth, (req, res) => {
       if (iv.status === 'cancelled') continue;
       const owner = adminUsers.get(iv.userId);
       const addr = (userAddresses.get(iv.userId) || []).find(a => a.id === addressId);
+      const person = iv.personId ? (knownPeople.get(addressId) || []).find(p => p.id === iv.personId) : undefined;
       const base = {
         interventionId: iv.id, addressId, addressLabel: addr?.label, address: addr?.address,
         ownerName: owner?.name, personName: iv.personName, category: iv.category, status: iv.status, notes: iv.notes,
+        personCompany: person?.company, personPhone: person?.phone, personVehiclePlate: person?.vehiclePlate,
       };
       if (iv.recurrence?.frequency === 'weekly' && iv.recurrence.daysOfWeek?.length) {
         const startTime = new Date(iv.scheduledStart);
