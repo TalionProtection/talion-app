@@ -10,6 +10,23 @@ import fs from 'fs';
 import { requireAuth, requireRole, optionalAuth } from './auth-middleware';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 
+// ─── Crash safety net ─────────────────────────────────────────────────────
+// Without this, a single unhandled promise rejection anywhere in this file
+// (a missed .catch() in any one route, timer, or WS handler) takes down the
+// ENTIRE server for every connected family/dispatcher/responder — Node's
+// default behavior is to crash the whole process, not just the offending
+// request — until Render notices and restarts it. Log and keep running
+// instead. A synchronous uncaughtException is left to actually exit, since
+// process state may be genuinely corrupted by that point; Render restarts
+// it immediately either way, but this at least leaves a clear log line.
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection] Kept server alive after:', reason);
+});
+process.on('uncaughtException', (error) => {
+  console.error('[uncaughtException] Server crashing:', error);
+  process.exit(1);
+});
+
 // ─── Supabase Admin Client (singleton) ───────────────────────────────────
 const supabaseAdmin = createSupabaseClient(
   process.env.SUPABASE_URL || '',
