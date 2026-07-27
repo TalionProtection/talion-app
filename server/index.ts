@@ -6713,13 +6713,13 @@ app.get('/api/users/:id/addresses', (req, res) => {
 // instead of a hardcoded city.
 app.get('/dispatch/all-residences', (req, res) => {
   const now = Date.now();
-  const result: { latitude: number; longitude: number; label: string; userName: string }[] = [];
+  const result: { id: string; userId: string; latitude: number; longitude: number; label: string; address: string; userName: string }[] = [];
   for (const [userId, addresses] of userAddresses) {
     const userName = adminUsers.get(userId)?.name || userId;
     for (const a of addresses) {
       if (a.latitude == null || a.longitude == null) continue;
       if (a.temporary && a.expiresAt && a.expiresAt <= now) continue;
-      result.push({ latitude: a.latitude, longitude: a.longitude, label: a.label, userName });
+      result.push({ id: a.id, userId, latitude: a.latitude, longitude: a.longitude, label: a.label, address: a.address, userName });
     }
   }
   res.json(result);

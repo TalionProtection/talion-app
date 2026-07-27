@@ -1283,6 +1283,48 @@ async function loadUpcomingInterventions() {
 let visitsData = [];
 let visitsSort = { key: 'scheduledStart', dir: 1 };
 
+// ─── Residence Picker — entry point to add a person/visit "from scratch"
+// (not already viewing a specific family member's chip) ────────────────
+let allResidencesCache = null;
+
+async function openResidencePicker() {
+  document.getElementById('residencePickerSearch').value = '';
+  document.getElementById('residencePickerModal').style.display = 'flex';
+  if (!allResidencesCache) {
+    try {
+      const res = await fetch(`${API_BASE}/dispatch/all-residences`);
+      allResidencesCache = res.ok ? await res.json() : [];
+    } catch (e) {
+      allResidencesCache = [];
+    }
+  }
+  renderResidencePickerList();
+}
+
+function closeResidencePicker() {
+  document.getElementById('residencePickerModal').style.display = 'none';
+}
+
+function renderResidencePickerList() {
+  const container = document.getElementById('residencePickerList');
+  const query = (document.getElementById('residencePickerSearch').value || '').trim().toLowerCase();
+  const list = (allResidencesCache || []).filter(r => {
+    if (!query) return true;
+    return [r.label, r.address, r.userName].filter(Boolean).join(' ').toLowerCase().includes(query);
+  });
+  if (list.length === 0) {
+    container.innerHTML = '<div class="presence-place-empty">Aucune résidence trouvée</div>';
+    return;
+  }
+  container.innerHTML = list.map(r => `
+    <div class="presence-place-item" onclick="closeResidencePicker(); openProvidersModal('${r.id}', '${escapeHtml(r.label).replace(/'/g, "\\'")}')">
+      <div>
+        <div style="font-weight:600;">${getPlaceIcon(r.label)} ${escapeHtml(r.label)}</div>
+        <div style="font-size:12px;color:var(--text-muted);">${escapeHtml(r.userName)} — ${escapeHtml(r.address || '')}</div>
+      </div>
+    </div>`).join('');
+}
+
 async function loadVisits() {
   const rangeVal = parseInt(document.getElementById('visitsRangeFilter')?.value || '30', 10);
   const now = Date.now();

@@ -671,6 +671,7 @@
         <div class="toolbar-stats">
           <span class="stat-badge stat-blue" id="visitsCount">0 visite(s)</span>
           <button class="btn btn-sm" onclick="loadVisits()">&#x21BB; Rafraîchir</button>
+          <button class="btn btn-primary btn-sm" onclick="openResidencePicker()">&#x2795; Nouvelle visite</button>
         </div>
         <div class="visits-filters">
           <input type="text" id="visitsSearch" class="form-control" placeholder="🔍 Nom, société, plaque, résidence, famille..." oninput="renderVisitsTable()" style="min-width:280px;">
@@ -769,6 +770,18 @@
   </div>
 
   <!-- Known People & Planned Interventions Modal -->
+  <!-- Residence Picker (step before adding a new person/visit from scratch) -->
+  <div class="modal-overlay" id="residencePickerModal" style="display:none;">
+    <div class="modal" style="max-width:480px;">
+      <h3 class="modal-title">Choisir une résidence</h3>
+      <input type="text" id="residencePickerSearch" class="form-control" placeholder="🔍 Nom, adresse, famille..." oninput="renderResidencePickerList()" style="margin-bottom:12px;">
+      <div id="residencePickerList" class="presence-place-list" style="max-height:400px;overflow-y:auto;"></div>
+      <div style="display:flex;justify-content:flex-end;margin-top:16px;">
+        <button class="btn btn-secondary" onclick="closeResidencePicker()">Annuler</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-overlay" id="providersModal" style="display:none;">
     <div class="modal" style="max-width:520px;">
       <h3 class="modal-title" id="providersModalTitle">🔧 Prestataires</h3>
