@@ -730,7 +730,7 @@ function switchTab(tab) {
     loadFamilyGroups();
   }
   if (tab === 'visits') {
-    loadVisits();
+    refreshVisitsSubtab();
   }
 }
 
@@ -1279,9 +1279,100 @@ async function loadUpcomingInterventions() {
   }
 }
 
-// ─── Visits Tab: searchable/sortable table of every planned visit ─────
+// ─── Visits Tab: planned visits + a known-people directory (for doubt
+// resolution — "is this person/plate/company known anywhere" independent
+// of whether they have a visit scheduled right now) ─────────────────────
 let visitsData = [];
 let visitsSort = { key: 'scheduledStart', dir: 1 };
+let peopleData = [];
+let peopleSort = { key: 'name', dir: 1 };
+let visitsActiveSubtab = 'visits';
+
+function switchVisitsSubtab(subtab) {
+  visitsActiveSubtab = subtab;
+  document.getElementById('visitsSubtabBtn-visits').classList.toggle('active', subtab === 'visits');
+  document.getElementById('visitsSubtabBtn-people').classList.toggle('active', subtab === 'people');
+  document.getElementById('visitsTableWrap').style.display = subtab === 'visits' ? 'block' : 'none';
+  document.getElementById('peopleTableWrap').style.display = subtab === 'people' ? 'block' : 'none';
+  document.getElementById('visitsRangeFilter').style.display = subtab === 'visits' ? '' : 'none';
+  document.getElementById('visitsSearch').placeholder = subtab === 'visits'
+    ? '🔍 Nom, société, plaque, résidence, famille...'
+    : '🔍 Nom, société, plaque, résidence, famille (toutes personnes connues)...';
+  if (subtab === 'people' && peopleData.length === 0) loadKnownPeopleAll();
+  else renderCurrentVisitsSubtab();
+}
+
+function refreshVisitsSubtab() {
+  if (visitsActiveSubtab === 'visits') loadVisits();
+  else loadKnownPeopleAll();
+}
+
+function renderCurrentVisitsSubtab() {
+  if (visitsActiveSubtab === 'visits') renderVisitsTable();
+  else renderPeopleTable();
+}
+
+async function loadKnownPeopleAll() {
+  try {
+    const res = await fetch(`${API_BASE}/api/known-people/all`);
+    peopleData = res.ok ? await res.json() : [];
+  } catch (e) {
+    console.error('[Visits] Load known people error:', e);
+    peopleData = [];
+  }
+  renderPeopleTable();
+}
+
+function sortPeopleBy(key) {
+  if (peopleSort.key === key) peopleSort.dir *= -1;
+  else peopleSort = { key, dir: 1 };
+  renderPeopleTable();
+}
+
+function renderPeopleTable() {
+  const tbody = document.getElementById('peopleTableBody');
+  const emptyState = document.getElementById('peopleEmptyState');
+  if (!tbody) return;
+
+  const query = (document.getElementById('visitsSearch')?.value || '').trim().toLowerCase();
+  const categoryFilter = document.getElementById('visitsCategoryFilter')?.value || '';
+
+  let rows = peopleData.filter(p => {
+    if (categoryFilter && p.category !== categoryFilter) return false;
+    if (!query) return true;
+    const haystack = [p.name, p.company, p.vehiclePlate, p.phone, p.addressLabel, p.address, p.ownerName]
+      .filter(Boolean).join(' ').toLowerCase();
+    return haystack.includes(query);
+  });
+
+  rows.sort((a, b) => {
+    const av = a[peopleSort.key] ?? '';
+    const bv = b[peopleSort.key] ?? '';
+    if (av < bv) return -1 * peopleSort.dir;
+    if (av > bv) return 1 * peopleSort.dir;
+    return 0;
+  });
+
+  document.getElementById('visitsCount').textContent = `${rows.length} personne${rows.length !== 1 ? 's' : ''}`;
+
+  if (rows.length === 0) {
+    tbody.innerHTML = '';
+    if (emptyState) emptyState.style.display = 'block';
+    return;
+  }
+  if (emptyState) emptyState.style.display = 'none';
+
+  tbody.innerHTML = rows.map(p => `
+    <tr onclick="openProvidersModal('${p.addressId}', '${escapeHtml(p.addressLabel || '').replace(/'/g, "\\'")}')" title="Cliquer pour gérer cette résidence">
+      <td><strong>${escapeHtml(p.name)}</strong></td>
+      <td>${escapeHtml(p.company || '—')}</td>
+      <td>${PROVIDER_CATEGORY_LABEL[p.category] || escapeHtml(p.category || '—')}</td>
+      <td>${escapeHtml(p.phone || '—')}</td>
+      <td>${escapeHtml(p.vehiclePlate || '—')}</td>
+      <td>${escapeHtml(p.addressLabel || '—')}</td>
+      <td>${escapeHtml(p.ownerName || '—')}</td>
+    </tr>`).join('');
+}
 
 // ─── Residence Picker — entry point to add a person/visit "from scratch"
 // (not already viewing a specific family member's chip) ────────────────

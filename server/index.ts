@@ -6652,6 +6652,31 @@ app.delete('/api/addresses/:addressId/interventions/:interventionId', requireAut
   res.json({ success: true });
 });
 
+// GET /api/known-people/all — every known provider/visitor across every residence,
+// regardless of whether they currently have a scheduled visit. This is the "who is
+// this person/plate/company" lookup for doubt resolution (someone's at the gate or
+// on camera and dispatch needs to check if they're a known contact anywhere at all,
+// not just today's calendar).
+app.get('/api/known-people/all', requireAuth, (req, res) => {
+  const caller = req.supabaseUser!;
+  const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder';
+  if (!isStaff) return res.status(403).json({ error: 'Staff only' });
+  const result: any[] = [];
+  for (const [addressId, people] of knownPeople) {
+    for (const p of people) {
+      const owner = adminUsers.get(p.userId);
+      const addr = (userAddresses.get(p.userId) || []).find(a => a.id === addressId);
+      result.push({
+        id: p.id, addressId, addressLabel: addr?.label, address: addr?.address, ownerName: owner?.name,
+        name: p.name, category: p.category, company: p.company, phone: p.phone, email: p.email,
+        vehiclePlate: p.vehiclePlate, vehicleDescription: p.vehicleDescription, notes: p.notes,
+      });
+    }
+  }
+  result.sort((a, b) => a.name.localeCompare(b.name));
+  res.json(result);
+});
+
 // GET /api/interventions/upcoming?from=&to= — cross-residence calendar for staff situational
 // awareness ("who's expected where today"), expanding simple weekly recurrences into
 // concrete occurrences within [from, to]. Defaults to the next 7 days.

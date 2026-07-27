@@ -665,23 +665,27 @@
       <div id="familyGroupsList" class="family-groups-list"></div>
     </section>
 
-    <!-- Visits Tab: searchable/sortable table of all planned interventions across every residence -->
+    <!-- Visits Tab: searchable/sortable table of planned visits + a known-people directory -->
     <section class="tab-content" id="tab-visits">
       <div class="toolbar">
         <div class="toolbar-stats">
-          <span class="stat-badge stat-blue" id="visitsCount">0 visite(s)</span>
-          <button class="btn btn-sm" onclick="loadVisits()">&#x21BB; Rafraîchir</button>
-          <button class="btn btn-primary btn-sm" onclick="openResidencePicker()">&#x2795; Nouvelle visite</button>
+          <div class="visits-subtabs">
+            <button class="visits-subtab active" id="visitsSubtabBtn-visits" onclick="switchVisitsSubtab('visits')">📅 Visites prévues</button>
+            <button class="visits-subtab" id="visitsSubtabBtn-people" onclick="switchVisitsSubtab('people')">👥 Personnes connues</button>
+          </div>
+          <span class="stat-badge stat-blue" id="visitsCount">0</span>
+          <button class="btn btn-sm" onclick="refreshVisitsSubtab()">&#x21BB; Rafraîchir</button>
+          <button class="btn btn-primary btn-sm" onclick="openResidencePicker()">&#x2795; Ajouter (personne / visite)</button>
         </div>
         <div class="visits-filters">
-          <input type="text" id="visitsSearch" class="form-control" placeholder="🔍 Nom, société, plaque, résidence, famille..." oninput="renderVisitsTable()" style="min-width:280px;">
+          <input type="text" id="visitsSearch" class="form-control" placeholder="🔍 Nom, société, plaque, résidence, famille..." oninput="renderCurrentVisitsSubtab()" style="min-width:280px;">
           <select id="visitsRangeFilter" class="form-control" onchange="loadVisits()">
             <option value="7">7 prochains jours</option>
             <option value="30" selected>30 prochains jours</option>
             <option value="90">90 prochains jours</option>
             <option value="-30">30 derniers jours</option>
           </select>
-          <select id="visitsCategoryFilter" class="form-control" onchange="renderVisitsTable()">
+          <select id="visitsCategoryFilter" class="form-control" onchange="renderCurrentVisitsSubtab()">
             <option value="">Toutes catégories</option>
             <option value="jardinier">🌳 Jardinier</option>
             <option value="piscine">🏊 Piscine</option>
@@ -696,7 +700,8 @@
           </select>
         </div>
       </div>
-      <div class="visits-table-wrap">
+
+      <div class="visits-table-wrap" id="visitsTableWrap">
         <table class="visits-table">
           <thead>
             <tr>
@@ -714,6 +719,24 @@
           <tbody id="visitsTableBody"></tbody>
         </table>
         <div id="visitsEmptyState" class="empty-state" style="display:none;"><div class="empty-icon">🔧</div><p>Aucune visite trouvée</p></div>
+      </div>
+
+      <div class="visits-table-wrap" id="peopleTableWrap" style="display:none;">
+        <table class="visits-table">
+          <thead>
+            <tr>
+              <th onclick="sortPeopleBy('name')">Nom ⇅</th>
+              <th onclick="sortPeopleBy('company')">Société ⇅</th>
+              <th onclick="sortPeopleBy('category')">Catégorie ⇅</th>
+              <th onclick="sortPeopleBy('phone')">Téléphone</th>
+              <th onclick="sortPeopleBy('vehiclePlate')">Plaque ⇅</th>
+              <th onclick="sortPeopleBy('addressLabel')">Résidence ⇅</th>
+              <th onclick="sortPeopleBy('ownerName')">Famille ⇅</th>
+            </tr>
+          </thead>
+          <tbody id="peopleTableBody"></tbody>
+        </table>
+        <div id="peopleEmptyState" class="empty-state" style="display:none;"><div class="empty-icon">👥</div><p>Aucune personne trouvée</p></div>
       </div>
     </section>
   </main>
