@@ -4338,6 +4338,31 @@ app.get('/api/users', (req, res) => {
   res.json(allUsers);
 });
 
+// GET /api/messaging/contacts?userId=X - the same directory as /api/users, but
+// split into sections for the "new conversation" contact picker: the caller's
+// direct family (spouse/child/parent/sibling — same relation set the presence
+// system already uses), Dispatch (dispatcher + admin, so a responder always has
+// a specific person to reach), and everyone else. Lets the picker show curated
+// sections instead of one flat, undifferentiated list of every user.
+app.get('/api/messaging/contacts', (req, res) => {
+  const callerId = req.query.userId as string;
+  const familyIds = new Set(callerId ? getFamilyMemberIds(callerId) : []);
+  const toContact = (u: AdminUser) => ({ id: u.id, name: u.name, email: u.email, role: u.role, tags: u.tags || [] });
+
+  const family: ReturnType<typeof toContact>[] = [];
+  const dispatch: ReturnType<typeof toContact>[] = [];
+  const others: ReturnType<typeof toContact>[] = [];
+
+  adminUsers.forEach((u) => {
+    if (u.status !== 'active' || u.id === callerId) return;
+    if (familyIds.has(u.id)) family.push(toContact(u));
+    else if (u.role === 'dispatcher' || u.role === 'admin') dispatch.push(toContact(u));
+    else others.push(toContact(u));
+  });
+
+  res.json({ family, dispatch, others });
+});
+
 // GET /api/tags - list all unique tags
 app.get('/api/tags', (req, res) => {
   const tagSet = new Set<string>();

@@ -6,6 +6,7 @@ import {
   TouchableOpacity,
   TextInput,
   FlatList,
+  SectionList,
   KeyboardAvoidingView,
   Platform,
   Modal,
@@ -296,6 +297,7 @@ export default function MessagesScreen() {
   const [conversations, setConversations] = useState<ServerConversation[]>([]);
   const [chatMessages, setChatMessages] = useState<ServerMessage[]>([]);
   const [users, setUsers] = useState<ServerUser[]>([]);
+  const [contacts, setContacts] = useState<{ family: ServerUser[]; dispatch: ServerUser[]; others: ServerUser[] }>({ family: [], dispatch: [], others: [] });
   const [allTags, setAllTags] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [sendingMedia, setSendingMedia] = useState(false);
@@ -344,6 +346,16 @@ export default function MessagesScreen() {
     }
   }, [user?.id]);
 
+  const fetchContacts = useCallback(async () => {
+    if (!user?.id) return;
+    try {
+      const data = await apiGet<{ family: ServerUser[]; dispatch: ServerUser[]; others: ServerUser[] }>(`/api/messaging/contacts?userId=${user.id}`);
+      setContacts(data);
+    } catch (e) {
+      console.warn('[Messages] Failed to fetch contacts:', e);
+    }
+  }, [user?.id]);
+
   const fetchTags = useCallback(async () => {
     try {
       const data = await apiGet<string[]>('/api/tags');
@@ -384,11 +396,14 @@ export default function MessagesScreen() {
 
   // Load users and tags when opening new conversation views
   useEffect(() => {
+    if (view === 'new-direct') {
+      fetchContacts();
+    }
     if (view === 'new-direct' || view === 'new-group') {
       fetchUsers();
       fetchTags();
     }
-  }, [view, fetchUsers, fetchTags]);
+  }, [view, fetchUsers, fetchTags, fetchContacts]);
 
   // ─── Actions ────────────────────────────────────────────────────────────
 
@@ -557,6 +572,30 @@ export default function MessagesScreen() {
       setLoading(false);
     }
   }, [user?.id, fetchConversations]);
+
+  // "Toute ma famille" quick action — skips the manual member picker and
+  // creates a group with every direct relative (spouse/child/parent/sibling)
+  // in one tap, reusing the same group-conversation endpoint as a manual pick.
+  const handleCreateFamilyGroup = useCallback(async () => {
+    if (!user?.id || contacts.family.length === 0) return;
+    setLoading(true);
+    try {
+      const conv = await apiPost<ServerConversation>('/api/conversations', {
+        type: 'group',
+        name: 'Ma famille',
+        createdBy: user.id,
+        participantIds: [user.id, ...contacts.family.map(f => f.id)],
+      });
+      setSelectedConversation({ ...conv, displayName: conv.name, participantCount: conv.participantIds?.length || 0 });
+      setChatMessages([]);
+      setView('chat');
+      fetchConversations();
+    } catch (e) {
+      console.warn('[Messages] Failed to create family group:', e);
+    } finally {
+      setLoading(false);
+    }
+  }, [user?.id, contacts.family, fetchConversations]);
 
   const handleCreateGroup = useCallback(async () => {
     if (!user?.id || !groupName.trim()) return;
@@ -859,10 +898,25 @@ export default function MessagesScreen() {
         {loading ? (
           <View style={styles.loadingContainer}><ActivityIndicator size="large" color="#1e3a5f" /></View>
         ) : (
-          <FlatList
-            data={users}
+          <SectionList
+            sections={[
+              { title: 'Ma famille', data: contacts.family },
+              { title: 'Dispatch', data: contacts.dispatch },
+              { title: 'Autres', data: contacts.others },
+            ].filter(s => s.data.length > 0)}
             keyExtractor={(item) => item.id}
             contentContainerStyle={styles.contactList}
+            stickySectionHeadersEnabled={false}
+            renderSectionHeader={({ section }) => (
+              <View style={styles.contactSectionHeader}>
+                <Text style={styles.contactSectionTitle}>{section.title}</Text>
+                {section.title === 'Ma famille' && contacts.family.length > 1 && (
+                  <TouchableOpacity onPress={handleCreateFamilyGroup} style={styles.familyGroupBtn}>
+                    <Text style={styles.familyGroupBtnText}>👨‍👩‍👧‍👦 Groupe famille</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            )}
             renderItem={({ item }) => (
               <TouchableOpacity style={styles.contactItem} onPress={() => handleStartDirect(item)}>
                 <View style={[styles.contactAvatar, { backgroundColor: ROLE_COLORS[item.role] || '#6b7280' }]}>
@@ -1128,6 +1182,13 @@ const styles = StyleSheet.create({
   startConvoText: { color: '#ffffff', fontWeight: '600', fontSize: 14 },
 
   contactList: { paddingBottom: 20 },
+  contactSectionHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 16, paddingVertical: 8, backgroundColor: '#f0f2f5',
+  },
+  contactSectionTitle: { fontSize: 12, fontWeight: '700', color: '#6b7280', textTransform: 'uppercase', letterSpacing: 0.5 },
+  familyGroupBtn: { backgroundColor: '#1e3a5f', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 },
+  familyGroupBtnText: { color: '#ffffff', fontSize: 11, fontWeight: '600' },
   contactItem: {
     flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12,
     borderBottomWidth: 1, borderBottomColor: '#f3f4f6', backgroundColor: '#ffffff',
