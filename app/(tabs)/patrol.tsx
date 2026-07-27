@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   StyleSheet,
   View,
@@ -22,6 +22,8 @@ import { offlineCache } from '@/services/offline-cache';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
+import * as Sharing from 'expo-sharing';
+import * as FileSystem from 'expo-file-system/legacy';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -137,6 +139,36 @@ export default function PatrolScreen() {
   const [localMedia, setLocalMedia] = useState<LocalMedia[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [showMediaPreview, setShowMediaPreview] = useState<string | null>(null);
+
+  // ─── Blackbook (suspicious persons registry) ───────────────────────────
+  // Reachable from patrol.tsx because this is the one screen shared by all
+  // three roles that need it (responder/dispatcher/admin) — dispatcher.tsx
+  // isn't visible to responders.
+  const [showBlackbookModal, setShowBlackbookModal] = useState(false);
+  const [blackbookView, setBlackbookView] = useState<'list' | 'form'>('list');
+  const [blackbookLoading, setBlackbookLoading] = useState(false);
+  const [blackbookData, setBlackbookData] = useState<any[]>([]);
+  const [blackbookSearch, setBlackbookSearch] = useState('');
+  const [blackbookRiskFilter, setBlackbookRiskFilter] = useState('');
+  const [currentBlackbookEntry, setCurrentBlackbookEntry] = useState<any>(null); // null = creating new
+  const [bbFirstName, setBbFirstName] = useState('');
+  const [bbLastName, setBbLastName] = useState('');
+  const [bbAliases, setBbAliases] = useState('');
+  const [bbDateOfBirth, setBbDateOfBirth] = useState('');
+  const [bbRiskLevel, setBbRiskLevel] = useState<'low' | 'medium' | 'high' | 'critical'>('medium');
+  const [bbStatus, setBbStatus] = useState<'active' | 'resolved' | 'archived'>('active');
+  const [bbPhysicalDescription, setBbPhysicalDescription] = useState('');
+  const [bbTags, setBbTags] = useState('');
+  const [bbVehiclePlate, setBbVehiclePlate] = useState('');
+  const [bbVehicleDescription, setBbVehicleDescription] = useState('');
+  const [bbNotes, setBbNotes] = useState('');
+  const [bbSaving, setBbSaving] = useState(false);
+  const [showAddSightingForm, setShowAddSightingForm] = useState(false);
+  const [sightingCategory, setSightingCategory] = useState('autre');
+  const [sightingLocation, setSightingLocation] = useState('');
+  const [sightingNotes, setSightingNotes] = useState('');
+  const [sightingSaving, setSightingSaving] = useState(false);
+  const [photoUploading, setPhotoUploading] = useState(false);
 
   // ─── Data Fetching ──────────────────────────────────────────────────────
 
@@ -394,8 +426,250 @@ export default function PatrolScreen() {
     );
   };
 
+  // ─── Blackbook logic ────────────────────────────────────────────────────
+
+  const BLACKBOOK_CATEGORY_LABELS: Record<string, string> = {
+    prise_info: "Prise d'info", intrusion: 'Intrusion', menaces: 'Menaces',
+    envoi_courrier: 'Envoi de courrier', reperage: 'Repérage', autre: 'Autre',
+  };
+  const BLACKBOOK_RISK_LABELS: Record<string, string> = { low: '🟢 Faible', medium: '🟡 Moyen', high: '🟠 Élevé', critical: '🔴 Critique' };
+  const BLACKBOOK_STATUS_LABELS: Record<string, string> = { active: 'Surveillance active', resolved: 'Résolu', archived: 'Archivé' };
+
+  const blackbookLastSighting = (entry: any) => {
+    if (!entry.sightings || entry.sightings.length === 0) return null;
+    return entry.sightings.reduce((latest: any, s: any) => (!latest || s.timestamp > latest.timestamp ? s : latest), null);
+  };
+
+  const loadBlackbook = useCallback(async () => {
+    setBlackbookLoading(true);
+    try {
+      const data = await apiGet<any[]>('/api/blackbook');
+      setBlackbookData(data);
+    } catch (e) {
+      setBlackbookData([]);
+    }
+    setBlackbookLoading(false);
+  }, []);
+
+  const openBlackbookModal = useCallback(() => {
+    setShowBlackbookModal(true);
+    setBlackbookView('list');
+    setBlackbookSearch('');
+    loadBlackbook();
+  }, [loadBlackbook]);
+
+  const filteredBlackbook = useMemo(() => {
+    const query = blackbookSearch.trim().toLowerCase();
+    return blackbookData.filter((e: any) => {
+      if (blackbookRiskFilter && e.riskLevel !== blackbookRiskFilter) return false;
+      if (!query) return true;
+      const last = blackbookLastSighting(e);
+      const haystack = [
+        e.firstName, e.lastName, ...(e.aliases || []), e.notes, last?.location?.address,
+        ...(e.vehicles || []).map((v: any) => `${v.plate || ''} ${v.description || ''}`),
+        ...(e.tags || []),
+      ].filter(Boolean).join(' ').toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [blackbookData, blackbookSearch, blackbookRiskFilter]);
+
+  const resetBlackbookForm = () => {
+    setBbFirstName(''); setBbLastName(''); setBbAliases(''); setBbDateOfBirth('');
+    setBbRiskLevel('medium'); setBbStatus('active'); setBbPhysicalDescription('');
+    setBbTags(''); setBbVehiclePlate(''); setBbVehicleDescription(''); setBbNotes('');
+  };
+
+  const openBlackbookForm = useCallback((entry: any | null) => {
+    setCurrentBlackbookEntry(entry);
+    setShowAddSightingForm(false);
+    if (!entry) {
+      resetBlackbookForm();
+    } else {
+      setBbFirstName(entry.firstName || ''); setBbLastName(entry.lastName || '');
+      setBbAliases((entry.aliases || []).join(', ')); setBbDateOfBirth(entry.dateOfBirth || '');
+      setBbRiskLevel(entry.riskLevel || 'medium'); setBbStatus(entry.status || 'active');
+      setBbPhysicalDescription(entry.physicalDescription || ''); setBbTags((entry.tags || []).join(', '));
+      const v0 = (entry.vehicles || [])[0];
+      setBbVehiclePlate(v0?.plate || ''); setBbVehicleDescription(v0?.description || '');
+      setBbNotes(entry.notes || '');
+    }
+    setBlackbookView('form');
+  }, []);
+
+  const saveBlackbookEntry = useCallback(async () => {
+    if (!bbFirstName.trim() && !bbLastName.trim()) { Alert.alert('Erreur', 'Nom ou prénom requis'); return; }
+    setBbSaving(true);
+    try {
+      const baseUrl = getApiBaseUrl();
+      const body: any = {
+        firstName: bbFirstName.trim(), lastName: bbLastName.trim(),
+        aliases: bbAliases.split(',').map(s => s.trim()).filter(Boolean),
+        dateOfBirth: bbDateOfBirth || undefined, riskLevel: bbRiskLevel,
+        physicalDescription: bbPhysicalDescription.trim() || undefined,
+        tags: bbTags.split(',').map(s => s.trim()).filter(Boolean),
+        vehicles: (bbVehiclePlate.trim() || bbVehicleDescription.trim()) ? [{ plate: bbVehiclePlate.trim() || undefined, description: bbVehicleDescription.trim() || undefined }] : [],
+        notes: bbNotes.trim() || undefined,
+      };
+      if (currentBlackbookEntry) {
+        body.status = bbStatus;
+        const res = await fetchWithTimeout(`${baseUrl}/api/blackbook/${currentBlackbookEntry.id}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json', ...(await authHeader()) }, body: JSON.stringify(body), timeout: 10000,
+        });
+        if (!res.ok) throw new Error('failed');
+        await loadBlackbook();
+        setBlackbookView('list');
+      } else {
+        const res = await fetchWithTimeout(`${baseUrl}/api/blackbook`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', ...(await authHeader()) }, body: JSON.stringify(body), timeout: 10000,
+        });
+        if (!res.ok) throw new Error('failed');
+        const created = await res.json();
+        await loadBlackbook();
+        setCurrentBlackbookEntry(created);
+        Alert.alert('Fiche créée', 'Vous pouvez maintenant ajouter des photos et des signalements.');
+      }
+    } catch (e) {
+      Alert.alert('Erreur', 'Impossible d\'enregistrer la fiche');
+    }
+    setBbSaving(false);
+  }, [bbFirstName, bbLastName, bbAliases, bbDateOfBirth, bbRiskLevel, bbStatus, bbPhysicalDescription, bbTags, bbVehiclePlate, bbVehicleDescription, bbNotes, currentBlackbookEntry, loadBlackbook]);
+
+  const deleteBlackbookEntry = useCallback(() => {
+    if (!currentBlackbookEntry) return;
+    Alert.alert('Supprimer', `Supprimer définitivement la fiche de ${currentBlackbookEntry.firstName} ${currentBlackbookEntry.lastName} ?`, [
+      { text: 'Annuler', style: 'cancel' },
+      {
+        text: 'Supprimer', style: 'destructive', onPress: async () => {
+          try {
+            const baseUrl = getApiBaseUrl();
+            await fetchWithTimeout(`${baseUrl}/api/blackbook/${currentBlackbookEntry.id}`, { method: 'DELETE', headers: await authHeader(), timeout: 10000 });
+            await loadBlackbook();
+            setBlackbookView('list');
+          } catch (e) {
+            Alert.alert('Erreur', 'Suppression impossible');
+          }
+        },
+      },
+    ]);
+  }, [currentBlackbookEntry, loadBlackbook]);
+
+  const saveSighting = useCallback(async () => {
+    if (!currentBlackbookEntry) return;
+    setSightingSaving(true);
+    try {
+      const baseUrl = getApiBaseUrl();
+      const res = await fetchWithTimeout(`${baseUrl}/api/blackbook/${currentBlackbookEntry.id}/sightings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({
+          timestamp: Date.now(), category: sightingCategory,
+          location: sightingLocation.trim() ? { address: sightingLocation.trim() } : undefined,
+          notes: sightingNotes.trim() || undefined,
+        }),
+        timeout: 10000,
+      });
+      if (!res.ok) throw new Error('failed');
+      const sighting = await res.json();
+      setCurrentBlackbookEntry({ ...currentBlackbookEntry, sightings: [...(currentBlackbookEntry.sightings || []), sighting] });
+      setSightingLocation(''); setSightingNotes(''); setShowAddSightingForm(false);
+      loadBlackbook();
+    } catch (e) {
+      Alert.alert('Erreur', 'Impossible d\'ajouter le signalement');
+    }
+    setSightingSaving(false);
+  }, [currentBlackbookEntry, sightingCategory, sightingLocation, sightingNotes, loadBlackbook]);
+
+  const deleteSighting = useCallback((sightingId: string) => {
+    if (!currentBlackbookEntry) return;
+    Alert.alert('Supprimer', 'Supprimer ce signalement ?', [
+      { text: 'Annuler', style: 'cancel' },
+      {
+        text: 'Supprimer', style: 'destructive', onPress: async () => {
+          try {
+            const baseUrl = getApiBaseUrl();
+            await fetchWithTimeout(`${baseUrl}/api/blackbook/${currentBlackbookEntry.id}/sightings/${sightingId}`, { method: 'DELETE', headers: await authHeader(), timeout: 10000 });
+            setCurrentBlackbookEntry({ ...currentBlackbookEntry, sightings: (currentBlackbookEntry.sightings || []).filter((s: any) => s.id !== sightingId) });
+            loadBlackbook();
+          } catch (e) {
+            Alert.alert('Erreur', 'Suppression impossible');
+          }
+        },
+      },
+    ]);
+  }, [currentBlackbookEntry, loadBlackbook]);
+
+  const pickAndUploadBlackbookPhoto = useCallback(async () => {
+    if (!currentBlackbookEntry) return;
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) { Alert.alert('Permission requise', 'Autorisez l\'accès aux photos pour continuer.'); return; }
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.7 });
+    if (result.canceled || !result.assets?.[0]) return;
+    setPhotoUploading(true);
+    try {
+      const baseUrl = getApiBaseUrl();
+      const asset = result.assets[0];
+      const formData = new FormData();
+      formData.append('photos', { uri: asset.uri, name: 'photo.jpg', type: 'image/jpeg' } as any);
+      const res = await fetchWithTimeout(`${baseUrl}/api/blackbook/${currentBlackbookEntry.id}/photos`, {
+        method: 'POST', headers: await authHeader(), body: formData, timeout: 20000,
+      });
+      if (!res.ok) throw new Error('failed');
+      const data = await res.json();
+      setCurrentBlackbookEntry({ ...currentBlackbookEntry, photos: data.photos });
+    } catch (e) {
+      Alert.alert('Erreur', 'Envoi de la photo impossible');
+    }
+    setPhotoUploading(false);
+  }, [currentBlackbookEntry]);
+
+  const deleteBlackbookPhoto = useCallback((url: string) => {
+    if (!currentBlackbookEntry) return;
+    Alert.alert('Supprimer', 'Supprimer cette photo ?', [
+      { text: 'Annuler', style: 'cancel' },
+      {
+        text: 'Supprimer', style: 'destructive', onPress: async () => {
+          try {
+            const baseUrl = getApiBaseUrl();
+            const res = await fetchWithTimeout(`${baseUrl}/api/blackbook/${currentBlackbookEntry.id}/photos`, {
+              method: 'DELETE', headers: { 'Content-Type': 'application/json', ...(await authHeader()) }, body: JSON.stringify({ url }), timeout: 10000,
+            });
+            if (!res.ok) throw new Error('failed');
+            const data = await res.json();
+            setCurrentBlackbookEntry({ ...currentBlackbookEntry, photos: data.photos });
+          } catch (e) {
+            Alert.alert('Erreur', 'Suppression impossible');
+          }
+        },
+      },
+    ]);
+  }, [currentBlackbookEntry]);
+
+  const exportBlackbookPdf = useCallback(async () => {
+    if (!currentBlackbookEntry) return;
+    try {
+      const baseUrl = getApiBaseUrl();
+      const hdr = await authHeader();
+      const fileName = `blackbook-${(currentBlackbookEntry.lastName || 'dossier').replace(/[^a-zA-Z0-9-]/g, '_')}.pdf`;
+      const fileUri = `${FileSystem.cacheDirectory}${fileName}`;
+      const result = await FileSystem.downloadAsync(`${baseUrl}/api/blackbook/${currentBlackbookEntry.id}/pdf`, fileUri, { headers: hdr });
+      if (result.status !== 200) throw new Error('download failed');
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(result.uri, { mimeType: 'application/pdf' });
+      } else {
+        Alert.alert('PDF téléchargé', fileUri);
+      }
+    } catch (e) {
+      Alert.alert('Erreur', 'Export PDF impossible');
+    }
+  }, [currentBlackbookEntry]);
+
   const renderListView = () => (
     <View style={styles.container}>
+      {/* Blackbook access */}
+      <TouchableOpacity style={styles.blackbookBar} onPress={openBlackbookModal}>
+        <Text style={styles.blackbookBarText}>{'\u{1F575}\u{FE0F}'} Blackbook — personnes suspectes</Text>
+      </TouchableOpacity>
+
       {/* Filter chips */}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterRow} contentContainerStyle={styles.filterRowContent}>
         <TouchableOpacity
@@ -876,6 +1150,202 @@ export default function PatrolScreen() {
       {view === 'list' && renderListView()}
       {view === 'create' && renderCreateView()}
       {view === 'detail' && renderDetailView()}
+
+      {/* Blackbook Modal — suspicious persons registry */}
+      <Modal visible={showBlackbookModal} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowBlackbookModal(false)}>
+        <View style={styles.bbModalContainer}>
+          <View style={styles.bbModalHeader}>
+            {blackbookView === 'form' ? (
+              <TouchableOpacity onPress={() => setBlackbookView('list')}><Text style={styles.bbBackText}>← Retour</Text></TouchableOpacity>
+            ) : (
+              <Text style={styles.bbModalTitle}>🕵️ Blackbook</Text>
+            )}
+            <TouchableOpacity onPress={() => setShowBlackbookModal(false)}><Text style={styles.bbCloseText}>Fermer</Text></TouchableOpacity>
+          </View>
+
+          {blackbookView === 'list' ? (
+            <View style={{ flex: 1 }}>
+              <TextInput
+                style={styles.bbSearchInput}
+                placeholder="🔍 Nom, alias, plaque, lieu, notes..."
+                placeholderTextColor="#9ca3af"
+                value={blackbookSearch}
+                onChangeText={setBlackbookSearch}
+              />
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ maxHeight: 44, marginBottom: 8 }}>
+                {[{ key: '', label: 'Tous' }, { key: 'critical', label: '🔴 Critique' }, { key: 'high', label: '🟠 Élevé' }, { key: 'medium', label: '🟡 Moyen' }, { key: 'low', label: '🟢 Faible' }].map(r => (
+                  <TouchableOpacity
+                    key={r.key}
+                    style={[styles.bbFilterChip, blackbookRiskFilter === r.key && styles.bbFilterChipActive]}
+                    onPress={() => setBlackbookRiskFilter(r.key)}
+                  >
+                    <Text style={[styles.bbFilterChipText, blackbookRiskFilter === r.key && styles.bbFilterChipTextActive]}>{r.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+
+              {blackbookLoading ? (
+                <ActivityIndicator size="large" color="#1e3a5f" style={{ marginTop: 24 }} />
+              ) : (
+                <ScrollView showsVerticalScrollIndicator={false}>
+                  {filteredBlackbook.length === 0 ? (
+                    <Text style={{ textAlign: 'center', color: '#9ca3af', marginTop: 24 }}>Aucune fiche trouvée</Text>
+                  ) : (
+                    filteredBlackbook.map((e: any) => {
+                      const last = blackbookLastSighting(e);
+                      return (
+                        <TouchableOpacity key={e.id} style={styles.bbCard} onPress={() => openBlackbookForm(e)}>
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                            <Text style={styles.bbCardName}>{e.firstName} {e.lastName}</Text>
+                            <Text style={{ fontSize: 12 }}>{BLACKBOOK_RISK_LABELS[e.riskLevel] || e.riskLevel}</Text>
+                          </View>
+                          {(e.aliases || []).length > 0 && <Text style={styles.bbCardDetail}>Alias: {e.aliases.join(', ')}</Text>}
+                          {last && (
+                            <Text style={styles.bbCardDetail}>
+                              Dernier signalement: {new Date(last.timestamp).toLocaleDateString('fr-FR')} — {BLACKBOOK_CATEGORY_LABELS[last.category] || last.category}
+                              {last.location?.address ? ` · ${last.location.address}` : ''}
+                            </Text>
+                          )}
+                          <Text style={styles.bbCardMeta}>{BLACKBOOK_STATUS_LABELS[e.status] || e.status}</Text>
+                        </TouchableOpacity>
+                      );
+                    })
+                  )}
+                </ScrollView>
+              )}
+
+              <TouchableOpacity style={styles.bbFab} onPress={() => openBlackbookForm(null)}>
+                <Text style={styles.bbFabText}>+ Nouvelle fiche</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16 }}>
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.bbLabel}>Prénom</Text>
+                  <TextInput style={styles.bbInput} value={bbFirstName} onChangeText={setBbFirstName} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.bbLabel}>Nom</Text>
+                  <TextInput style={styles.bbInput} value={bbLastName} onChangeText={setBbLastName} />
+                </View>
+              </View>
+              <Text style={styles.bbLabel}>Alias (séparés par des virgules)</Text>
+              <TextInput style={styles.bbInput} value={bbAliases} onChangeText={setBbAliases} />
+              <Text style={styles.bbLabel}>Date de naissance (JJ/MM/AAAA)</Text>
+              <TextInput style={styles.bbInput} value={bbDateOfBirth} onChangeText={setBbDateOfBirth} placeholder="JJ/MM/AAAA" placeholderTextColor="#9ca3af" />
+
+              <Text style={styles.bbLabel}>Niveau de risque</Text>
+              <View style={{ flexDirection: 'row', gap: 6, marginBottom: 8 }}>
+                {(['low', 'medium', 'high', 'critical'] as const).map(r => (
+                  <TouchableOpacity key={r} style={[styles.bbFilterChip, bbRiskLevel === r && styles.bbFilterChipActive]} onPress={() => setBbRiskLevel(r)}>
+                    <Text style={[styles.bbFilterChipText, bbRiskLevel === r && styles.bbFilterChipTextActive]}>{BLACKBOOK_RISK_LABELS[r]}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              {currentBlackbookEntry && (
+                <>
+                  <Text style={styles.bbLabel}>Statut</Text>
+                  <View style={{ flexDirection: 'row', gap: 6, marginBottom: 8 }}>
+                    {(['active', 'resolved', 'archived'] as const).map(s => (
+                      <TouchableOpacity key={s} style={[styles.bbFilterChip, bbStatus === s && styles.bbFilterChipActive]} onPress={() => setBbStatus(s)}>
+                        <Text style={[styles.bbFilterChipText, bbStatus === s && styles.bbFilterChipTextActive]}>{BLACKBOOK_STATUS_LABELS[s]}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </>
+              )}
+
+              <Text style={styles.bbLabel}>Description physique</Text>
+              <TextInput style={[styles.bbInput, { minHeight: 60 }]} value={bbPhysicalDescription} onChangeText={setBbPhysicalDescription} multiline placeholder="Taille, corpulence, signes distinctifs, tenue..." placeholderTextColor="#9ca3af" />
+              <Text style={styles.bbLabel}>Tags (séparés par des virgules)</Text>
+              <TextInput style={styles.bbInput} value={bbTags} onChangeText={setBbTags} placeholder="Ex: véhicule volé, vu près école" placeholderTextColor="#9ca3af" />
+
+              <Text style={styles.bbLabel}>Véhicule — plaque</Text>
+              <TextInput style={styles.bbInput} value={bbVehiclePlate} onChangeText={setBbVehiclePlate} />
+              <Text style={styles.bbLabel}>Véhicule — description</Text>
+              <TextInput style={styles.bbInput} value={bbVehicleDescription} onChangeText={setBbVehicleDescription} placeholder="Marque, modèle, couleur" placeholderTextColor="#9ca3af" />
+
+              <Text style={styles.bbLabel}>Notes libres</Text>
+              <TextInput style={[styles.bbInput, { minHeight: 70 }]} value={bbNotes} onChangeText={setBbNotes} multiline />
+
+              <TouchableOpacity style={[styles.bbSaveBtn, bbSaving && { opacity: 0.6 }]} onPress={saveBlackbookEntry} disabled={bbSaving}>
+                {bbSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.bbSaveBtnText}>💾 Enregistrer</Text>}
+              </TouchableOpacity>
+
+              {currentBlackbookEntry && (
+                <>
+                  <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+                    <TouchableOpacity style={[styles.bbSecondaryBtn, { flex: 1 }]} onPress={exportBlackbookPdf}>
+                      <Text style={styles.bbSecondaryBtnText}>📄 Export PDF</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={[styles.bbSecondaryBtn, { flex: 1, backgroundColor: '#fef2f2' }]} onPress={deleteBlackbookEntry}>
+                      <Text style={[styles.bbSecondaryBtnText, { color: '#dc2626' }]}>🗑️ Supprimer</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <Text style={[styles.bbSectionTitle, { marginTop: 20 }]}>Photos</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }}>
+                    {(currentBlackbookEntry.photos || []).map((url: string) => (
+                      <TouchableOpacity key={url} onLongPress={() => deleteBlackbookPhoto(url)} style={{ marginRight: 8 }}>
+                        <Image source={{ uri: `${getApiBaseUrl()}${url}` }} style={{ width: 80, height: 80, borderRadius: 8 }} />
+                      </TouchableOpacity>
+                    ))}
+                    <TouchableOpacity style={styles.bbAddPhotoBtn} onPress={pickAndUploadBlackbookPhoto} disabled={photoUploading}>
+                      {photoUploading ? <ActivityIndicator color="#1e3a5f" /> : <Text style={{ fontSize: 24 }}>📷</Text>}
+                    </TouchableOpacity>
+                  </ScrollView>
+                  {(currentBlackbookEntry.photos || []).length > 0 && <Text style={styles.bbHint}>Appui long pour supprimer une photo</Text>}
+
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 16, marginBottom: 8 }}>
+                    <Text style={styles.bbSectionTitle}>Signalements</Text>
+                    <TouchableOpacity onPress={() => setShowAddSightingForm(v => !v)}>
+                      <Text style={{ color: '#1e3a5f', fontWeight: '600' }}>{showAddSightingForm ? 'Annuler' : '+ Ajouter'}</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {showAddSightingForm && (
+                    <View style={styles.bbFormCard}>
+                      <Text style={styles.bbLabel}>Type de problème</Text>
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }}>
+                        {(['prise_info', 'intrusion', 'menaces', 'envoi_courrier', 'reperage', 'autre'] as const).map(c => (
+                          <TouchableOpacity key={c} style={[styles.bbFilterChip, sightingCategory === c && styles.bbFilterChipActive]} onPress={() => setSightingCategory(c)}>
+                            <Text style={[styles.bbFilterChipText, sightingCategory === c && styles.bbFilterChipTextActive]}>{BLACKBOOK_CATEGORY_LABELS[c]}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </ScrollView>
+                      <Text style={styles.bbLabel}>Lieu</Text>
+                      <TextInput style={styles.bbInput} value={sightingLocation} onChangeText={setSightingLocation} placeholder="Adresse ou description du lieu" placeholderTextColor="#9ca3af" />
+                      <Text style={styles.bbLabel}>Notes</Text>
+                      <TextInput style={[styles.bbInput, { minHeight: 50 }]} value={sightingNotes} onChangeText={setSightingNotes} multiline />
+                      <TouchableOpacity style={[styles.bbSaveBtn, sightingSaving && { opacity: 0.6 }]} onPress={saveSighting} disabled={sightingSaving}>
+                        {sightingSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.bbSaveBtnText}>Enregistrer le signalement</Text>}
+                      </TouchableOpacity>
+                    </View>
+                  )}
+
+                  {(currentBlackbookEntry.sightings || []).length === 0 ? (
+                    <Text style={{ color: '#9ca3af', fontSize: 12 }}>Aucun signalement enregistré</Text>
+                  ) : (
+                    [...currentBlackbookEntry.sightings].sort((a: any, b: any) => b.timestamp - a.timestamp).map((s: any) => (
+                      <View key={s.id} style={styles.bbSightingRow}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.bbCardName}>{new Date(s.timestamp).toLocaleString('fr-FR')} — {BLACKBOOK_CATEGORY_LABELS[s.category] || s.category}</Text>
+                          {!!s.location?.address && <Text style={styles.bbCardDetail}>📍 {s.location.address}</Text>}
+                          {!!s.notes && <Text style={styles.bbCardDetail}>{s.notes}</Text>}
+                          <Text style={styles.bbCardMeta}>Signalé par {s.reportedByName}</Text>
+                        </View>
+                        <TouchableOpacity onPress={() => deleteSighting(s.id)}><Text style={{ color: '#dc2626' }}>🗑️</Text></TouchableOpacity>
+                      </View>
+                    ))
+                  )}
+                </>
+              )}
+            </ScrollView>
+          )}
+        </View>
+      </Modal>
     </TalionScreen>
   );
 }
@@ -885,6 +1355,59 @@ export default function PatrolScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+  },
+  blackbookBar: {
+    backgroundColor: '#374151', marginHorizontal: 16, marginTop: 12, marginBottom: 4,
+    borderRadius: 10, paddingVertical: 12, alignItems: 'center',
+  },
+  blackbookBarText: { color: '#fff', fontWeight: '700', fontSize: 14 },
+  bbModalContainer: { flex: 1, backgroundColor: '#fff' },
+  bbModalHeader: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: 16, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: '#e5e7eb',
+  },
+  bbModalTitle: { fontSize: 17, fontWeight: '700', color: '#1f2937' },
+  bbBackText: { fontSize: 15, color: '#1e3a5f', fontWeight: '600' },
+  bbCloseText: { fontSize: 15, color: '#6b7280' },
+  bbSearchInput: {
+    backgroundColor: '#f3f4f6', borderRadius: 8, marginHorizontal: 16, marginTop: 12, marginBottom: 8,
+    paddingHorizontal: 12, paddingVertical: 10, fontSize: 14,
+  },
+  bbFilterChip: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: '#f3f4f6', marginLeft: 16, marginRight: 0 },
+  bbFilterChipActive: { backgroundColor: '#1e3a5f' },
+  bbFilterChipText: { fontSize: 12, fontWeight: '600', color: '#374151' },
+  bbFilterChipTextActive: { color: '#fff' },
+  bbCard: {
+    backgroundColor: '#f9fafb', borderRadius: 10, padding: 12, marginHorizontal: 16, marginBottom: 8,
+    borderWidth: 1, borderColor: '#e5e7eb',
+  },
+  bbCardName: { fontSize: 14, fontWeight: '700', color: '#1f2937' },
+  bbCardDetail: { fontSize: 12, color: '#6b7280', marginTop: 2 },
+  bbCardMeta: { fontSize: 11, color: '#9ca3af', marginTop: 2, fontStyle: 'italic' },
+  bbFab: {
+    position: 'absolute', bottom: 16, left: 16, right: 16, backgroundColor: '#1e3a5f',
+    borderRadius: 14, paddingVertical: 16, alignItems: 'center',
+  },
+  bbFabText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  bbLabel: { fontSize: 12, fontWeight: '600', color: '#374151', marginBottom: 4, marginTop: 8 },
+  bbInput: {
+    backgroundColor: '#f9fafb', borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 8,
+    paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, color: '#1f2937',
+  },
+  bbSaveBtn: { backgroundColor: '#1e3a5f', borderRadius: 10, paddingVertical: 14, alignItems: 'center', marginTop: 16 },
+  bbSaveBtnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
+  bbSecondaryBtn: { backgroundColor: '#f3f4f6', borderRadius: 10, paddingVertical: 12, alignItems: 'center' },
+  bbSecondaryBtnText: { color: '#374151', fontWeight: '600', fontSize: 13 },
+  bbSectionTitle: { fontSize: 13, fontWeight: '700', color: '#374151', textTransform: 'uppercase' },
+  bbAddPhotoBtn: {
+    width: 80, height: 80, borderRadius: 8, backgroundColor: '#f3f4f6', alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: '#e5e7eb', borderStyle: 'dashed',
+  },
+  bbHint: { fontSize: 11, color: '#9ca3af', marginBottom: 8 },
+  bbFormCard: { backgroundColor: '#f9fafb', borderRadius: 10, padding: 12, marginBottom: 12 },
+  bbSightingRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start',
+    backgroundColor: '#f9fafb', borderRadius: 10, padding: 12, marginBottom: 8,
   },
   centered: {
     flex: 1,
