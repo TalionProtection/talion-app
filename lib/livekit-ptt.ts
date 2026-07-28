@@ -24,20 +24,23 @@ let RoomCtor: any = null;
 let RoomEventEnum: any = null;
 let loadError: string | null = null;
 if (Platform.OS !== 'web') {
+  // Hermes doesn't provide the browser global DOMException, and neither
+  // registerGlobals() nor react-native-webrtc polyfill it - but merely
+  // requiring '@livekit/react-native' transitively loads livekit-client
+  // (via its ./hooks and ./components/LiveKitRoom submodules), whose
+  // bundled WebRTC adapter references DOMException at module scope. This
+  // must be set up before that very first require, not after.
+  if (typeof (global as any).DOMException === 'undefined') {
+    (global as any).DOMException = class DOMException extends Error {
+      constructor(message?: string, name?: string) {
+        super(message);
+        this.name = name || 'Error';
+      }
+    };
+  }
   try {
     const { registerGlobals } = require('@livekit/react-native');
     registerGlobals();
-    // Hermes doesn't provide the browser global DOMException, and neither
-    // registerGlobals() nor react-native-webrtc polyfill it - but
-    // livekit-client's bundled WebRTC adapter references it directly.
-    if (typeof (global as any).DOMException === 'undefined') {
-      (global as any).DOMException = class DOMException extends Error {
-        constructor(message?: string, name?: string) {
-          super(message);
-          this.name = name || 'Error';
-        }
-      };
-    }
     const { Room, RoomEvent } = require('livekit-client');
     RoomCtor = Room;
     RoomEventEnum = RoomEvent;
