@@ -36,9 +36,13 @@ class AlertSoundService {
       if (Platform.OS !== 'web') {
         const { createAudioPlayer, setAudioModeAsync } = await import('expo-audio');
 
-        // Enable playback in iOS silent mode
+        // Enable playback in iOS silent mode. allowsRecording is required so
+        // that playing a sound (e.g. the PTT beep, mid-call) doesn't reset the
+        // shared iOS audio session to a playback-only category and silently
+        // break LiveKit's simultaneous mic capture for the rest of the session.
         await setAudioModeAsync({
           playsInSilentMode: true,
+          allowsRecording: true,
         });
 
         this.createPlayerFn = createAudioPlayer;

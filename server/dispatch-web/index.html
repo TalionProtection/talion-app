@@ -621,6 +621,11 @@
             <button class="btn btn-sm" onclick="joinEmergencyChannel()">&#x1F3A4; Rejoindre le canal</button>
             <button class="btn btn-sm" onclick="dismissDispatchEmergency()">✕</button>
           </div>
+          <!-- Browser autoplay block: shown only if canPlaybackAudio is false after connecting -->
+          <div id="pttAudioBlockedBanner" class="ptt-emergency-banner" style="display:none;">
+            <span>&#x1F50A; Le son est bloqué par le navigateur.</span>
+            <button class="btn btn-sm" onclick="enablePTTAudio()">Activer le son</button>
+          </div>
           <!-- Connection status -->
           <div id="pttMessages" class="ptt-messages">
             <div class="empty-state">&#x1F399; Sélectionnez un canal pour rejoindre</div>

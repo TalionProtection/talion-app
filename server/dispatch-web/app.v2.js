@@ -6680,6 +6680,10 @@ async function selectPTTChannel(channel) {
       pttConnected = true;
       if (btn) { btn.disabled = false; btn.innerHTML = '🎙 MAINTENIR POUR PARLER'; }
       if (messagesEl) messagesEl.innerHTML = `<div class="empty-state">✅ Connecté à ${escapeHtml(channel.name)}</div>`;
+      updatePTTAudioBlockedBanner();
+    });
+    pttRoom.on(LivekitClient.RoomEvent.AudioPlaybackStatusChanged, () => {
+      updatePTTAudioBlockedBanner();
     });
     pttRoom.on(LivekitClient.RoomEvent.Disconnected, () => {
       pttConnected = false;
@@ -6729,6 +6733,28 @@ async function disconnectPTTRoom() {
   }
   pttConnected = false;
   pttTransmitting = false;
+  const banner = document.getElementById('pttAudioBlockedBanner');
+  if (banner) banner.style.display = 'none';
+}
+
+// Browsers block audio autoplay until the page has had a user gesture. LiveKit
+// detects this per-track (canPlaybackAudio) and only resumes it via startAudio(),
+// which must be called from inside a real click handler. Without this, incoming
+// PTT audio can be silently blocked with no visible error at all.
+function updatePTTAudioBlockedBanner() {
+  const banner = document.getElementById('pttAudioBlockedBanner');
+  if (!banner) return;
+  banner.style.display = (pttRoom && !pttRoom.canPlaybackAudio) ? 'flex' : 'none';
+}
+
+async function enablePTTAudio() {
+  if (!pttRoom) return;
+  try {
+    await pttRoom.startAudio();
+  } catch (e) {
+    console.error('[PTT] startAudio error:', e);
+  }
+  updatePTTAudioBlockedBanner();
 }
 
 async function startDispatchPTT() {
