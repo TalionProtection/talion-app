@@ -6696,6 +6696,21 @@ async function selectPTTChannel(channel) {
         nameEl.textContent = speakers.map(s => s.name || s.identity).join(', ');
       }
     });
+    // autoSubscribe just delivers the remote track to the browser - nothing
+    // plays it until it's attached to a media element. Without this, PTT
+    // audio from other participants (mobile app, other dispatchers) never
+    // makes it out of the speakers even though the connection is otherwise
+    // fully working.
+    pttRoom.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {
+      if (track.kind !== 'audio') return;
+      const audioEl = track.attach();
+      audioEl.id = `ptt-audio-${track.sid}`;
+      audioEl.style.display = 'none';
+      document.body.appendChild(audioEl);
+    });
+    pttRoom.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track) => {
+      track.detach().forEach(el => el.remove());
+    });
 
     await pttRoom.connect(url, token, { autoSubscribe: true });
     await pttRoom.localParticipant.setMicrophoneEnabled(false);
