@@ -27,6 +27,17 @@ if (Platform.OS !== 'web') {
   try {
     const { registerGlobals } = require('@livekit/react-native');
     registerGlobals();
+    // Hermes doesn't provide the browser global DOMException, and neither
+    // registerGlobals() nor react-native-webrtc polyfill it - but
+    // livekit-client's bundled WebRTC adapter references it directly.
+    if (typeof (global as any).DOMException === 'undefined') {
+      (global as any).DOMException = class DOMException extends Error {
+        constructor(message?: string, name?: string) {
+          super(message);
+          this.name = name || 'Error';
+        }
+      };
+    }
     const { Room, RoomEvent } = require('livekit-client');
     RoomCtor = Room;
     RoomEventEnum = RoomEvent;
