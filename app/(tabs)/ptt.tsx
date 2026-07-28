@@ -1,249 +1,298 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, Alert,
-  ActivityIndicator, ScrollView, Pressable,
+  ActivityIndicator, ScrollView, Pressable, Modal, TextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { TalionScreen } from '@/components/talion-banner';
 import { useAuth } from '@/hooks/useAuth';
-import { Audio } from 'expo-av';
 import { getApiBaseUrl } from '@/lib/server-url';
+import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
 import { authHeader } from '@/lib/auth-fetch';
-import { websocketService } from '@/services/websocket';
-import { Audio as ExpoAudio } from 'expo-av';
+import { livekitPTT, isLiveKitAvailable } from '@/lib/livekit-ptt';
+
+interface PTTChannel {
+  id: string;
+  name: string;
+  description: string;
+  allowedRoles: string[];
+  isDefault: boolean;
+  members?: string[];
+}
 
 export default function PTTScreen() {
   const { user } = useAuth();
+  const isStaff = user?.role === 'responder' || user?.role === 'dispatcher' || user?.role === 'admin';
+  const isDispatchStaff = user?.role === 'dispatcher' || user?.role === 'admin';
+
+  const [channels, setChannels] = useState<PTTChannel[]>([]);
+  const [channelsLoading, setChannelsLoading] = useState(true);
+  const [activeChannel, setActiveChannel] = useState<PTTChannel | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const [connected, setConnected] = useState(false);
   const [transmitting, setTransmitting] = useState(false);
-  const [activeSpeaker, setActiveSpeaker] = useState<string | null>(null);
-  const [users, setUsers] = useState<any[]>([]);
-  const [selectedUser, setSelectedUser] = useState<any | null>(null);
-  const [channel, setChannel] = useState('dispatch');
-  const [pttMessages, setPttMessages] = useState<Array<{id: string, senderName: string, audioUrl?: string, audioBase64?: string, mimeType?: string, timestamp: number}>>([]);
-  const soundRef = useRef<ExpoAudio.Sound | null>(null);
-  const recordingRef = useRef<Audio.Recording | null>(null);
-  const isDispatcher = user?.role === 'dispatcher' || user?.role === 'admin';
+  const [activeSpeakers, setActiveSpeakers] = useState<{ identity: string; name: string }[]>([]);
+
+  // Group creation (dispatcher/admin only)
+  const [showGroupModal, setShowGroupModal] = useState(false);
+  const [groupName, setGroupName] = useState('');
+  const [allUsers, setAllUsers] = useState<any[]>([]);
+  const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
+  const [groupSaving, setGroupSaving] = useState(false);
+
+  const activeChannelRef = useRef<PTTChannel | null>(null);
+  useEffect(() => { activeChannelRef.current = activeChannel; }, [activeChannel]);
+
+  const loadChannels = useCallback(async () => {
+    setChannelsLoading(true);
+    try {
+      const baseUrl = getApiBaseUrl();
+      const res = await fetchWithTimeout(`${baseUrl}/api/ptt/channels`, { timeout: 10000, headers: await authHeader() });
+      if (res.ok) setChannels(await res.json());
+    } catch (e) {
+      console.warn('[PTT] Failed to load channels:', e);
+    }
+    setChannelsLoading(false);
+  }, []);
 
   useEffect(() => {
-    if (isDispatcher) fetchUsers();
-    
-    // Rejoindre tous les canaux PTT
-    const joinPttChannel = () => {
-      // Rejoindre le canal emergency (tous les rôles)
-      websocketService.send({ type: 'pttJoinChannel', channelId: 'emergency' });
-      websocketService.send({ type: 'pttJoinChannel', channelId: 'general' });
-      console.log('[PTT] Joined emergency + general channels');
-    };
-    
-    setTimeout(joinPttChannel, 1000);
-    
-    // Rejoindre à chaque reconnexion
-    websocketService.on('authenticated', () => {
-      setTimeout(joinPttChannel, 500);
-    });
-    
-    // Écouter les messages PTT entrants
-    const handlePTT = (data: any) => {
-      if (data.type === 'pttStart') setActiveSpeaker(data.senderName);
-      if (data.type === 'pttEnd') setActiveSpeaker(null);
-    };
-    const handlePttMessage = (data: any) => {
-      if (data.type === 'pttMessage' || data.type === 'newPttMessage') {
-        const msg = data.data || data;
-        setPttMessages(prev => [{
-          id: msg.id || Date.now().toString(),
-          senderName: msg.senderName || 'Dispatch',
-          audioBase64: msg.audioBase64,
-          mimeType: msg.mimeType || 'audio/webm',
-          timestamp: Date.now(),
-        }, ...prev].slice(0, 20));
-        setActiveSpeaker(msg.senderName || 'Dispatch');
-        setTimeout(() => setActiveSpeaker(null), 3000);
-      }
-    };
-    websocketService.on('ptt', handlePTT);
-    websocketService.on('pttMessage', handlePttMessage);
-    websocketService.on('message', handlePttMessage);
+    loadChannels();
+    livekitPTT.onConnectionChange = (isConnected) => setConnected(isConnected);
+    livekitPTT.onActiveSpeakersChanged = (speakers) => setActiveSpeakers(speakers);
+    livekitPTT.onError = (message) => Alert.alert('Erreur PTT', message);
     return () => {
-      websocketService.off('ptt', handlePTT);
-      websocketService.off('pttMessage', handlePttMessage);
-      websocketService.off('message', handlePttMessage);
+      livekitPTT.disconnect();
     };
+  }, [loadChannels]);
+
+  const joinChannel = useCallback(async (channel: PTTChannel) => {
+    if (!isLiveKitAvailable()) {
+      Alert.alert('Indisponible', 'Le PTT en direct n\'est pas disponible sur cette version de l\'app.');
+      return;
+    }
+    setConnecting(true);
+    try {
+      await livekitPTT.connect(channel.id);
+      setActiveChannel(channel);
+    } catch (e) {
+      // livekitPTT.onError already surfaces an alert
+    }
+    setConnecting(false);
+  }, []);
+
+  const leaveChannel = useCallback(async () => {
+    await livekitPTT.disconnect();
+    setActiveChannel(null);
+    setActiveSpeakers([]);
+    setTransmitting(false);
+  }, []);
+
+  const startTransmit = useCallback(async () => {
+    await livekitPTT.startTransmit();
+    setTransmitting(true);
+  }, []);
+
+  const stopTransmit = useCallback(async () => {
+    await livekitPTT.stopTransmit();
+    setTransmitting(false);
+  }, []);
+
+  const triggerEmergency = useCallback(() => {
+    Alert.alert('Confirmer', 'Déclencher l\'alerte d\'urgence PTT pour tout le monde ?', [
+      { text: 'Annuler', style: 'cancel' },
+      {
+        text: 'Déclencher', style: 'destructive', onPress: async () => {
+          try {
+            const baseUrl = getApiBaseUrl();
+            const res = await fetchWithTimeout(`${baseUrl}/api/ptt/emergency`, {
+              method: 'POST', headers: await authHeader(), timeout: 10000,
+            });
+            if (!res.ok) throw new Error('failed');
+          } catch (e) {
+            Alert.alert('Erreur', 'Impossible de déclencher l\'alerte');
+          }
+        },
+      },
+    ]);
+  }, []);
+
+  const openGroupModal = useCallback(async () => {
+    setGroupName('');
+    setSelectedMemberIds([]);
+    setShowGroupModal(true);
+    try {
+      const baseUrl = getApiBaseUrl();
+      const res = await fetchWithTimeout(`${baseUrl}/api/users`, { timeout: 10000 });
+      if (res.ok) setAllUsers((await res.json()).filter((u: any) => u.id !== user?.id));
+    } catch (e) {
+      setAllUsers([]);
+    }
   }, [user?.id]);
 
-  const playPttAudio = async (msg: any) => {
-    try {
-      if (soundRef.current) {
-        await soundRef.current.unloadAsync();
-        soundRef.current = null;
-      }
-      await ExpoAudio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
-      if (msg.audioBase64) {
-        // Jouer depuis base64
-        const uri = `data:${msg.mimeType || 'audio/webm'};base64,${msg.audioBase64}`;
-        const { sound } = await ExpoAudio.Sound.createAsync({ uri });
-        soundRef.current = sound;
-        await sound.playAsync();
-      }
-    } catch (e) {
-      console.error('[PTT] Play error:', e);
-    }
+  const toggleMember = (id: string) => {
+    setSelectedMemberIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
   };
 
-  const fetchUsers = async () => {
+  const saveGroup = useCallback(async () => {
+    if (!groupName.trim()) { Alert.alert('Erreur', 'Nom du groupe requis'); return; }
+    setGroupSaving(true);
     try {
-      const res = await fetch(`${getApiBaseUrl()}/admin/users`);
-      const data = await res.json();
-      setUsers(data.filter((u: any) => u.id !== user?.id && u.status === 'active'));
-    } catch {}
-  };
-
-  const startTransmit = async () => {
-    try {
-      const { status } = await Audio.requestPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Permission requise', 'Accès au microphone nécessaire pour le PTT');
-        return;
-      }
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-      const { recording } = await Audio.Recording.createAsync({
-        ...Audio.RecordingOptionsPresets.HIGH_QUALITY,
-        android: { ...Audio.RecordingOptionsPresets.HIGH_QUALITY.android, maxFileSize: 50 * 1024 * 1024 },
-        ios: { ...Audio.RecordingOptionsPresets.HIGH_QUALITY.ios, linearPCMBitDepth: 16, linearPCMIsBigEndian: false, linearPCMIsFloat: false },
-        keepAudioActiveHint: true,
+      const baseUrl = getApiBaseUrl();
+      const res = await fetchWithTimeout(`${baseUrl}/api/ptt/channels`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({ name: groupName.trim(), members: selectedMemberIds }),
+        timeout: 10000,
       });
-      recordingRef.current = recording;
-      setTransmitting(true);
-      
-      // Notifier les autres via WebSocket
-      websocketService.send({ type: 'pttStart', senderId: user?.id, senderName: user?.name, channel });
-    } catch (e: any) {
-      Alert.alert('Erreur', e.message);
+      if (!res.ok) throw new Error('failed');
+      setShowGroupModal(false);
+      loadChannels();
+    } catch (e) {
+      Alert.alert('Erreur', 'Impossible de créer le groupe');
     }
+    setGroupSaving(false);
+  }, [groupName, selectedMemberIds, loadChannels]);
+
+  const CHANNEL_ICONS: Record<string, string> = { emergency: '🚨', dispatch: '📡', responders: '🚒', general: '💬' };
+  const channelIcon = (ch: PTTChannel) => {
+    if (CHANNEL_ICONS[ch.id]) return CHANNEL_ICONS[ch.id];
+    if (ch.id.startsWith('family-')) return '🏠';
+    if (ch.id.startsWith('direct-')) return '📞';
+    if (ch.id.startsWith('custom-')) return '👥';
+    return '📻';
   };
 
-  const stopTransmit = async () => {
-    if (!recordingRef.current) return;
-    try {
-      await recordingRef.current.stopAndUnloadAsync();
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: false });
-      const uri = recordingRef.current.getURI();
-      recordingRef.current = null;
-      setTransmitting(false);
-      
-      // Notifier fin de transmission
-      websocketService.send({ type: 'pttEnd', senderId: user?.id, senderName: user?.name, channel });
-      
-      // Envoyer l'audio via le chat messaging
-      if (uri) {
-        const targetId = selectedUser ? selectedUser.id : 'b8044334-a903-4661-9f77-59fe469d67b3';
-        const convRes = await fetch(`${getApiBaseUrl()}/api/conversations`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
-          body: JSON.stringify({ type: 'direct', participantIds: [user!.id, targetId], createdBy: user!.id }),
-        });
-        const convData = await convRes.json();
-        if (convData.id || convData.conversation?.id) {
-          const convId = convData.id || convData.conversation?.id;
-          const formData = new FormData();
-          formData.append('file', { uri, name: 'ptt.m4a', type: 'audio/m4a' } as any);
-          formData.append('senderId', user!.id);
-          formData.append('senderName', user!.name || '');
-          formData.append('mediaType', 'audio');
-          await fetch(`${getApiBaseUrl()}/api/conversations/${encodeURIComponent(convId)}/media`, {
-            method: 'POST',
-            headers: { 'Accept': 'application/json', ...(await authHeader()) },
-            body: formData,
-          });
-        }
-      }
-    } catch (e: any) {
-      setTransmitting(false);
-      console.error('[PTT]', e);
-    }
-  };
+  // ─── Active channel view (connected, floor control) ───────────────────
+  if (activeChannel) {
+    return (
+      <TalionScreen>
+        <SafeAreaView style={styles.container} edges={['bottom']}>
+          <View style={styles.channelBanner}>
+            <Text style={styles.channelLabel}>Canal actif</Text>
+            <Text style={styles.channelName}>{channelIcon(activeChannel)} {activeChannel.name}</Text>
+            <TouchableOpacity onPress={leaveChannel} style={styles.backBtn}>
+              <Text style={styles.backBtnText}>← Quitter le canal</Text>
+            </TouchableOpacity>
+          </View>
 
+          {!connected ? (
+            <View style={styles.centered}>
+              <ActivityIndicator size="large" color="#1e3a5f" />
+              <Text style={{ marginTop: 12, color: '#6b7280' }}>Connexion...</Text>
+            </View>
+          ) : (
+            <>
+              {activeSpeakers.length > 0 && (
+                <View style={styles.speakerBanner}>
+                  <Text style={styles.speakerText}>
+                    🎙 {activeSpeakers.map(s => s.name).join(', ')} {activeSpeakers.length > 1 ? 'parlent' : 'parle'}...
+                  </Text>
+                </View>
+              )}
+
+              <View style={styles.pttContainer}>
+                <Pressable
+                  style={[styles.pttButton, transmitting && styles.pttButtonActive]}
+                  onPressIn={startTransmit}
+                  onPressOut={stopTransmit}
+                >
+                  <Text style={styles.pttIcon}>{transmitting ? '🔴' : '🎙'}</Text>
+                  <Text style={styles.pttLabel}>{transmitting ? 'EN COURS...' : 'MAINTENIR POUR PARLER'}</Text>
+                </Pressable>
+              </View>
+            </>
+          )}
+        </SafeAreaView>
+      </TalionScreen>
+    );
+  }
+
+  // ─── Channel list view ──────────────────────────────────────────────────
   return (
     <TalionScreen>
       <SafeAreaView style={styles.container} edges={['bottom']}>
         <View style={styles.header}>
           <Text style={styles.title}>PTT</Text>
+          <TouchableOpacity onPress={loadChannels} style={styles.refreshBtn}>
+            <Text style={styles.refreshBtnText}>↻</Text>
+          </TouchableOpacity>
         </View>
 
-        <View style={styles.channelBanner}>
-          <Text style={styles.channelLabel}>Canal actif</Text>
-          <Text style={styles.channelName}>
-            {selectedUser ? `📞 ${selectedUser.name}` : '📡 Dispatch'}
-          </Text>
-          {selectedUser && (
-            <TouchableOpacity onPress={() => setSelectedUser(null)} style={styles.backBtn}>
-              <Text style={styles.backBtnText}>← Dispatch</Text>
+        {isDispatchStaff && (
+          <View style={{ flexDirection: 'row', gap: 8, marginHorizontal: 16, marginBottom: 8 }}>
+            <TouchableOpacity style={styles.emergencyBtn} onPress={triggerEmergency}>
+              <Text style={styles.emergencyBtnText}>🚨 Urgence</Text>
             </TouchableOpacity>
-          )}
-        </View>
-
-        {activeSpeaker && (
-          <View style={styles.speakerBanner}>
-            <Text style={styles.speakerText}>🎙 {activeSpeaker} parle...</Text>
+            <TouchableOpacity style={styles.groupBtn} onPress={openGroupModal}>
+              <Text style={styles.groupBtnText}>+ Nouveau groupe</Text>
+            </TouchableOpacity>
           </View>
         )}
 
-        <View style={styles.pttContainer}>
-          <Pressable
-            style={[styles.pttButton, transmitting && styles.pttButtonActive]}
-            onPressIn={startTransmit}
-            onPressOut={stopTransmit}
-          >
-            <Text style={styles.pttIcon}>{transmitting ? '🔴' : '🎙'}</Text>
-            <Text style={styles.pttLabel}>
-              {transmitting ? 'EN COURS...' : 'MAINTENIR POUR PARLER'}
-            </Text>
-          </Pressable>
-        </View>
+        {!isLiveKitAvailable() && (
+          <View style={styles.warningBanner}>
+            <Text style={styles.warningBannerText}>⚠️ PTT en direct non disponible sur cette version de l'app.</Text>
+          </View>
+        )}
 
-        {/* Messages PTT reçus */}
-        {pttMessages.length > 0 && (
-          <View style={styles.pttMessagesSection}>
-            <Text style={styles.sectionTitle}>Messages reçus</Text>
-            <ScrollView style={{ maxHeight: 200 }}>
-              {pttMessages.map(msg => (
-                <TouchableOpacity
-                  key={msg.id}
-                  style={styles.pttMessageItem}
-                  onPress={() => playPttAudio(msg)}
-                >
-                  <Text style={styles.pttMessageSender}>🎙 {msg.senderName}</Text>
-                  <Text style={styles.pttMessageTime}>{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>
-                  <Text style={styles.pttMessagePlay}>▶ Écouter</Text>
+        {channelsLoading ? (
+          <View style={styles.centered}><ActivityIndicator size="large" color="#1e3a5f" /></View>
+        ) : channels.length === 0 ? (
+          <View style={styles.centered}>
+            <Text style={styles.emptyText}>Aucun canal disponible</Text>
+          </View>
+        ) : (
+          <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingTop: 4 }}>
+            {channels.map(ch => (
+              <TouchableOpacity
+                key={ch.id}
+                style={styles.channelRow}
+                onPress={() => joinChannel(ch)}
+                disabled={connecting}
+              >
+                <Text style={styles.channelRowIcon}>{channelIcon(ch)}</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.channelRowName}>{ch.name}</Text>
+                  {!!ch.description && <Text style={styles.channelRowDesc}>{ch.description}</Text>}
+                </View>
+                {connecting ? <ActivityIndicator size="small" color="#1e3a5f" /> : <Text style={styles.channelRowArrow}>›</Text>}
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        )}
+
+        {/* Group creation modal (dispatcher/admin) */}
+        <Modal visible={showGroupModal} transparent animationType="slide">
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <Text style={styles.modalTitle}>Nouveau groupe PTT</Text>
+              <TextInput
+                style={styles.groupNameInput}
+                placeholder="Nom du groupe"
+                placeholderTextColor="#9ca3af"
+                value={groupName}
+                onChangeText={setGroupName}
+              />
+              <Text style={styles.modalLabel}>Membres</Text>
+              <ScrollView style={{ maxHeight: 280 }}>
+                {allUsers.map(u => (
+                  <TouchableOpacity key={u.id} style={styles.memberRow} onPress={() => toggleMember(u.id)}>
+                    <Text style={{ fontSize: 16 }}>{selectedMemberIds.includes(u.id) ? '☑' : '☐'}</Text>
+                    <Text style={styles.memberRowText}>{u.name} <Text style={{ color: '#9ca3af' }}>({u.role})</Text></Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+              <View style={{ flexDirection: 'row', gap: 8, marginTop: 16 }}>
+                <TouchableOpacity style={styles.modalCancelBtn} onPress={() => setShowGroupModal(false)}>
+                  <Text style={styles.modalCancelBtnText}>Annuler</Text>
                 </TouchableOpacity>
-              ))}
-            </ScrollView>
-          </View>
-        )}
-
-        {isDispatcher && (
-          <View style={styles.usersSection}>
-            <Text style={styles.sectionTitle}>Appel direct</Text>
-            <ScrollView style={styles.usersList}>
-              {users.map(u => (
-                <TouchableOpacity
-                  key={u.id}
-                  style={[styles.userItem, selectedUser?.id === u.id && styles.userItemActive]}
-                  onPress={() => setSelectedUser(u)}
-                >
-                  <View style={styles.userAvatar}>
-                    <Text style={styles.userAvatarText}>{u.name?.charAt(0) || '?'}</Text>
-                  </View>
-                  <View style={styles.userInfo}>
-                    <Text style={styles.userName}>{u.name}</Text>
-                    <Text style={styles.userRole}>{u.role}</Text>
-                  </View>
-                  <Text style={styles.callIcon}>📞</Text>
+                <TouchableOpacity style={[styles.modalSaveBtn, groupSaving && { opacity: 0.6 }]} onPress={saveGroup} disabled={groupSaving}>
+                  {groupSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.modalSaveBtnText}>Créer</Text>}
                 </TouchableOpacity>
-              ))}
-            </ScrollView>
+              </View>
+            </View>
           </View>
-        )}
+        </Modal>
       </SafeAreaView>
     </TalionScreen>
   );
@@ -251,8 +300,26 @@ export default function PTTScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f8fafc' },
-  header: { flexDirection: 'row', alignItems: 'center', padding: 16 },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 16 },
   title: { fontSize: 20, fontWeight: '700', color: '#1e3a5f' },
+  refreshBtn: { padding: 6 },
+  refreshBtnText: { fontSize: 20, color: '#1e3a5f' },
+  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 32 },
+  emptyText: { color: '#9ca3af', fontSize: 14 },
+  warningBanner: { marginHorizontal: 16, marginBottom: 8, backgroundColor: '#fef3c7', borderRadius: 8, padding: 10 },
+  warningBannerText: { color: '#92400e', fontSize: 12, textAlign: 'center' },
+  emergencyBtn: { flex: 1, backgroundColor: '#dc2626', borderRadius: 10, paddingVertical: 12, alignItems: 'center' },
+  emergencyBtnText: { color: '#fff', fontWeight: '700', fontSize: 13 },
+  groupBtn: { flex: 1, backgroundColor: '#1e3a5f', borderRadius: 10, paddingVertical: 12, alignItems: 'center' },
+  groupBtnText: { color: '#fff', fontWeight: '700', fontSize: 13 },
+  channelRow: {
+    flexDirection: 'row', alignItems: 'center', backgroundColor: '#ffffff', borderRadius: 12,
+    padding: 14, marginBottom: 8, gap: 12, borderWidth: 1, borderColor: '#e5e7eb',
+  },
+  channelRowIcon: { fontSize: 24 },
+  channelRowName: { fontSize: 15, fontWeight: '700', color: '#1f2937' },
+  channelRowDesc: { fontSize: 12, color: '#6b7280', marginTop: 2 },
+  channelRowArrow: { fontSize: 22, color: '#9ca3af' },
   channelBanner: { margin: 16, backgroundColor: '#1e3a5f', borderRadius: 12, padding: 16 },
   channelLabel: { fontSize: 11, color: 'rgba(255,255,255,0.6)', marginBottom: 4 },
   channelName: { fontSize: 18, fontWeight: '700', color: '#ffffff' },
@@ -265,20 +332,15 @@ const styles = StyleSheet.create({
   pttButtonActive: { backgroundColor: '#dc2626' },
   pttIcon: { fontSize: 48, marginBottom: 8 },
   pttLabel: { color: '#ffffff', fontSize: 11, fontWeight: '700', textAlign: 'center', letterSpacing: 1 },
-  usersSection: { maxHeight: 250, marginHorizontal: 16, marginBottom: 16 },
-  sectionTitle: { fontSize: 14, fontWeight: '600', color: '#374151', marginBottom: 8 },
-  usersList: { flex: 1 },
-  userItem: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#ffffff', borderRadius: 10, padding: 12, marginBottom: 8, gap: 12 },
-  userItemActive: { backgroundColor: '#dbeafe', borderWidth: 1, borderColor: '#3b82f6' },
-  userAvatar: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#1e3a5f', justifyContent: 'center', alignItems: 'center' },
-  userAvatarText: { color: '#ffffff', fontWeight: '700', fontSize: 14 },
-  userInfo: { flex: 1 },
-  userName: { fontSize: 14, fontWeight: '600', color: '#1f2937' },
-  userRole: { fontSize: 12, color: '#6b7280' },
-  callIcon: { fontSize: 20 },
-  pttMessagesSection: { marginHorizontal: 16, marginBottom: 8 },
-  pttMessageItem: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#ffffff', borderRadius: 8, padding: 10, marginBottom: 6, gap: 8 },
-  pttMessageSender: { flex: 1, fontSize: 13, fontWeight: '600', color: '#1f2937' },
-  pttMessageTime: { fontSize: 11, color: '#9ca3af' },
-  pttMessagePlay: { fontSize: 12, color: '#3b82f6', fontWeight: '600' },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', padding: 20 },
+  modalContent: { backgroundColor: '#fff', borderRadius: 16, padding: 20, maxHeight: '80%' },
+  modalTitle: { fontSize: 17, fontWeight: '700', color: '#1f2937', marginBottom: 12 },
+  modalLabel: { fontSize: 12, fontWeight: '600', color: '#374151', marginBottom: 6, marginTop: 4 },
+  groupNameInput: { backgroundColor: '#f3f4f6', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, marginBottom: 8, color: '#1f2937' },
+  memberRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 },
+  memberRowText: { fontSize: 14, color: '#1f2937' },
+  modalCancelBtn: { flex: 1, backgroundColor: '#f3f4f6', borderRadius: 10, paddingVertical: 12, alignItems: 'center' },
+  modalCancelBtnText: { color: '#374151', fontWeight: '600' },
+  modalSaveBtn: { flex: 1, backgroundColor: '#1e3a5f', borderRadius: 10, paddingVertical: 12, alignItems: 'center' },
+  modalSaveBtnText: { color: '#fff', fontWeight: '700' },
 });

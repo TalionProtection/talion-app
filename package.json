@@ -15,8 +15,10 @@
     "lint": "expo lint"
   },
   "dependencies": {
+    "@config-plugins/react-native-webrtc": "^13.0.0",
     "@expo/vector-icons": "^15.0.3",
     "@livekit/react-native": "^2.10.0",
+    "@livekit/react-native-expo-plugin": "^1.0.2",
     "@livekit/react-native-webrtc": "^144.0.0",
     "@react-native-async-storage/async-storage": "2.2.0",
     "@react-navigation/bottom-tabs": "^7.4.0",
@@ -50,6 +52,7 @@
     "expo-task-manager": "~14.0.9",
     "expo-web-browser": "~15.0.10",
     "express": "^5.2.1",
+    "livekit-client": "^2.21.0",
     "livekit-server-sdk": "^2.15.1",
     "multer": "^2.1.1",
     "pdfkit": "^0.19.1",

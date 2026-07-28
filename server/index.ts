@@ -1484,6 +1484,56 @@ function computeFamilyGroups(): string[][] {
   return groups;
 }
 
+// ─── PTT channel access (family/staff/group model) ─────────────────────
+// A stable id for a family's PTT channel, derived from the group's members
+// rather than stored separately — the lexicographically-smallest member id
+// is used as the canonical key so the same family always maps to the same
+// channel id across restarts, without needing its own persisted identity.
+function getFamilyChannelId(userId: string): string | null {
+  const groups = computeFamilyGroups();
+  const group = groups.find(g => g.includes(userId));
+  if (!group || group.length < 2) return null; // a "family" of one doesn't need a channel
+  return `family-${[...group].sort()[0]}`;
+}
+
+// Auto-provisions the caller's family channel the first time it's needed
+// (e.g. when listing channels) rather than requiring dispatch/admin to set
+// it up — every family gets one automatically, membership is exactly the
+// family group, and it's re-synced (name/members) on every call in case
+// relationships changed since it was first created.
+function ensureFamilyChannel(userId: string): PTTChannelServer | null {
+  const channelId = getFamilyChannelId(userId);
+  if (!channelId) return null;
+  const groups = computeFamilyGroups();
+  const group = groups.find(g => g.includes(userId))!;
+  const memberNames = group.map(id => adminUsers.get(id)?.name || id);
+  let channel = pttChannels.find(c => c.id === channelId);
+  if (!channel) {
+    channel = {
+      id: channelId, name: `Famille ${memberNames[0]}`, description: 'Canal familial (privé)',
+      allowedRoles: ['user', 'responder', 'dispatcher', 'admin'], isActive: true, isDefault: false,
+      createdBy: 'system', createdAt: Date.now(), members: group,
+    };
+    pttChannels.push(channel);
+    persistPTTChannels();
+  } else if (JSON.stringify([...channel.members || []].sort()) !== JSON.stringify([...group].sort())) {
+    // Family membership changed (relationship added/removed) — keep it in sync.
+    channel.members = group;
+    persistPTTChannels();
+  }
+  return channel;
+}
+
+// Single source of truth for "can this user join/see this channel" — used by
+// both the channel list and the LiveKit token issuance, so a client can never
+// get a working token for a room the list wouldn't have shown them anyway.
+function canJoinPTTChannel(userId: string, role: string, channel: PTTChannelServer): boolean {
+  if (role === 'admin') return true;
+  if (!channel.allowedRoles.includes(role as any)) return false;
+  if (channel.members && channel.members.length > 0) return channel.members.includes(userId);
+  return true;
+}
+
 function persistManualPresence() {
   debouncedSave(PRESENCE_FILE, Array.from(manualPresence.entries()).map(([targetUserId, p]) => ({ targetUserId, ...p })));
   manualPresence.forEach((p, targetUserId) => saveManualPresenceToSupabase(targetUserId, p));
@@ -5538,64 +5588,54 @@ function handlePTTEmergency(ws: any, userId: string, userRole: string, data: any
 
 // ─── PTT REST API ──────────────────────────────────────────────────────────────────────────────
 
-// GET /api/ptt/channels - list all channels accessible by the user
-app.get('/api/ptt/channels', (req, res) => {
-  const userRole = (req.query.role as string) || 'user';
-  const userId = req.query.userId as string;
-  const accessible = pttChannels.filter(ch => {
-    if (userRole === 'admin') return true;
-    // Dispatchers see all channels including direct channels (for monitoring)
-    if (userRole === 'dispatcher') {
-      if (!ch.allowedRoles.includes('dispatcher')) return false;
-      return true;
-    }
-    if (!ch.allowedRoles.includes(userRole as any)) return false;
-    // For member-restricted channels, check membership
-    if (ch.members && ch.members.length > 0 && !ch.members.includes(userId)) return false;
-    return true;
-  });
+// GET /api/ptt/channels - list channels accessible by the caller (verified
+// identity — not a client-supplied role/userId, unlike before). Every user
+// with family gets their private family channel auto-provisioned here.
+app.get('/api/ptt/channels', requireAuth, (req, res) => {
+  const caller = req.supabaseUser!;
+  ensureFamilyChannel(caller.id);
+  const accessible = pttChannels.filter(ch => canJoinPTTChannel(caller.id, caller.role, ch));
   res.json(accessible);
 });
 
-// POST /api/ptt/channels - create a custom channel (dispatcher/admin only)
-app.post('/api/ptt/channels', (req, res) => {
-  const { name, description, allowedRoles, members, createdBy, createdByRole } = req.body;
-  if (!name || !createdBy) {
-    return res.status(400).json({ error: 'name and createdBy are required' });
-  }
-  if (createdByRole !== 'dispatcher' && createdByRole !== 'admin') {
+// POST /api/ptt/channels - create a custom group channel (dispatcher/admin
+// only) — dispatch picks the members explicitly, per the intended model of
+// "dispatch decides who's in the group."
+app.post('/api/ptt/channels', requireAuth, (req, res) => {
+  const caller = req.supabaseUser!;
+  if (caller.role !== 'dispatcher' && caller.role !== 'admin') {
     return res.status(403).json({ error: 'Only dispatchers and admins can create channels' });
   }
+  const { name, description, members } = req.body;
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  const callerUser = adminUsers.get(caller.id);
 
   const channel: PTTChannelServer = {
     id: `custom-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
     name,
     description: description || '',
-    allowedRoles: allowedRoles || ['user', 'responder', 'dispatcher', 'admin'],
+    allowedRoles: ['user', 'responder', 'dispatcher', 'admin'],
     isActive: true,
     isDefault: false,
-    createdBy,
+    createdBy: caller.id,
     createdAt: Date.now(),
-    members: members || [],
+    members: Array.isArray(members) ? members : [],
   };
 
   pttChannels.push(channel);
   persistPTTChannels();
-
-  // Broadcast new channel to all clients
   broadcastMessage({ type: 'pttChannelCreated', data: channel });
-
-  console.log(`[PTT] Channel "${name}" created by ${createdBy}`);
+  console.log(`[PTT] Channel "${name}" created by ${callerUser?.name || caller.id}`);
   res.json(channel);
 });
 
 // DELETE /api/ptt/channels/:id - delete a custom channel (dispatcher/admin only)
-app.delete('/api/ptt/channels/:id', (req, res) => {
-  const { id } = req.params;
-  const { userRole } = req.query;
-  if (userRole !== 'dispatcher' && userRole !== 'admin') {
+app.delete('/api/ptt/channels/:id', requireAuth, (req, res) => {
+  const caller = req.supabaseUser!;
+  if (caller.role !== 'dispatcher' && caller.role !== 'admin') {
     return res.status(403).json({ error: 'Only dispatchers and admins can delete channels' });
   }
+  const id = req.params.id as string;
   const idx = pttChannels.findIndex(c => c.id === id);
   if (idx === -1) return res.status(404).json({ error: 'Channel not found' });
   if (pttChannels[idx].isDefault) return res.status(400).json({ error: 'Cannot delete default channels' });
@@ -5604,7 +5644,6 @@ app.delete('/api/ptt/channels/:id', (req, res) => {
   deletePTTChannelFromSupabase(id);
   persistPTTChannels();
 
-  // Also remove messages for this channel
   pttMessages = pttMessages.filter(m => m.channelId !== id);
   persistPTTMessages();
 
@@ -5613,24 +5652,27 @@ app.delete('/api/ptt/channels/:id', (req, res) => {
   res.json({ success: true });
 });
 
-// POST /api/ptt/channels/direct - create or find a direct 1-on-1 PTT channel between two users
-app.post('/api/ptt/channels/direct', (req, res) => {
-  const { userId1, userId2, userName1, userName2 } = req.body;
-  if (!userId1 || !userId2) {
-    return res.status(400).json({ error: 'userId1 and userId2 are required' });
-  }
-  // Check if a direct channel already exists between these two users
+// POST /api/ptt/channels/direct - create or find a direct 1-on-1 PTT channel
+// between the caller and another user. The caller's own identity always comes
+// from their verified session — they can't fabricate either side as someone
+// else, only pick who they're calling.
+app.post('/api/ptt/channels/direct', requireAuth, (req, res) => {
+  const caller = req.supabaseUser!;
+  const { userId2 } = req.body;
+  if (!userId2) return res.status(400).json({ error: 'userId2 is required' });
+  const callerUser = adminUsers.get(caller.id);
+  const targetUser = adminUsers.get(userId2);
+  if (!targetUser) return res.status(404).json({ error: 'Target user not found' });
+
   const existing = pttChannels.find(ch =>
     ch.members && ch.members.length === 2 &&
-    ch.members.includes(userId1) && ch.members.includes(userId2) &&
+    ch.members.includes(caller.id) && ch.members.includes(userId2) &&
     ch.id.startsWith('direct-')
   );
-  if (existing) {
-    return res.json(existing);
-  }
-  // Create a new direct channel
-  const name1 = userName1 || userId1;
-  const name2 = userName2 || userId2;
+  if (existing) return res.json(existing);
+
+  const name1 = callerUser?.name || caller.id;
+  const name2 = targetUser.name || userId2;
   const channel: PTTChannelServer = {
     id: `direct-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
     name: `${name1} ↔ ${name2}`,
@@ -5638,16 +5680,52 @@ app.post('/api/ptt/channels/direct', (req, res) => {
     allowedRoles: ['user', 'responder', 'dispatcher', 'admin'],
     isActive: true,
     isDefault: false,
-    createdBy: userId1,
+    createdBy: caller.id,
     createdAt: Date.now(),
-    members: [userId1, userId2],
+    members: [caller.id, userId2],
   };
   pttChannels.push(channel);
   persistPTTChannels();
-  // Broadcast to both users and all dispatchers/admins
   broadcastMessage({ type: 'pttChannelCreated', data: channel });
   console.log(`[PTT] Direct channel created: ${name1} ↔ ${name2}`);
   res.json(channel);
+});
+
+// POST /api/ptt/emergency - trigger the emergency PTT broadcast (dispatcher/
+// admin only, verified). Replaces the old WS pttEmergency path, which trusted
+// a client-declared role and called a push-sending function that didn't even
+// exist (silently threw on every use). This only triggers the notification —
+// the actual audio happens over the caller's LiveKit "emergency" room join,
+// which every client gets pushed to open.
+app.post('/api/ptt/emergency', requireAuth, async (req, res) => {
+  const caller = req.supabaseUser!;
+  if (caller.role !== 'dispatcher' && caller.role !== 'admin') {
+    return res.status(403).json({ error: 'Only dispatchers and admins can trigger emergency PTT' });
+  }
+  const senderName = adminUsers.get(caller.id)?.name || caller.id;
+  const payload = { type: 'pttEmergencyTriggered', data: { channelId: 'emergency', senderId: caller.id, senderName, senderRole: caller.role, timestamp: Date.now() } };
+  broadcastMessage(payload);
+
+  const targetTokens: string[] = [];
+  for (const [token, entry] of pushTokens) {
+    if (entry.userId !== caller.id) targetTokens.push(token);
+  }
+  if (targetTokens.length > 0) {
+    const messages = targetTokens.map((token) => ({
+      to: token, sound: 'default', title: '🚨 ALERTE URGENCE PTT',
+      body: `${senderName} déclenche le canal d'urgence`,
+      data: { type: 'pttEmergency' }, priority: 'high' as const, channelId: 'incident-updates',
+    }));
+    try {
+      await fetch('https://exp.host/--/api/v2/push/send', {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Accept-Encoding': 'gzip, deflate', 'Content-Type': 'application/json' },
+        body: JSON.stringify(messages),
+      });
+    } catch (e) { console.error('[PTT] Emergency push error:', e); }
+  }
+  console.log(`[PTT] EMERGENCY triggered by ${senderName}`);
+  res.json({ success: true });
 });
 
 // GET /api/ptt/messages/:channelId - get recent messages for a channel
@@ -6278,19 +6356,31 @@ async function loadMessagesFromSupabase(): Promise<void> {
 
 // ─── LiveKit PTT ──────────────────────────────────────────────────────────────
 
-// POST /api/livekit/token - générer un token pour rejoindre une room
-app.post('/api/livekit/token', async (req, res) => {
-  const { userId, userName, roomName } = req.body;
-  if (!userId || !roomName) return res.status(400).json({ error: 'userId and roomName required' });
+// POST /api/livekit/token - générer un token pour rejoindre une room (PTT).
+// Identity comes from the verified session, never the request body, and the
+// requested room must be a channel the caller is actually allowed to join —
+// otherwise this would just be a second, unguarded way to reach any PTT
+// audio room regardless of what /api/ptt/channels would have shown them.
+app.post('/api/livekit/token', requireAuth, async (req, res) => {
+  const caller = req.supabaseUser!;
+  const { roomName } = req.body;
+  if (!roomName) return res.status(400).json({ error: 'roomName required' });
+
+  ensureFamilyChannel(caller.id);
+  const channel = pttChannels.find(c => c.id === roomName);
+  if (!channel || !canJoinPTTChannel(caller.id, caller.role, channel)) {
+    return res.status(403).json({ error: 'Not authorized to join this channel' });
+  }
 
   try {
     const { AccessToken } = await import('livekit-server-sdk');
     const apiKey = process.env.LIVEKIT_API_KEY || 'talioncd15c681';
     const apiSecret = process.env.LIVEKIT_API_SECRET || '759155227f75206216d399f37e676a010a92658ef655727358dddba0271c9f0f';
     const livekitUrl = process.env.LIVEKIT_URL || 'wss://talion-livekit.onrender.com';
+    const callerUser = adminUsers.get(caller.id);
     const at = new AccessToken(apiKey, apiSecret, {
-      identity: userId,
-      name: userName || userId,
+      identity: caller.id,
+      name: callerUser?.name || caller.id,
       ttl: '4h',
     });
     at.addGrant({
@@ -6301,19 +6391,21 @@ app.post('/api/livekit/token', async (req, res) => {
     });
     const token = await at.toJwt();
     res.json({ token, url: livekitUrl, room: roomName });
-    console.log(`[LiveKit] Token généré pour ${userName} dans room ${roomName}`);
+    console.log(`[LiveKit] Token généré pour ${callerUser?.name || caller.id} dans room ${roomName}`);
   } catch (e: any) {
     console.error('[LiveKit] Token error:', e);
     res.status(500).json({ error: e.message });
   }
 });
 
-// GET /api/livekit/rooms - lister les rooms actives (pour le dispatch)
-app.get('/api/livekit/rooms', async (req, res) => {
+// GET /api/livekit/rooms - the caller's actual accessible PTT channels (family/
+// staff/group/direct), not the previous hardcoded single-room stub.
+app.get('/api/livekit/rooms', requireAuth, (req, res) => {
+  const caller = req.supabaseUser!;
+  ensureFamilyChannel(caller.id);
+  const accessible = pttChannels.filter(ch => canJoinPTTChannel(caller.id, caller.role, ch));
   res.json({
-    rooms: [
-      { name: 'dispatch', label: 'Canal Dispatch', type: 'group' },
-    ],
+    rooms: accessible.map(ch => ({ name: ch.id, label: ch.name, description: ch.description, type: ch.members?.length ? 'group' : 'broadcast' })),
     livekitUrl: process.env.LIVEKIT_URL || 'wss://talion-livekit.onrender.com',
   });
 });

@@ -1,66 +1,101 @@
 /**
  * LiveKit PTT Service
- * Gère la connexion PTT via LiveKit pour Talion Crisis Comm
+ * Gère la connexion PTT via LiveKit pour Talion Crisis Comm.
  */
 
-import { Room, RoomEvent, Track, LocalParticipant, ConnectionState } from '@livekit/react-native';
+import { Platform } from 'react-native';
 import { getApiBaseUrl } from './server-url';
+import { authHeader } from './auth-fetch';
+
+// Loaded defensively (require + try/catch, not a static import): this is a
+// heavy native module (WebRTC) that can crash the whole screen at import
+// time if it isn't available in a given build — same lesson as
+// lib/ptt-context.tsx for expo-audio/expo-file-system.
+//
+// Room/RoomEvent come from livekit-client (the core cross-platform SDK),
+// NOT from @livekit/react-native — that package only exports RN-specific
+// helpers (registerGlobals, AudioSession, etc.) and re-exports nothing else;
+// Room/RoomEvent aren't in it under any name. registerGlobals() itself,
+// though, is required — it polyfills the WebRTC globals (RTCPeerConnection,
+// MediaStream, etc.) that livekit-client expects to find, backed by
+// @livekit/react-native-webrtc's native bindings. It must run exactly once,
+// before any Room is constructed.
+let RoomCtor: any = null;
+let RoomEventEnum: any = null;
+if (Platform.OS !== 'web') {
+  try {
+    const { registerGlobals } = require('@livekit/react-native');
+    registerGlobals();
+    const { Room, RoomEvent } = require('livekit-client');
+    RoomCtor = Room;
+    RoomEventEnum = RoomEvent;
+    console.log('[LiveKit] livekit-client loaded and globals registered');
+  } catch (e) {
+    console.warn('[LiveKit] Failed to load livekit-client:', e);
+  }
+}
+
+export function isLiveKitAvailable(): boolean {
+  return !!RoomCtor;
+}
 
 class LiveKitPTTService {
-  private room: Room | null = null;
+  private room: any = null;
   private isConnected = false;
   private isTransmitting = false;
   private currentRoom = '';
 
   // Callbacks
   onConnectionChange?: (connected: boolean) => void;
-  onSpeakerChange?: (speakerId: string, speakerName: string, isSpeaking: boolean) => void;
+  // Full current set of active speakers (not a per-speaker on/off event) —
+  // LiveKit's ActiveSpeakersChanged only lists who IS currently speaking, so
+  // the consumer diffs this list itself rather than us guessing who stopped.
+  onActiveSpeakersChanged?: (speakers: { identity: string; name: string }[]) => void;
   onError?: (error: string) => void;
 
-  async getToken(userId: string, userName: string, roomName: string): Promise<{ token: string; url: string }> {
+  async getToken(roomName: string): Promise<{ token: string; url: string }> {
     const res = await fetch(`${getApiBaseUrl()}/api/livekit/token`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId, userName, roomName }),
+      headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+      body: JSON.stringify({ roomName }),
     });
-    if (!res.ok) throw new Error('Failed to get LiveKit token');
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || 'Failed to get LiveKit token');
+    }
     return res.json();
   }
 
-  async connect(userId: string, userName: string, roomName: string): Promise<void> {
+  async connect(roomName: string): Promise<void> {
+    if (!RoomCtor) throw new Error('LiveKit is not available on this build');
     try {
       if (this.room) await this.disconnect();
 
-      const { token, url } = await this.getToken(userId, userName, roomName);
-      
-      this.room = new Room();
+      const { token, url } = await this.getToken(roomName);
+
+      this.room = new RoomCtor();
       this.currentRoom = roomName;
 
-      this.room.on(RoomEvent.Connected, () => {
+      this.room.on(RoomEventEnum.Connected, () => {
         this.isConnected = true;
         this.onConnectionChange?.(true);
         console.log('[LiveKit] Connected to room:', roomName);
       });
 
-      this.room.on(RoomEvent.Disconnected, () => {
+      this.room.on(RoomEventEnum.Disconnected, () => {
         this.isConnected = false;
         this.onConnectionChange?.(false);
         console.log('[LiveKit] Disconnected from room:', roomName);
       });
 
-      this.room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
-        speakers.forEach(speaker => {
-          this.onSpeakerChange?.(speaker.identity, speaker.name || speaker.identity, true);
-        });
+      this.room.on(RoomEventEnum.ActiveSpeakersChanged, (speakers: any[]) => {
+        this.onActiveSpeakersChanged?.(speakers.map(s => ({ identity: s.identity, name: s.name || s.identity })));
       });
 
-      await this.room.connect(url, token, {
-        autoSubscribe: true,
-      });
+      await this.room.connect(url, token, { autoSubscribe: true });
 
-      // Démarrer avec micro désactivé (PTT)
+      // Start muted — this is push-to-talk, not an open mic.
       await this.room.localParticipant.setMicrophoneEnabled(false);
-
     } catch (e: any) {
       console.error('[LiveKit] Connect error:', e);
       this.onError?.(e.message);

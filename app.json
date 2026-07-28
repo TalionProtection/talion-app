@@ -67,6 +67,21 @@
             "backgroundColor": "#000000"
           }
         }
+      ],
+      [
+        "@livekit/react-native-expo-plugin",
+        {
+          "android": {
+            "audioType": "communication"
+          }
+        }
+      ],
+      [
+        "@config-plugins/react-native-webrtc",
+        {
+          "microphonePermission": "Talion Crisis Comm needs your microphone to talk on PTT channels.",
+          "cameraPermission": "Talion Crisis Comm does not use your camera."
+        }
       ]
     ],
     "experiments": {
