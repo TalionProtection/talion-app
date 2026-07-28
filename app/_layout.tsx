@@ -6,7 +6,7 @@ import { View, Text, ActivityIndicator } from 'react-native';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { AuthProvider } from '@/lib/auth-context';
-import { PTTProvider } from '@/lib/ptt-context';
+import { LiveKitPTTProvider } from '@/lib/livekit-ptt-provider';
 import { NotificationProvider } from '@/lib/notification-context';
 import { LocationProvider } from '@/lib/location-context';
 import { MessagingProvider } from '@/lib/messaging-context';
@@ -83,9 +83,9 @@ function AuthAwareProviders({ children }: { children: React.ReactNode }) {
       <LocationProvider userRole={userRole} isOnDuty={isOnDuty}>
         <NotificationProvider>
           <MessagingProvider>
-            <PTTProvider>
+            <LiveKitPTTProvider>
               {children}
-            </PTTProvider>
+            </LiveKitPTTProvider>
           </MessagingProvider>
         </NotificationProvider>
       </LocationProvider>

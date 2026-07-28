@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, Alert,
   ActivityIndicator, ScrollView, Pressable, Modal, TextInput,
@@ -9,7 +9,8 @@ import { useAuth } from '@/hooks/useAuth';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
 import { authHeader } from '@/lib/auth-fetch';
-import { livekitPTT, isLiveKitAvailable, getLiveKitLoadError } from '@/lib/livekit-ptt';
+import { isLiveKitAvailable, getLiveKitLoadError } from '@/lib/livekit-ptt';
+import { useLiveKitPTT } from '@/lib/livekit-ptt-provider';
 
 interface PTTChannel {
   id: string;
@@ -25,13 +26,13 @@ export default function PTTScreen() {
   const isStaff = user?.role === 'responder' || user?.role === 'dispatcher' || user?.role === 'admin';
   const isDispatchStaff = user?.role === 'dispatcher' || user?.role === 'admin';
 
+  const {
+    connected, connecting, activeChannelId, activeChannelName, activeSpeakers, transmitting,
+    connect, disconnect, startTransmit: startTransmitCtx, stopTransmit: stopTransmitCtx,
+  } = useLiveKitPTT();
+
   const [channels, setChannels] = useState<PTTChannel[]>([]);
   const [channelsLoading, setChannelsLoading] = useState(true);
-  const [activeChannel, setActiveChannel] = useState<PTTChannel | null>(null);
-  const [connecting, setConnecting] = useState(false);
-  const [connected, setConnected] = useState(false);
-  const [transmitting, setTransmitting] = useState(false);
-  const [activeSpeakers, setActiveSpeakers] = useState<{ identity: string; name: string }[]>([]);
 
   // Group creation (dispatcher/admin only)
   const [showGroupModal, setShowGroupModal] = useState(false);
@@ -40,8 +41,11 @@ export default function PTTScreen() {
   const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
   const [groupSaving, setGroupSaving] = useState(false);
 
-  const activeChannelRef = useRef<PTTChannel | null>(null);
-  useEffect(() => { activeChannelRef.current = activeChannel; }, [activeChannel]);
+  // The connection itself lives in LiveKitPTTProvider (mounted at the app
+  // root) so it survives navigating away from this tab - this screen just
+  // looks up the full channel object (for name/description/icon) from the
+  // id the provider is currently connected to.
+  const activeChannel = channels.find(ch => ch.id === activeChannelId) || (activeChannelId ? { id: activeChannelId, name: activeChannelName || activeChannelId, description: '', allowedRoles: [], isDefault: false } as PTTChannel : null);
 
   const loadChannels = useCallback(async () => {
     setChannelsLoading(true);
@@ -57,12 +61,6 @@ export default function PTTScreen() {
 
   useEffect(() => {
     loadChannels();
-    livekitPTT.onConnectionChange = (isConnected) => setConnected(isConnected);
-    livekitPTT.onActiveSpeakersChanged = (speakers) => setActiveSpeakers(speakers);
-    livekitPTT.onError = (message) => Alert.alert('Erreur PTT', message);
-    return () => {
-      livekitPTT.disconnect();
-    };
   }, [loadChannels]);
 
   const joinChannel = useCallback(async (channel: PTTChannel) => {
@@ -70,36 +68,28 @@ export default function PTTScreen() {
       Alert.alert('Indisponible', 'Le PTT en direct n\'est pas disponible sur cette version de l\'app.');
       return;
     }
-    setConnecting(true);
     try {
-      await livekitPTT.connect(channel.id);
-      setActiveChannel(channel);
+      await connect(channel.id, channel.name);
     } catch (e) {
-      // livekitPTT.onError already surfaces an alert
+      // onError already surfaces an alert
     }
-    setConnecting(false);
-  }, []);
+  }, [connect]);
 
   const leaveChannel = useCallback(async () => {
-    await livekitPTT.disconnect();
-    setActiveChannel(null);
-    setActiveSpeakers([]);
-    setTransmitting(false);
-  }, []);
+    await disconnect();
+  }, [disconnect]);
 
   const startTransmit = useCallback(async () => {
     // No beep here: expo-audio playback during an active LiveKit session is a
     // confirmed unresolved upstream conflict on iOS (livekit/client-sdk-react-native#286)
     // - it silently breaks the mic for the rest of the session. Not worth the
     // walkie-talkie chirp losing core PTT audio.
-    await livekitPTT.startTransmit();
-    setTransmitting(true);
-  }, []);
+    await startTransmitCtx();
+  }, [startTransmitCtx]);
 
   const stopTransmit = useCallback(async () => {
-    await livekitPTT.stopTransmit();
-    setTransmitting(false);
-  }, []);
+    await stopTransmitCtx();
+  }, [stopTransmitCtx]);
 
   const triggerEmergency = useCallback(() => {
     Alert.alert('Confirmer', 'Déclencher l\'alerte d\'urgence PTT pour tout le monde ?', [

@@ -15,7 +15,6 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '@/hooks/useAuth';
 import { useActiveSOSAlert } from '@/hooks/useActiveSOSAlert';
-import { usePTT } from '@/lib/ptt-context';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import * as Haptics from 'expo-haptics';
@@ -36,7 +35,6 @@ export default function ProfileScreen() {
   const { user, logout, updateProfile } = useAuth();
   const router = useRouter();
   const { activeAlert } = useActiveSOSAlert(user?.id);
-  const { selectChannel, state: pttState } = usePTT();
 
   const [firstName, setFirstName] = useState(user?.firstName || '');
   const [lastName, setLastName] = useState(user?.lastName || '');
@@ -157,16 +155,11 @@ export default function ProfileScreen() {
   };
 
   const handleGoToPTT = useCallback(() => {
-    // Navigate to the PTT tab and auto-select the emergency channel
-    const emergencyChannel = pttState.channels.find(ch => ch.id === 'emergency');
-    if (emergencyChannel) {
-      selectChannel(emergencyChannel);
-    }
     if (Platform.OS !== 'web') {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     }
     router.push('/(tabs)/ptt');
-  }, [pttState.channels, selectChannel, router]);
+  }, [router]);
 
   if (!user) {
     return (
