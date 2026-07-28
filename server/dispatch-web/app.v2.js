@@ -23,12 +23,19 @@ if (!localStorage.getItem('talion_token')) {
 (() => {
   const _rawFetch = window.fetch.bind(window);
   window.fetch = (input, init = {}) => {
+    const reqUrl = typeof input === 'string' ? input : (input && input.url) || String(input);
+    const isSameOrigin = reqUrl.startsWith('/') || reqUrl.startsWith(window.location.origin) || reqUrl.startsWith(API_BASE);
+    if (!isSameOrigin) {
+      // Third-party requests (e.g. livekit-client's own calls to LiveKit Cloud's
+      // regions endpoint) must not get our Supabase bearer token attached, and
+      // their response codes have nothing to do with our own session.
+      return _rawFetch(input, init);
+    }
     const token = localStorage.getItem('talion_token');
     const headers = new Headers(init.headers || (typeof input === 'object' && input.headers) || {});
     if (token) headers.set('Authorization', `Bearer ${token}`);
     return _rawFetch(input, { ...init, headers }).then(res => {
       if (res.status === 401) {
-        const reqUrl = typeof input === 'string' ? input : (input && input.url) || String(input);
         console.error(`[Auth] 401 on ${reqUrl} — redirecting to login`);
         localStorage.setItem('talion_last_401', reqUrl);
         localStorage.removeItem('talion_token');
