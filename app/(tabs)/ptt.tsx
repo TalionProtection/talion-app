@@ -9,7 +9,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
 import { authHeader } from '@/lib/auth-fetch';
-import { livekitPTT, isLiveKitAvailable } from '@/lib/livekit-ptt';
+import { livekitPTT, isLiveKitAvailable, getLiveKitLoadError } from '@/lib/livekit-ptt';
 
 interface PTTChannel {
   id: string;
@@ -232,6 +232,9 @@ export default function PTTScreen() {
         {!isLiveKitAvailable() && (
           <View style={styles.warningBanner}>
             <Text style={styles.warningBannerText}>⚠️ PTT en direct non disponible sur cette version de l'app.</Text>
+            {getLiveKitLoadError() && (
+              <Text style={styles.warningBannerText}>{getLiveKitLoadError()}</Text>
+            )}
           </View>
         )}
 

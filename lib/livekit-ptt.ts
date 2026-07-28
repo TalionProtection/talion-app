@@ -22,6 +22,7 @@ import { authHeader } from './auth-fetch';
 // before any Room is constructed.
 let RoomCtor: any = null;
 let RoomEventEnum: any = null;
+let loadError: string | null = null;
 if (Platform.OS !== 'web') {
   try {
     const { registerGlobals } = require('@livekit/react-native');
@@ -30,13 +31,18 @@ if (Platform.OS !== 'web') {
     RoomCtor = Room;
     RoomEventEnum = RoomEvent;
     console.log('[LiveKit] livekit-client loaded and globals registered');
-  } catch (e) {
+  } catch (e: any) {
+    loadError = e?.message || String(e);
     console.warn('[LiveKit] Failed to load livekit-client:', e);
   }
 }
 
 export function isLiveKitAvailable(): boolean {
   return !!RoomCtor;
+}
+
+export function getLiveKitLoadError(): string | null {
+  return loadError;
 }
 
 class LiveKitPTTService {
