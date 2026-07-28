@@ -169,6 +169,14 @@ export default function PatrolScreen() {
   const [sightingNotes, setSightingNotes] = useState('');
   const [sightingSaving, setSightingSaving] = useState(false);
   const [photoUploading, setPhotoUploading] = useState(false);
+  // Link to a specific family/user and, per-sighting, to a registered residence —
+  // makes "where they were seen" point at real data instead of free text alone.
+  const [allUsersCache, setAllUsersCache] = useState<any[] | null>(null);
+  const [allResidencesCache, setAllResidencesCache] = useState<any[] | null>(null);
+  const [bbLinkedUserId, setBbLinkedUserId] = useState<string | null>(null);
+  const [bbUserSearch, setBbUserSearch] = useState('');
+  const [sightingResidenceId, setSightingResidenceId] = useState<string | null>(null);
+  const [sightingResidenceSearch, setSightingResidenceSearch] = useState('');
 
   // ─── Data Fetching ──────────────────────────────────────────────────────
 
@@ -477,11 +485,34 @@ export default function PatrolScreen() {
     setBbFirstName(''); setBbLastName(''); setBbAliases(''); setBbDateOfBirth('');
     setBbRiskLevel('medium'); setBbStatus('active'); setBbPhysicalDescription('');
     setBbTags(''); setBbVehiclePlate(''); setBbVehicleDescription(''); setBbNotes('');
+    setBbLinkedUserId(null); setBbUserSearch('');
   };
+
+  const ensureAllUsersLoaded = useCallback(async () => {
+    if (allUsersCache) return;
+    try {
+      const data = await apiGet<any[]>('/api/users');
+      setAllUsersCache(data);
+    } catch (e) {
+      setAllUsersCache([]);
+    }
+  }, [allUsersCache]);
+
+  const ensureAllResidencesLoaded = useCallback(async () => {
+    if (allResidencesCache) return;
+    try {
+      const data = await apiGet<any[]>('/api/all-residences');
+      setAllResidencesCache(data);
+    } catch (e) {
+      setAllResidencesCache([]);
+    }
+  }, [allResidencesCache]);
 
   const openBlackbookForm = useCallback((entry: any | null) => {
     setCurrentBlackbookEntry(entry);
     setShowAddSightingForm(false);
+    ensureAllUsersLoaded();
+    ensureAllResidencesLoaded();
     if (!entry) {
       resetBlackbookForm();
     } else {
@@ -492,9 +523,11 @@ export default function PatrolScreen() {
       const v0 = (entry.vehicles || [])[0];
       setBbVehiclePlate(v0?.plate || ''); setBbVehicleDescription(v0?.description || '');
       setBbNotes(entry.notes || '');
+      setBbLinkedUserId(entry.linkedUserId || null); setBbUserSearch('');
     }
+    setSightingResidenceId(null); setSightingResidenceSearch('');
     setBlackbookView('form');
-  }, []);
+  }, [ensureAllUsersLoaded, ensureAllResidencesLoaded]);
 
   const saveBlackbookEntry = useCallback(async () => {
     if (!bbFirstName.trim() && !bbLastName.trim()) { Alert.alert('Erreur', 'Nom ou prénom requis'); return; }
@@ -509,6 +542,9 @@ export default function PatrolScreen() {
         tags: bbTags.split(',').map(s => s.trim()).filter(Boolean),
         vehicles: (bbVehiclePlate.trim() || bbVehicleDescription.trim()) ? [{ plate: bbVehiclePlate.trim() || undefined, description: bbVehicleDescription.trim() || undefined }] : [],
         notes: bbNotes.trim() || undefined,
+        // Sent as '' rather than undefined when cleared, so clearing the link
+        // actually clears it server-side (PUT only updates fields it receives).
+        linkedUserId: bbLinkedUserId || '',
       };
       if (currentBlackbookEntry) {
         body.status = bbStatus;
@@ -532,7 +568,7 @@ export default function PatrolScreen() {
       Alert.alert('Erreur', 'Impossible d\'enregistrer la fiche');
     }
     setBbSaving(false);
-  }, [bbFirstName, bbLastName, bbAliases, bbDateOfBirth, bbRiskLevel, bbStatus, bbPhysicalDescription, bbTags, bbVehiclePlate, bbVehicleDescription, bbNotes, currentBlackbookEntry, loadBlackbook]);
+  }, [bbFirstName, bbLastName, bbAliases, bbDateOfBirth, bbRiskLevel, bbStatus, bbPhysicalDescription, bbTags, bbVehiclePlate, bbVehicleDescription, bbNotes, bbLinkedUserId, currentBlackbookEntry, loadBlackbook]);
 
   const deleteBlackbookEntry = useCallback(() => {
     if (!currentBlackbookEntry) return;
@@ -564,6 +600,7 @@ export default function PatrolScreen() {
         body: JSON.stringify({
           timestamp: Date.now(), category: sightingCategory,
           location: sightingLocation.trim() ? { address: sightingLocation.trim() } : undefined,
+          residenceId: sightingResidenceId || undefined,
           notes: sightingNotes.trim() || undefined,
         }),
         timeout: 10000,
@@ -572,12 +609,13 @@ export default function PatrolScreen() {
       const sighting = await res.json();
       setCurrentBlackbookEntry({ ...currentBlackbookEntry, sightings: [...(currentBlackbookEntry.sightings || []), sighting] });
       setSightingLocation(''); setSightingNotes(''); setShowAddSightingForm(false);
+      setSightingResidenceId(null); setSightingResidenceSearch('');
       loadBlackbook();
     } catch (e) {
       Alert.alert('Erreur', 'Impossible d\'ajouter le signalement');
     }
     setSightingSaving(false);
-  }, [currentBlackbookEntry, sightingCategory, sightingLocation, sightingNotes, loadBlackbook]);
+  }, [currentBlackbookEntry, sightingCategory, sightingLocation, sightingResidenceId, sightingNotes, loadBlackbook]);
 
   const deleteSighting = useCallback((sightingId: string) => {
     if (!currentBlackbookEntry) return;
@@ -1220,6 +1258,42 @@ export default function PatrolScreen() {
             </View>
           ) : (
             <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16 }}>
+              <View style={styles.bbLinkBox}>
+                <Text style={styles.bbLinkBoxLabel}>🔗 Associé à (famille / utilisateur)</Text>
+                {bbLinkedUserId ? (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <Text style={{ fontSize: 14, fontWeight: '700', color: '#92400e' }}>
+                      {(allUsersCache || []).find((u: any) => u.id === bbLinkedUserId)?.name || bbLinkedUserId}
+                    </Text>
+                    <TouchableOpacity onPress={() => setBbLinkedUserId(null)}><Text style={{ color: '#92400e' }}>✕ Retirer</Text></TouchableOpacity>
+                  </View>
+                ) : (
+                  <>
+                    <TextInput
+                      style={[styles.bbInput, { backgroundColor: '#fff' }]}
+                      placeholder="Rechercher un nom..."
+                      placeholderTextColor="#9ca3af"
+                      value={bbUserSearch}
+                      onChangeText={setBbUserSearch}
+                    />
+                    {bbUserSearch.trim().length > 0 && (
+                      <View style={{ maxHeight: 150, marginTop: 6 }}>
+                        <ScrollView nestedScrollEnabled>
+                          {(allUsersCache || [])
+                            .filter((u: any) => u.name.toLowerCase().includes(bbUserSearch.trim().toLowerCase()))
+                            .slice(0, 8)
+                            .map((u: any) => (
+                              <TouchableOpacity key={u.id} style={styles.bbPickerRow} onPress={() => { setBbLinkedUserId(u.id); setBbUserSearch(''); }}>
+                                <Text style={{ fontSize: 13, color: '#1f2937' }}>{u.name}</Text>
+                              </TouchableOpacity>
+                            ))}
+                        </ScrollView>
+                      </View>
+                    )}
+                  </>
+                )}
+              </View>
+
               <View style={{ flexDirection: 'row', gap: 8 }}>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.bbLabel}>Prénom</Text>
@@ -1315,8 +1389,50 @@ export default function PatrolScreen() {
                           </TouchableOpacity>
                         ))}
                       </ScrollView>
-                      <Text style={styles.bbLabel}>Lieu</Text>
-                      <TextInput style={styles.bbInput} value={sightingLocation} onChangeText={setSightingLocation} placeholder="Adresse ou description du lieu" placeholderTextColor="#9ca3af" />
+                      <Text style={styles.bbLabel}>🏠 Résidence enregistrée (recommandé)</Text>
+                      {sightingResidenceId ? (
+                        <View style={[styles.bbLinkBox, { marginTop: 0 }]}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <Text style={{ fontSize: 13, fontWeight: '700', color: '#92400e', flex: 1 }}>
+                              {(() => {
+                                const r = (allResidencesCache || []).find((x: any) => x.id === sightingResidenceId);
+                                return r ? `${r.userName} — ${r.label}` : sightingResidenceId;
+                              })()}
+                            </Text>
+                            <TouchableOpacity onPress={() => setSightingResidenceId(null)}><Text style={{ color: '#92400e' }}>✕</Text></TouchableOpacity>
+                          </View>
+                        </View>
+                      ) : (
+                        <>
+                          <TextInput
+                            style={styles.bbInput}
+                            placeholder="Rechercher une résidence (nom ou famille)..."
+                            placeholderTextColor="#9ca3af"
+                            value={sightingResidenceSearch}
+                            onChangeText={setSightingResidenceSearch}
+                          />
+                          {sightingResidenceSearch.trim().length > 0 && (
+                            <View style={{ maxHeight: 150, marginTop: 6 }}>
+                              <ScrollView nestedScrollEnabled>
+                                {(allResidencesCache || [])
+                                  .filter((r: any) => `${r.userName} ${r.label} ${r.address}`.toLowerCase().includes(sightingResidenceSearch.trim().toLowerCase()))
+                                  .slice(0, 8)
+                                  .map((r: any) => (
+                                    <TouchableOpacity
+                                      key={r.id}
+                                      style={styles.bbPickerRow}
+                                      onPress={() => { setSightingResidenceId(r.id); setSightingResidenceSearch(''); setSightingLocation(r.address); }}
+                                    >
+                                      <Text style={{ fontSize: 13, color: '#1f2937' }}>{r.userName} — {r.label}</Text>
+                                    </TouchableOpacity>
+                                  ))}
+                              </ScrollView>
+                            </View>
+                          )}
+                        </>
+                      )}
+                      <Text style={styles.bbLabel}>Lieu {sightingResidenceId ? '(auto-rempli)' : '(libre)'}</Text>
+                      <TextInput style={styles.bbInput} value={sightingLocation} onChangeText={setSightingLocation} placeholder="Adresse ou description du lieu" placeholderTextColor="#9ca3af" editable={!sightingResidenceId} />
                       <Text style={styles.bbLabel}>Notes</Text>
                       <TextInput style={[styles.bbInput, { minHeight: 50 }]} value={sightingNotes} onChangeText={setSightingNotes} multiline />
                       <TouchableOpacity style={[styles.bbSaveBtn, sightingSaving && { opacity: 0.6 }]} onPress={saveSighting} disabled={sightingSaving}>
@@ -1332,7 +1448,11 @@ export default function PatrolScreen() {
                       <View key={s.id} style={styles.bbSightingRow}>
                         <View style={{ flex: 1 }}>
                           <Text style={styles.bbCardName}>{new Date(s.timestamp).toLocaleString('fr-FR')} — {BLACKBOOK_CATEGORY_LABELS[s.category] || s.category}</Text>
-                          {!!s.location?.address && <Text style={styles.bbCardDetail}>📍 {s.location.address}</Text>}
+                          {s.residenceId ? (
+                            <Text style={[styles.bbCardDetail, { fontWeight: '700', color: '#92400e' }]}>🏠 {s.residenceLabel} — Famille : {s.residenceOwnerName}</Text>
+                          ) : (
+                            !!s.location?.address && <Text style={styles.bbCardDetail}>📍 {s.location.address}</Text>
+                          )}
                           {!!s.notes && <Text style={styles.bbCardDetail}>{s.notes}</Text>}
                           <Text style={styles.bbCardMeta}>Signalé par {s.reportedByName}</Text>
                         </View>
@@ -1409,6 +1529,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start',
     backgroundColor: '#f9fafb', borderRadius: 10, padding: 12, marginBottom: 8,
   },
+  bbLinkBox: { backgroundColor: '#fef3c7', borderWidth: 1, borderColor: '#fcd34d', borderRadius: 8, padding: 10, marginBottom: 12, marginTop: 8 },
+  bbLinkBoxLabel: { fontSize: 12, fontWeight: '700', color: '#92400e', marginBottom: 6 },
+  bbPickerRow: { paddingVertical: 8, paddingHorizontal: 8, borderBottomWidth: 1, borderBottomColor: '#f3f4f6', backgroundColor: '#fff' },
   centered: {
     flex: 1,
     justifyContent: 'center',

@@ -1696,7 +1696,10 @@ async function loadBlackbook() {
     const data = res.ok ? await res.json() : [];
     blackbookData = data.map(e => {
       const last = blackbookLastSighting(e);
-      return { ...e, lastSeenAt: last?.timestamp || 0, lastSeenLocation: last?.location?.address || '', lastSeenCategory: last?.category };
+      return {
+        ...e, lastSeenAt: last?.timestamp || 0, lastSeenLocation: last?.location?.address || '', lastSeenCategory: last?.category,
+        lastSeenResidenceLabel: last?.residenceLabel, lastSeenOwnerName: last?.residenceOwnerName,
+      };
     });
   } catch (e) {
     console.error('[Blackbook] Load error:', e);
@@ -1753,10 +1756,11 @@ function renderBlackbookTable() {
     <tr onclick="openBlackbookDetail('${e.id}')" title="Cliquer pour ouvrir la fiche">
       <td><strong>${escapeHtml(e.firstName)} ${escapeHtml(e.lastName)}</strong></td>
       <td>${(e.aliases || []).map(escapeHtml).join(', ') || '—'}</td>
+      <td>${e.linkedUserName ? `<span class="tag-chip" style="background:#fef3c7;color:#92400e;">🔗 ${escapeHtml(e.linkedUserName)}</span>` : '—'}</td>
       <td>${BLACKBOOK_RISK_LABELS[e.riskLevel] || e.riskLevel}</td>
       <td>${BLACKBOOK_STATUS_LABELS[e.status] || e.status}</td>
       <td>${e.lastSeenAt ? new Date(e.lastSeenAt).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) + (e.lastSeenCategory ? ' — ' + (BLACKBOOK_CATEGORY_LABELS[e.lastSeenCategory] || e.lastSeenCategory) : '') : '—'}</td>
-      <td>${escapeHtml(e.lastSeenLocation || '—')}</td>
+      <td>${e.lastSeenOwnerName ? `🏠 ${escapeHtml(e.lastSeenResidenceLabel || '')} — ${escapeHtml(e.lastSeenOwnerName)}` : escapeHtml(e.lastSeenLocation || '—')}</td>
       <td>${(e.tags || []).map(t => `<span class="tag-chip">${escapeHtml(t)}</span>`).join(' ') || '—'}</td>
     </tr>`).join('');
 }
@@ -1806,7 +1810,9 @@ function renderBlackbookSightings() {
     <div class="provider-row">
       <div>
         <div class="provider-row-name">${new Date(s.timestamp).toLocaleString('fr-FR')} — ${BLACKBOOK_CATEGORY_LABELS[s.category] || s.category}</div>
-        ${s.location?.address ? `<div class="provider-row-detail">📍 ${escapeHtml(s.location.address)}</div>` : ''}
+        ${s.residenceId
+          ? `<div class="provider-row-detail" style="font-weight:700;color:#92400e;">🏠 ${escapeHtml(s.residenceLabel || '')} — Famille : ${escapeHtml(s.residenceOwnerName || '')}</div>`
+          : (s.location?.address ? `<div class="provider-row-detail">📍 ${escapeHtml(s.location.address)}</div>` : '')}
         ${s.notes ? `<div class="provider-row-detail">${escapeHtml(s.notes)}</div>` : ''}
         <div class="provider-row-detail" style="font-style:italic;">Signalé par ${escapeHtml(s.reportedByName)}</div>
       </div>
@@ -1814,9 +1820,51 @@ function renderBlackbookSightings() {
     </div>`).join('');
 }
 
+let allUsersCache = null;
+
+async function ensureAllUsersLoaded() {
+  if (allUsersCache) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/users`);
+    allUsersCache = res.ok ? await res.json() : [];
+  } catch (e) {
+    allUsersCache = [];
+  }
+}
+
+function populateBlackbookLinkedUserSelect(selectedId) {
+  const select = document.getElementById('bbLinkedUserId');
+  select.innerHTML = '<option value="">— Aucun —</option>' +
+    (allUsersCache || []).map(u => `<option value="${u.id}">${escapeHtml(u.name)}</option>`).join('');
+  select.value = selectedId || '';
+}
+
+async function populateSightingResidenceSelect() {
+  if (!allResidencesCache) {
+    try {
+      const res = await fetch(`${API_BASE}/dispatch/all-residences`);
+      allResidencesCache = res.ok ? await res.json() : [];
+    } catch (e) {
+      allResidencesCache = [];
+    }
+  }
+  const select = document.getElementById('sightingResidenceId');
+  select.innerHTML = '<option value="">— Lieu libre (non enregistré) —</option>' +
+    (allResidencesCache || []).map(r => `<option value="${r.id}">${escapeHtml(r.userName)} — ${escapeHtml(r.label)}</option>`).join('');
+  select.value = '';
+}
+
+function onSightingResidenceChange() {
+  const select = document.getElementById('sightingResidenceId');
+  const residence = (allResidencesCache || []).find(r => r.id === select.value);
+  document.getElementById('sightingLocation').value = residence ? residence.address : '';
+}
+
 async function openBlackbookDetail(entryId) {
   currentBlackbookVehicles = [];
   document.getElementById('addSightingForm').style.display = 'none';
+  await ensureAllUsersLoaded();
+  await populateSightingResidenceSelect();
   if (!entryId) {
     currentBlackbookEntry = null;
     document.getElementById('blackbookModalTitle').textContent = 'Nouvelle fiche';
@@ -1827,6 +1875,7 @@ async function openBlackbookDetail(entryId) {
     document.getElementById('blackbookNewEntryHint').style.display = 'block';
     ['bbFirstName', 'bbLastName', 'bbAliases', 'bbDateOfBirth', 'bbPhysicalDescription', 'bbTags', 'bbNotes'].forEach(id => document.getElementById(id).value = '');
     document.getElementById('bbRiskLevel').value = 'medium';
+    populateBlackbookLinkedUserSelect(null);
     renderBlackbookVehicles();
   } else {
     const entry = blackbookData.find(e => e.id === entryId) || await (await fetch(`${API_BASE}/api/blackbook/${entryId}`)).json();
@@ -1847,6 +1896,7 @@ async function openBlackbookDetail(entryId) {
     document.getElementById('bbPhysicalDescription').value = entry.physicalDescription || '';
     document.getElementById('bbTags').value = (entry.tags || []).join(', ');
     document.getElementById('bbNotes').value = entry.notes || '';
+    populateBlackbookLinkedUserSelect(entry.linkedUserId);
     renderBlackbookVehicles();
     renderBlackbookPhotos();
     renderBlackbookSightings();
@@ -1870,6 +1920,10 @@ async function saveBlackbookEntry() {
     tags: document.getElementById('bbTags').value.split(',').map(s => s.trim()).filter(Boolean),
     vehicles: currentBlackbookVehicles.filter(v => v.plate || v.description),
     notes: document.getElementById('bbNotes').value.trim() || undefined,
+    // Sent as-is (possibly '') rather than coerced to undefined, so clearing
+    // the selection back to "Aucun" actually clears it server-side too — PUT
+    // only updates fields it receives as not-undefined.
+    linkedUserId: document.getElementById('bbLinkedUserId').value,
   };
   if (!body.firstName && !body.lastName) { showToast('Nom ou prénom requis', 'error'); return; }
   try {
@@ -1961,6 +2015,7 @@ async function saveSighting() {
   if (!dateVal) { showToast('Date requise', 'error'); return; }
   const timestamp = new Date(`${dateVal}T${timeVal}:00`).getTime();
   const locationText = document.getElementById('sightingLocation').value.trim();
+  const residenceId = document.getElementById('sightingResidenceId').value || undefined;
   try {
     const res = await fetch(`${API_BASE}/api/blackbook/${currentBlackbookEntry.id}/sightings`, {
       method: 'POST',
@@ -1968,6 +2023,7 @@ async function saveSighting() {
       body: JSON.stringify({
         timestamp, category: document.getElementById('sightingCategory').value,
         location: locationText ? { address: locationText } : undefined,
+        residenceId,
         notes: document.getElementById('sightingNotes').value.trim() || undefined,
       }),
     });
@@ -1975,6 +2031,7 @@ async function saveSighting() {
     const sighting = await res.json();
     currentBlackbookEntry.sightings = [...(currentBlackbookEntry.sightings || []), sighting];
     document.getElementById('sightingLocation').value = '';
+    document.getElementById('sightingResidenceId').value = '';
     document.getElementById('sightingNotes').value = '';
     document.getElementById('addSightingForm').style.display = 'none';
     renderBlackbookSightings();

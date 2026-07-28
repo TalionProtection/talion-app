@@ -774,6 +774,7 @@
             <tr>
               <th onclick="sortBlackbookBy('lastName')">Nom ⇅</th>
               <th>Alias</th>
+              <th onclick="sortBlackbookBy('linkedUserName')">🔗 Famille associée ⇅</th>
               <th onclick="sortBlackbookBy('riskLevel')">Risque ⇅</th>
               <th onclick="sortBlackbookBy('status')">Statut ⇅</th>
               <th onclick="sortBlackbookBy('lastSeenAt')">Dernier signalement ⇅</th>
@@ -840,7 +841,6 @@
   </div>
 
   <!-- Known People & Planned Interventions Modal -->
-  <!-- Residence Picker (step before adding a new person/visit from scratch) -->
   <!-- Blackbook Detail/Edit Modal -->
   <div class="modal-overlay" id="blackbookModal" style="display:none;">
     <div class="modal" style="max-width:620px;max-height:88vh;overflow-y:auto;">
@@ -852,7 +852,12 @@
         </div>
       </div>
 
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px;">
+      <div class="form-group" style="margin-top:12px;background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;padding:10px;">
+        <label style="font-weight:700;color:#92400e;">🔗 Associé à (famille / utilisateur)</label>
+        <select id="bbLinkedUserId" class="form-control"><option value="">— Aucun —</option></select>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
         <div class="form-group"><label>Prénom</label><input type="text" id="bbFirstName" class="form-control"></div>
         <div class="form-group"><label>Nom</label><input type="text" id="bbLastName" class="form-control"></div>
       </div>
@@ -926,7 +931,11 @@
             <option value="reperage">Repérage</option>
             <option value="autre" selected>Autre</option>
           </select>
-          <input type="text" id="sightingLocation" class="form-control" placeholder="Lieu (adresse ou description)" style="margin-bottom:8px;">
+          <label style="font-size:12px;font-weight:600;color:var(--text-muted);">🏠 Résidence enregistrée (recommandé)</label>
+          <select id="sightingResidenceId" class="form-control" style="margin-bottom:8px;" onchange="onSightingResidenceChange()">
+            <option value="">— Lieu libre (non enregistré) —</option>
+          </select>
+          <input type="text" id="sightingLocation" class="form-control" placeholder="Lieu (adresse ou description libre)" style="margin-bottom:8px;">
           <textarea id="sightingNotes" class="form-control" placeholder="Notes sur ce signalement" style="margin-bottom:8px;min-height:50px;"></textarea>
           <button class="btn btn-primary" style="width:100%;" onclick="saveSighting()">Enregistrer le signalement</button>
         </div>
@@ -935,6 +944,7 @@
     </div>
   </div>
 
+  <!-- Residence Picker (step before adding a new person/visit from scratch) -->
   <div class="modal-overlay" id="residencePickerModal" style="display:none;">
     <div class="modal" style="max-width:480px;">
       <h3 class="modal-title">Choisir une résidence</h3>

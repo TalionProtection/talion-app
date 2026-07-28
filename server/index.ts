@@ -6735,6 +6735,13 @@ interface BlackbookSighting {
   timestamp: number;
   category: 'prise_info' | 'intrusion' | 'menaces' | 'envoi_courrier' | 'reperage' | 'autre';
   location?: { latitude?: number; longitude?: number; address?: string };
+  // When the sighting is at a known residence rather than a freeform place —
+  // denormalized (label/owner name) so display never needs a second lookup,
+  // and stays correct even if the address is later renamed or deleted.
+  residenceId?: string;
+  residenceLabel?: string;
+  residenceOwnerId?: string;
+  residenceOwnerName?: string;
   notes?: string;
   reportedBy: string;
   reportedByName: string;
@@ -6821,9 +6828,13 @@ function isBlackbookStaff(role: string): boolean {
 
 // GET /api/blackbook — full list; client handles search/sort/filter (same
 // pattern as the Visites tab — dataset is small enough this stays instant).
+function enrichBlackbookEntry(entry: BlackbookEntry) {
+  return { ...entry, linkedUserName: entry.linkedUserId ? adminUsers.get(entry.linkedUserId)?.name : undefined };
+}
+
 app.get('/api/blackbook', requireAuth, (req, res) => {
   if (!isBlackbookStaff(req.supabaseUser!.role)) return res.status(403).json({ error: 'Staff only' });
-  res.json(Array.from(blackbookEntries.values()).sort((a, b) => b.updatedAt - a.updatedAt));
+  res.json(Array.from(blackbookEntries.values()).sort((a, b) => b.updatedAt - a.updatedAt).map(enrichBlackbookEntry));
 });
 
 // GET /api/blackbook/:id
@@ -6831,7 +6842,7 @@ app.get('/api/blackbook/:id', requireAuth, (req, res) => {
   if (!isBlackbookStaff(req.supabaseUser!.role)) return res.status(403).json({ error: 'Staff only' });
   const entry = blackbookEntries.get(req.params.id as string);
   if (!entry) return res.status(404).json({ error: 'Entry not found' });
-  res.json(entry);
+  res.json(enrichBlackbookEntry(entry));
 });
 
 // POST /api/blackbook
@@ -6901,11 +6912,25 @@ app.post('/api/blackbook/:id/sightings', requireAuth, async (req, res) => {
   if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
   const entry = blackbookEntries.get(req.params.id as string);
   if (!entry) return res.status(404).json({ error: 'Entry not found' });
-  const { timestamp, category, location, notes } = req.body;
+  const { timestamp, category, location, residenceId, notes } = req.body;
   const callerUser = adminUsers.get(caller.id);
+  let resolvedLocation = location || undefined;
+  let residenceLabel: string | undefined, residenceOwnerId: string | undefined, residenceOwnerName: string | undefined;
+  if (residenceId) {
+    const ownerId = resolveAddressOwner(residenceId);
+    const addr = ownerId ? (userAddresses.get(ownerId) || []).find(a => a.id === residenceId) : undefined;
+    if (addr && ownerId) {
+      residenceLabel = addr.label;
+      residenceOwnerId = ownerId;
+      residenceOwnerName = adminUsers.get(ownerId)?.name;
+      resolvedLocation = { address: addr.address, latitude: addr.latitude, longitude: addr.longitude };
+    }
+  }
   const sighting: BlackbookSighting = {
     id: uuidv4(), timestamp: timestamp ? Number(timestamp) : Date.now(),
-    category: category || 'autre', location: location || undefined, notes: notes || undefined,
+    category: category || 'autre', location: resolvedLocation,
+    residenceId: residenceId || undefined, residenceLabel, residenceOwnerId, residenceOwnerName,
+    notes: notes || undefined,
     reportedBy: caller.id, reportedByName: callerUser?.name || caller.id,
   };
   entry.sightings.push(sighting);
@@ -6985,6 +7010,7 @@ app.get('/api/blackbook/:id/pdf', requireAuth, (req, res) => {
   if (entry.dateOfBirth) doc.text(`Date de naissance : ${entry.dateOfBirth}`);
   doc.text(`Niveau de risque : ${RISK_LABELS[entry.riskLevel] || entry.riskLevel}`);
   doc.text(`Statut : ${STATUS_LABELS[entry.status] || entry.status}`);
+  if (entry.linkedUserId) doc.font('Helvetica-Bold').text(`Associé à : ${adminUsers.get(entry.linkedUserId)?.name || entry.linkedUserId}`).font('Helvetica');
   if (entry.tags.length > 0) doc.text(`Tags : ${entry.tags.join(', ')}`);
   doc.text(`Créé par ${entry.createdByName} le ${new Date(entry.createdAt).toLocaleDateString('fr-FR')}`);
 
@@ -7012,7 +7038,12 @@ app.get('/api/blackbook/:id/pdf', requireAuth, (req, res) => {
       doc.moveDown(0.4);
       doc.font('Helvetica-Bold').text(`${new Date(s.timestamp).toLocaleString('fr-FR')} — ${BLACKBOOK_CATEGORY_LABELS[s.category] || s.category}`);
       doc.font('Helvetica');
-      if (s.location?.address) doc.text(`Lieu : ${s.location.address}`);
+      if (s.residenceId) {
+        doc.font('Helvetica-Bold').text(`🏠 Résidence : ${s.residenceLabel || ''} — Famille : ${s.residenceOwnerName || ''}`).font('Helvetica');
+        if (s.location?.address) doc.text(s.location.address);
+      } else if (s.location?.address) {
+        doc.text(`Lieu : ${s.location.address}`);
+      }
       if (s.notes) doc.text(s.notes);
       doc.fontSize(9).font('Helvetica-Oblique').text(`Signalé par ${s.reportedByName}`);
       doc.fontSize(11);
@@ -7040,11 +7071,7 @@ app.get('/api/users/:id/addresses', (req, res) => {
   res.json(addresses);
 });
 
-// GET /dispatch/all-residences — every geocoded address across every user
-// profile (not scoped to family units), used by the map's "Tout" zoom-out
-// to fit the view to wherever people's registered places actually are,
-// instead of a hardcoded city.
-app.get('/dispatch/all-residences', (req, res) => {
+function computeAllResidences(): { id: string; userId: string; latitude: number; longitude: number; label: string; address: string; userName: string }[] {
   const now = Date.now();
   const result: { id: string; userId: string; latitude: number; longitude: number; label: string; address: string; userName: string }[] = [];
   for (const [userId, addresses] of userAddresses) {
@@ -7055,7 +7082,23 @@ app.get('/dispatch/all-residences', (req, res) => {
       result.push({ id: a.id, userId, latitude: a.latitude, longitude: a.longitude, label: a.label, address: a.address, userName });
     }
   }
-  res.json(result);
+  return result;
+}
+
+// GET /api/all-residences — same data as /dispatch/all-residences, but reachable
+// by responders too (the /dispatch prefix requires dispatcher+, which blocks them) —
+// needed for the Blackbook sighting residence picker on mobile.
+app.get('/api/all-residences', requireAuth, (req, res) => {
+  if (!isBlackbookStaff(req.supabaseUser!.role)) return res.status(403).json({ error: 'Staff only' });
+  res.json(computeAllResidences());
+});
+
+// GET /dispatch/all-residences — every geocoded address across every user
+// profile (not scoped to family units), used by the map's "Tout" zoom-out
+// to fit the view to wherever people's registered places actually are,
+// instead of a hardcoded city.
+app.get('/dispatch/all-residences', (req, res) => {
+  res.json(computeAllResidences());
 });
 
 // POST /api/users/:id/addresses
