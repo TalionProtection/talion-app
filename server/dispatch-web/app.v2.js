@@ -6660,6 +6660,10 @@ async function selectPTTChannel(channel) {
     if (!tokenRes.ok) throw new Error((await tokenRes.json()).error || 'Token error');
     const { token, url } = await tokenRes.json();
 
+    if (typeof LivekitClient === 'undefined') {
+      throw new Error('LiveKit non chargé (script CDN bloqué ou hors ligne)');
+    }
+
     pttRoom = new LivekitClient.Room();
 
     pttRoom.on(LivekitClient.RoomEvent.Connected, () => {
@@ -6687,8 +6691,8 @@ async function selectPTTChannel(channel) {
     await pttRoom.localParticipant.setMicrophoneEnabled(false);
   } catch (e) {
     console.error('[PTT] Connect error:', e);
-    showToast('Erreur de connexion au canal PTT', 'error');
-    if (messagesEl) messagesEl.innerHTML = '<div class="empty-state">Erreur de connexion</div>';
+    showToast(`Erreur de connexion au canal PTT: ${e.message || e}`, 'error');
+    if (messagesEl) messagesEl.innerHTML = `<div class="empty-state">Erreur de connexion${e.message ? ': ' + escapeHtml(e.message) : ''}</div>`;
     if (btn) { btn.disabled = true; btn.innerHTML = '🎙 MAINTENIR POUR PARLER'; }
   }
 }
