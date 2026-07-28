@@ -6374,9 +6374,12 @@ app.post('/api/livekit/token', requireAuth, async (req, res) => {
 
   try {
     const { AccessToken } = await import('livekit-server-sdk');
-    const apiKey = process.env.LIVEKIT_API_KEY || 'talioncd15c681';
-    const apiSecret = process.env.LIVEKIT_API_SECRET || '759155227f75206216d399f37e676a010a92658ef655727358dddba0271c9f0f';
-    const livekitUrl = process.env.LIVEKIT_URL || 'wss://talion-livekit.onrender.com';
+    const apiKey = process.env.LIVEKIT_API_KEY;
+    const apiSecret = process.env.LIVEKIT_API_SECRET;
+    const livekitUrl = process.env.LIVEKIT_URL;
+    if (!apiKey || !apiSecret || !livekitUrl) {
+      return res.status(500).json({ error: 'LiveKit is not configured on the server' });
+    }
     const callerUser = adminUsers.get(caller.id);
     const at = new AccessToken(apiKey, apiSecret, {
       identity: caller.id,
@@ -6406,7 +6409,7 @@ app.get('/api/livekit/rooms', requireAuth, (req, res) => {
   const accessible = pttChannels.filter(ch => canJoinPTTChannel(caller.id, caller.role, ch));
   res.json({
     rooms: accessible.map(ch => ({ name: ch.id, label: ch.name, description: ch.description, type: ch.members?.length ? 'group' : 'broadcast' })),
-    livekitUrl: process.env.LIVEKIT_URL || 'wss://talion-livekit.onrender.com',
+    livekitUrl: process.env.LIVEKIT_URL,
   });
 });
 
