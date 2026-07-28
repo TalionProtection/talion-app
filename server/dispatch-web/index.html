@@ -9,6 +9,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
   <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+  <script src="https://unpkg.com/livekit-client@2.21.0/dist/livekit-client.umd.js"></script>
 </head>
 <body>
   <!-- Sidebar -->
@@ -616,13 +617,13 @@
           </div>
           <!-- Emergency banner -->
           <div id="pttEmergencyBanner" class="ptt-emergency-banner" style="display:none;">
-            <span>&#x26A0;&#xFE0F; MESSAGE D'URGENCE de <strong id="pttEmergencySender"></strong></span>
-            <button class="btn btn-sm" onclick="playEmergencyMessage()" id="pttEmergencyPlayBtn">&#x25B6; Écouter</button>
+            <span>&#x26A0;&#xFE0F; URGENCE déclenchée par <strong id="pttEmergencySender"></strong></span>
+            <button class="btn btn-sm" onclick="joinEmergencyChannel()">&#x1F3A4; Rejoindre le canal</button>
             <button class="btn btn-sm" onclick="dismissDispatchEmergency()">✕</button>
           </div>
-          <!-- Messages -->
+          <!-- Connection status -->
           <div id="pttMessages" class="ptt-messages">
-            <div class="empty-state">&#x1F399; Sélectionnez un canal pour voir les messages</div>
+            <div class="empty-state">&#x1F399; Sélectionnez un canal pour rejoindre</div>
           </div>
           <!-- PTT Controls -->
           <div class="ptt-controls">
@@ -1023,13 +1024,9 @@
         <input type="text" id="pttGroupDesc" class="form-control" placeholder="Description optionnelle">
       </div>
       <div class="form-group">
-        <label>Rôles autorisés</label>
-        <div class="ptt-roles-grid">
-          <label class="ptt-role-check"><input type="checkbox" value="user"> Utilisateurs</label>
-          <label class="ptt-role-check"><input type="checkbox" value="responder" checked> Intervenants</label>
-          <label class="ptt-role-check"><input type="checkbox" value="dispatcher" checked> Dispatchers</label>
-          <label class="ptt-role-check"><input type="checkbox" value="admin" checked> Admins</label>
-        </div>
+        <label>Membres du groupe</label>
+        <input type="text" id="pttGroupMemberSearch" class="form-control" placeholder="🔍 Rechercher un nom..." oninput="renderPTTGroupMemberList()" style="margin-bottom:8px;">
+        <div id="pttGroupMemberList" style="max-height:220px;overflow-y:auto;"></div>
       </div>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
         <button class="btn btn-secondary" onclick="closePTTGroupModal()">Annuler</button>

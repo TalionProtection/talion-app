@@ -540,86 +540,15 @@ function handleWsMessage(msg) {
     case 'pong':
       break;
 
-    case 'pttMessage': {
-      // Server sends { type: 'pttMessage', data: { id, channelId, senderId, senderName, senderRole, audioBase64, duration, timestamp } }
-      const pttData = msg.data || msg;
-      const chId = pttData.channelId;
-      if (!pttMessages[chId]) pttMessages[chId] = [];
-      // Normalize: strip data URL prefix from audioBase64 if present
-      let rawAudioIn = pttData.audioBase64 || pttData.audioData || '';
-      if (typeof rawAudioIn === 'string' && rawAudioIn.includes(',')) rawAudioIn = rawAudioIn.split(',')[1] || rawAudioIn;
-      pttMessages[chId].push({
-        id: pttData.id,
-        channelId: chId,
-        senderId: pttData.senderId,
-        senderName: pttData.senderName,
-        senderRole: pttData.senderRole,
-        audioData: rawAudioIn,
-        mimeType: pttData.mimeType || 'audio/webm',
-        duration: pttData.duration,
-        timestamp: pttData.timestamp ? new Date(pttData.timestamp).toISOString() : new Date().toISOString(),
-      });
-      if (pttCurrentChannel && pttCurrentChannel.id === chId) renderPTTMessages();
-      renderPTTChannels();
-      break;
-    }
-
-    case 'pttChannelHistory': {
-      // Server sends { type: 'pttChannelHistory', channelId, data: [...messages] }
-      const histChannelId = msg.channelId;
-      const histMsgs = (msg.data || []).map(m => {
-        // Normalize: strip data URL prefix if present
-        let histRawAudio = m.audioBase64 || m.audioData || '';
-        if (typeof histRawAudio === 'string' && histRawAudio.includes(',')) histRawAudio = histRawAudio.split(',')[1] || histRawAudio;
-        return {
-        id: m.id,
-        channelId: m.channelId,
-        senderId: m.senderId,
-        senderName: m.senderName,
-        senderRole: m.senderRole,
-        audioData: histRawAudio,
-        mimeType: m.mimeType || 'audio/webm',
-        duration: m.duration,
-        timestamp: m.timestamp ? new Date(m.timestamp).toISOString() : new Date().toISOString(),
-      };
-      });
-      pttMessages[histChannelId] = histMsgs;
-      if (pttCurrentChannel && pttCurrentChannel.id === histChannelId) renderPTTMessages();
-      break;
-    }
-
-    case 'pttTalkingStart': {
-      // Server sends { type: 'pttTalkingStart', data: { channelId, userId, userName, userRole } }
-      const tData = msg.data || msg;
-      const ind = document.getElementById('pttTalkingIndicator');
-      const nm = document.getElementById('pttTalkingName');
-      const rl = document.getElementById('pttTalkingRole');
-      if (pttCurrentChannel && tData.channelId === pttCurrentChannel.id) {
-        const roleLabels = { admin: 'ADMIN', dispatcher: 'DISPATCH', responder: 'INTERVENANT', user: 'UTILISATEUR' };
-        if (ind) ind.style.display = 'flex';
-        if (nm) nm.textContent = `${tData.userName} parle...`;
-        if (rl) rl.textContent = roleLabels[tData.userRole] || tData.userRole;
-      }
-      break;
-    }
-
-    case 'pttTalkingStop': {
-      const ind2 = document.getElementById('pttTalkingIndicator');
-      if (ind2) ind2.style.display = 'none';
-      break;
-    }
-
-    case 'pttEmergencyMessage': {
-      // Server sends { type: 'pttEmergencyMessage', data: { id, senderName, senderRole, audioBase64, ... } }
+    case 'pttEmergencyTriggered': {
+      // Server sends { type: 'pttEmergencyTriggered', data: { channelId, senderId, senderName, senderRole, timestamp } }
+      // \u2014 a notification to go join the live emergency channel, not a recorded message.
       const eData = msg.data || msg;
-      let emergRawAudio = eData.audioBase64 || eData.audioData || '';
-      if (typeof emergRawAudio === 'string' && emergRawAudio.includes(',')) emergRawAudio = emergRawAudio.split(',')[1] || emergRawAudio;
-      pttLastEmergencyMsg = { audioData: emergRawAudio, mimeType: eData.mimeType || 'audio/webm', senderName: eData.senderName, senderRole: eData.senderRole };
       const banner = document.getElementById('pttEmergencyBanner');
       const sender = document.getElementById('pttEmergencySender');
       if (banner) banner.style.display = 'flex';
       if (sender) sender.textContent = `${eData.senderName} (${eData.senderRole})`;
-      showToast(`\u26a0\ufe0f MESSAGE D'URGENCE de ${eData.senderName}`, 'warning');
+      showToast(`\u26a0\ufe0f URGENCE d\u00e9clench\u00e9e par ${eData.senderName}`, 'warning');
       break;
     }
 
@@ -6663,23 +6592,26 @@ setInterval(refreshPatrolReports, 30000);
 
 let pttChannels = [];
 let pttCurrentChannel = null;
-let pttMessages = {};
-let pttIsRecording = false;
-let pttMediaRecorder = null;
-let pttSelectedTargetUser = null; // ID du user cible pour PTT 1-1
-let pttRecordedChunks = [];
-let pttLastEmergencyMsg = null;
-let pttEmergencyMode = false;
+let pttRoom = null; // LiveKit Room instance
+let pttConnected = false;
+let pttTransmitting = false;
+let pttAllUsersCache = null; // for group-creation member picker
+
+const PTT_CHANNEL_ICONS = { emergency: '🚨', dispatch: '📡', responders: '👮', general: '📻' };
+function pttChannelIcon(ch) {
+  if (PTT_CHANNEL_ICONS[ch.id]) return PTT_CHANNEL_ICONS[ch.id];
+  if (ch.id.startsWith('family-')) return '🏠';
+  if (ch.id.startsWith('direct-')) return '📞';
+  if (ch.id.startsWith('custom-')) return '👥';
+  return '📻';
+}
 
 async function loadPTTChannels() {
   try {
-    const res = await fetch(`${API_BASE}/api/ptt/channels?role=dispatcher&userId=dispatch-console`);
+    const res = await fetch(`${API_BASE}/api/ptt/channels`);
     if (!res.ok) throw new Error('Failed to load channels');
     pttChannels = await res.json();
     renderPTTChannels();
-    if (!pttCurrentChannel && pttChannels.length > 0) {
-      selectPTTChannel(pttChannels[0]);
-    }
   } catch (e) {
     console.error('[PTT] Error loading channels:', e);
   }
@@ -6694,309 +6626,127 @@ function renderPTTChannels() {
   }
   container.innerHTML = pttChannels.map(ch => {
     const isSelected = pttCurrentChannel && pttCurrentChannel.id === ch.id;
-    const msgCount = (pttMessages[ch.id] || []).length;
-    const icons = { urgence: '🚨', dispatch: '📡', intervenants: '👮', general: '📻' };
-    const isDirect = ch.id.startsWith('direct-');
-    const icon = isDirect ? '📞' : (icons[ch.id] || '📻');
-    return `<div class="ptt-channel-item ${isSelected ? 'active' : ''}" onclick="selectPTTChannel(${JSON.stringify(ch).replace(/"/g, '&quot;')})">
-      <span class="ptt-channel-icon">${icon}</span>
+    return `<div class="ptt-channel-item ${isSelected ? 'active' : ''}" onclick='selectPTTChannel(${JSON.stringify(ch)})'>
+      <span class="ptt-channel-icon">${pttChannelIcon(ch)}</span>
       <div class="ptt-channel-info">
-        <div class="ptt-channel-name">${ch.name}</div>
-        <div class="ptt-channel-desc">${ch.description || ''}</div>
+        <div class="ptt-channel-name">${escapeHtml(ch.name)}</div>
+        <div class="ptt-channel-desc">${escapeHtml(ch.description || '')}</div>
       </div>
-      ${msgCount > 0 ? `<span class="ptt-channel-badge">${msgCount}</span>` : ''}
     </div>`;
   }).join('');
 }
 
-function selectPTTChannel(channel) {
+async function selectPTTChannel(channel) {
+  if (pttRoom) await disconnectPTTRoom();
+
   pttCurrentChannel = channel;
-  // Extraire targetUserId si canal direct
-  if (channel.id && channel.id.startsWith('direct-')) {
-    const parts = channel.id.replace('direct-', '').split('-');
-    // Trouver l'ID qui n'est pas dispatch-console
-    const members = channel.members || [];
-    pttSelectedTargetUser = members.find(m => m !== 'dispatch-console') || null;
-    console.log('[PTT] Direct channel target:', pttSelectedTargetUser);
-  } else {
-    pttSelectedTargetUser = null;
-  }
   renderPTTChannels();
 
   const el = document.getElementById('pttCurrentChannel');
   if (el) el.textContent = channel.name;
 
   const btn = document.getElementById('pttRecordBtn');
-  if (btn) btn.disabled = false;
+  if (btn) { btn.disabled = true; btn.innerHTML = '⏳ Connexion...'; }
 
-  // Join channel via WS
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'pttJoinChannel', userId: 'dispatch-console', userRole: 'dispatcher', data: { channelId: channel.id } }));
-  }
+  const messagesEl = document.getElementById('pttMessages');
+  if (messagesEl) messagesEl.innerHTML = '<div class="empty-state">⏳ Connexion au canal...</div>';
 
-  // Load history
-  loadPTTHistory(channel.id);
-  renderPTTMessages();
-}
-
-async function loadPTTHistory(channelId) {
   try {
-    const res = await fetch(`${API_BASE}/api/ptt/channels/${channelId}/messages`);
-    if (res.ok) {
-      const msgs = await res.json();
-      pttMessages[channelId] = msgs;
-      if (pttCurrentChannel && pttCurrentChannel.id === channelId) renderPTTMessages();
-    }
-  } catch (e) {
-    console.error('[PTT] Error loading history:', e);
-  }
-}
-
-function renderPTTMessages() {
-  const container = document.getElementById('pttMessages');
-  if (!container || !pttCurrentChannel) return;
-  const msgs = pttMessages[pttCurrentChannel.id] || [];
-  if (msgs.length === 0) {
-    container.innerHTML = '<div class="empty-state">🎙 Aucun message sur ce canal</div>';
-    return;
-  }
-  container.innerHTML = msgs.map(m => {
-    const initials = (m.senderName || 'U').split(' ').map(w => w[0]).join('').substring(0, 2).toUpperCase();
-    const time = m.timestamp ? new Date(m.timestamp).toLocaleTimeString('fr-CH', { hour: '2-digit', minute: '2-digit' }) : '';
-    const roleLabels = { admin: 'Admin', dispatcher: 'Dispatch', responder: 'Intervenant', user: 'Utilisateur' };
-    const roleLabel = roleLabels[m.senderRole] || m.senderRole || '';
-    const audioId = `ptt-audio-${m.id || Math.random().toString(36).substr(2, 9)}`;
-    return `<div class="ptt-msg">
-      <div class="ptt-msg-avatar">${initials}</div>
-      <div class="ptt-msg-content">
-        <div class="ptt-msg-header">
-          <span class="ptt-msg-sender">${m.senderName || 'Inconnu'} <span class="ptt-msg-role">${roleLabel}</span></span>
-          <span class="ptt-msg-time">${time}</span>
-        </div>
-        <div class="ptt-msg-audio">
-          <button class="ptt-msg-play-btn" onclick="playPTTAudio('${audioId}', this)" data-playing="false">▶ Écouter</button>
-          ${m.duration ? `<span class="ptt-msg-duration">${Math.round(m.duration)}s</span>` : ''}
-          <audio id="${audioId}" src="${m.audioData ? (m.audioData.startsWith('data:') ? m.audioData : 'data:' + (m.mimeType || 'audio/webm') + ';base64,' + m.audioData) : (m.audioUrl || '')}" preload="none"></audio>
-        </div>
-      </div>
-    </div>`;
-  }).join('');
-  container.scrollTop = container.scrollHeight;
-}
-
-function playPTTAudio(audioId, btn) {
-  const audio = document.getElementById(audioId);
-  if (!audio) return;
-  const isPlaying = btn.getAttribute('data-playing') === 'true';
-  if (isPlaying) {
-    audio.pause();
-    audio.currentTime = 0;
-    btn.textContent = '▶ Écouter';
-    btn.setAttribute('data-playing', 'false');
-  } else {
-    // Stop any other playing audio
-    document.querySelectorAll('.ptt-msg-play-btn[data-playing="true"]').forEach(b => {
-      const otherId = b.closest('.ptt-msg-audio').querySelector('audio').id;
-      const otherAudio = document.getElementById(otherId);
-      if (otherAudio) { otherAudio.pause(); otherAudio.currentTime = 0; }
-      b.textContent = '▶ Écouter';
-      b.setAttribute('data-playing', 'false');
+    const tokenRes = await fetch(`${API_BASE}/api/livekit/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ roomName: channel.id }),
     });
-    audio.play().catch(e => console.error('[PTT] Playback error:', e));
-    btn.textContent = '⏹ Arrêter';
-    btn.setAttribute('data-playing', 'true');
-    audio.onended = () => {
-      btn.textContent = '▶ Écouter';
-      btn.setAttribute('data-playing', 'false');
-    };
+    if (!tokenRes.ok) throw new Error((await tokenRes.json()).error || 'Token error');
+    const { token, url } = await tokenRes.json();
+
+    pttRoom = new LivekitClient.Room();
+
+    pttRoom.on(LivekitClient.RoomEvent.Connected, () => {
+      pttConnected = true;
+      if (btn) { btn.disabled = false; btn.innerHTML = '🎙 MAINTENIR POUR PARLER'; }
+      if (messagesEl) messagesEl.innerHTML = `<div class="empty-state">✅ Connecté à ${escapeHtml(channel.name)}</div>`;
+    });
+    pttRoom.on(LivekitClient.RoomEvent.Disconnected, () => {
+      pttConnected = false;
+      if (messagesEl) messagesEl.innerHTML = '<div class="empty-state">Déconnecté</div>';
+    });
+    pttRoom.on(LivekitClient.RoomEvent.ActiveSpeakersChanged, (speakers) => {
+      const indicator = document.getElementById('pttTalkingIndicator');
+      const nameEl = document.getElementById('pttTalkingName');
+      if (!indicator || !nameEl) return;
+      if (speakers.length === 0) {
+        indicator.style.display = 'none';
+      } else {
+        indicator.style.display = 'flex';
+        nameEl.textContent = speakers.map(s => s.name || s.identity).join(', ');
+      }
+    });
+
+    await pttRoom.connect(url, token, { autoSubscribe: true });
+    await pttRoom.localParticipant.setMicrophoneEnabled(false);
+  } catch (e) {
+    console.error('[PTT] Connect error:', e);
+    showToast('Erreur de connexion au canal PTT', 'error');
+    if (messagesEl) messagesEl.innerHTML = '<div class="empty-state">Erreur de connexion</div>';
+    if (btn) { btn.disabled = true; btn.innerHTML = '🎙 MAINTENIR POUR PARLER'; }
   }
+}
+
+async function disconnectPTTRoom() {
+  if (pttRoom) {
+    await pttRoom.disconnect();
+    pttRoom = null;
+  }
+  pttConnected = false;
+  pttTransmitting = false;
 }
 
 async function startDispatchPTT() {
-  if (pttIsRecording || !pttCurrentChannel) return;
+  if (!pttRoom || !pttConnected || pttTransmitting) return;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    // Enregistrement WAV PCM via WebAudio pour compatibilité iOS
-    const audioCtxRec = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-    const source = audioCtxRec.createMediaStreamSource(stream);
-    const processor = audioCtxRec.createScriptProcessor(4096, 1, 1);
-    const pcmChunks = [];
-    pttRecordedChunks = [];
-    
-    processor.onaudioprocess = (e) => {
-      if (!pttIsRecording) return;
-      const float32 = e.inputBuffer.getChannelData(0);
-      const int16 = new Int16Array(float32.length);
-      for (let i = 0; i < float32.length; i++) {
-        int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
-      }
-      pcmChunks.push(new Uint8Array(int16.buffer));
-    };
-    source.connect(processor);
-    processor.connect(audioCtxRec.destination);
-    
-    pttMediaRecorder = {
-      stop: () => {
-        pttIsRecording = false;
-        processor.disconnect();
-        source.disconnect();
-        stream.getTracks().forEach(t => t.stop());
-        audioCtxRec.close();
-        const totalLength = pcmChunks.reduce((sum, c) => sum + c.length, 0);
-        const wavBuffer = new ArrayBuffer(44 + totalLength);
-        const view = new DataView(wavBuffer);
-        const sampleRate = 16000;
-        const writeStr = (offset, str) => { for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i)); };
-        writeStr(0, 'RIFF'); view.setUint32(4, 36 + totalLength, true); writeStr(8, 'WAVE');
-        writeStr(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
-        view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true);
-        view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
-        writeStr(36, 'data'); view.setUint32(40, totalLength, true);
-        let offset = 44;
-        pcmChunks.forEach(chunk => { new Uint8Array(wavBuffer).set(chunk, offset); offset += chunk.length; });
-        const blob = new Blob([wavBuffer], { type: 'audio/wav' });
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const rawBase64 = reader.result.split(',')[1];
-          if (pttCurrentChannel && ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'pttTransmit', userId: 'dispatch-console', userRole: 'dispatcher', data: { channelId: pttCurrentChannel.id, audioBase64: rawBase64, mimeType: 'audio/wav', senderName: 'Dispatch Console', duration: 0, targetUserId: pttSelectedTargetUser || null } }));
-          }
-        };
-        reader.readAsDataURL(blob);
-      },
-      mimeType: 'audio/wav'
-    };
-    
-    pttIsRecording = true;
-    console.log('[PTT] Recording format: audio/wav PCM 16kHz');
-
+    await pttRoom.localParticipant.setMicrophoneEnabled(true);
+    pttTransmitting = true;
     const btn = document.getElementById('pttRecordBtn');
-    if (btn) { btn.classList.add('recording'); btn.innerHTML = '🔴 ENREGISTREMENT...'; }
-
-    // Notify talking state
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'pttStartTalking', userId: 'dispatch-console', userRole: 'dispatcher', data: { channelId: pttCurrentChannel.id, userName: 'Dispatch Console' } }));
-    }
+    if (btn) { btn.classList.add('recording'); btn.innerHTML = '🔴 EN COURS...'; }
   } catch (e) {
     console.error('[PTT] Microphone error:', e);
     showToast('Erreur: accès au microphone refusé', 'error');
   }
 }
 
-function stopDispatchPTT() {
-  if (!pttIsRecording || !pttMediaRecorder) return;
-  pttIsRecording = false;
-  pttMediaRecorder.stop();
-
+async function stopDispatchPTT() {
+  if (!pttRoom || !pttTransmitting) return;
+  try {
+    await pttRoom.localParticipant.setMicrophoneEnabled(false);
+  } catch (e) {
+    console.error('[PTT] Stop transmit error:', e);
+  }
+  pttTransmitting = false;
   const btn = document.getElementById('pttRecordBtn');
   if (btn) { btn.classList.remove('recording'); btn.innerHTML = '🎙 MAINTENIR POUR PARLER'; }
+}
 
-  // Notify stop talking
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'pttStopTalking', userId: 'dispatch-console', userRole: 'dispatcher', data: { channelId: pttCurrentChannel?.id, userName: 'Dispatch Console' } }));
+async function toggleDispatchEmergency() {
+  if (!confirm('Déclencher l\'alerte d\'urgence PTT pour tout le monde ?')) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/ptt/emergency`, { method: 'POST' });
+    if (!res.ok) throw new Error('failed');
+    showToast('Alerte urgence déclenchée', 'success');
+  } catch (e) {
+    showToast('Erreur lors du déclenchement de l\'urgence', 'error');
   }
 }
 
-async function finalizePTTRecordingWav() {
-  if (pttRecordedChunks.length === 0) return;
-  const blob = pttRecordedChunks[0];
-  pttRecordedChunks = [];
-  const reader = new FileReader();
-  reader.onloadend = () => {
-    const dataUrl = reader.result;
-    const rawBase64 = typeof dataUrl === 'string' && dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
-    if (pttCurrentChannel) {
-      const msg = { type: 'pttTransmit', userId: 'dispatch-console', userRole: 'dispatcher', data: { channelId: pttCurrentChannel.id, audioBase64: rawBase64, mimeType: 'audio/wav', senderName: 'Dispatch Console', duration: 0, targetUserId: pttSelectedTargetUser || null } };
-      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
-      if (!pttMessages[pttCurrentChannel.id]) pttMessages[pttCurrentChannel.id] = [];
-      pttMessages[pttCurrentChannel.id].push({ senderId: 'dispatch-console', senderName: 'Dispatch Console', senderRole: 'dispatcher', channelId: pttCurrentChannel.id, audioData: rawBase64, mimeType: 'audio/wav', duration: 0, timestamp: new Date().toISOString() });
-      renderPTTMessages();
-    }
-  };
-  reader.readAsDataURL(blob);
-}
-
-async function finalizePTTRecording(isEmergency) {
-  if (pttRecordedChunks.length === 0) return;
-  const actualMime = pttMediaRecorder ? pttMediaRecorder.mimeType : 'audio/webm';
-  const blob = new Blob(pttRecordedChunks, { type: actualMime });
-  pttRecordedChunks = [];
-
-  const reader = new FileReader();
-  reader.onloadend = () => {
-    const dataUrl = reader.result;
-    // Strip data URL prefix to send raw base64 (consistent with mobile app)
-    const rawBase64 = typeof dataUrl === 'string' && dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
-    if (isEmergency) {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'pttEmergency', userId: 'dispatch-console', userRole: 'dispatcher', data: { audioBase64: rawBase64, mimeType: 'audio/webm', senderName: 'Dispatch Console', duration: 0 } }));
-      }
-    } else if (pttCurrentChannel) {
-      const actualMimeType = pttMediaRecorder ? pttMediaRecorder.mimeType : 'audio/webm';
-      const msg = { type: 'pttTransmit', userId: 'dispatch-console', userRole: 'dispatcher', data: { channelId: pttCurrentChannel.id, audioBase64: rawBase64, mimeType: actualMimeType, senderName: 'Dispatch Console', duration: 0, targetUserId: pttSelectedTargetUser || null } };
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(msg));
-      }
-      // Also add locally (store raw base64)
-      if (!pttMessages[pttCurrentChannel.id]) pttMessages[pttCurrentChannel.id] = [];
-      pttMessages[pttCurrentChannel.id].push({ senderId: 'dispatch-console', senderName: 'Dispatch Console', senderRole: 'dispatcher', channelId: pttCurrentChannel.id, audioData: rawBase64, mimeType: actualMimeType, duration: 0, timestamp: new Date().toISOString() });
-      renderPTTMessages();
-    }
-  };
-  reader.readAsDataURL(blob);
-}
-
-function toggleDispatchEmergency() {
-  pttEmergencyMode = !pttEmergencyMode;
-  const btn = document.getElementById('pttEmergencyBtn');
-  if (pttEmergencyMode) {
-    btn.classList.add('active');
-    btn.innerHTML = '⚠️ URGENCE ACTIVE — Cliquer pour annuler';
-    showToast('Mode urgence activé — le prochain message sera diffusé à tous', 'warning');
-  } else {
-    btn.classList.remove('active');
-    btn.innerHTML = '⚠️ URGENCE';
-  }
-}
-
-function startEmergencyRecording() {
-  if (pttIsRecording) return;
-  navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
-    pttMediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
-    pttRecordedChunks = [];
-    pttMediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) pttRecordedChunks.push(e.data);
-    };
-    pttMediaRecorder.onstop = () => {
-      stream.getTracks().forEach(t => t.stop());
-      finalizePTTRecording(true);
-      pttEmergencyMode = false;
-      const btn = document.getElementById('pttEmergencyBtn');
-      if (btn) { btn.classList.remove('active'); btn.innerHTML = '⚠️ URGENCE'; }
-    };
-    pttMediaRecorder.start(100);
-    pttIsRecording = true;
-  }).catch(e => {
-    console.error('[PTT] Emergency mic error:', e);
-    showToast('Erreur: accès au microphone refusé', 'error');
-  });
-}
-
-function playEmergencyMessage() {
-  if (!pttLastEmergencyMsg || !pttLastEmergencyMsg.audioData) return;
-  const emergMime = pttLastEmergencyMsg.mimeType || 'audio/webm';
-  const src = pttLastEmergencyMsg.audioData.startsWith('data:') ? pttLastEmergencyMsg.audioData : 'data:' + emergMime + ';base64,' + pttLastEmergencyMsg.audioData;
-  const audio = new Audio(src);
-  audio.play().catch(e => console.error('[PTT] Emergency playback error:', e));
-  const btn = document.getElementById('pttEmergencyPlayBtn');
-  if (btn) btn.textContent = '🔊 Lecture...';
-  audio.onended = () => { if (btn) btn.textContent = '▶ Écouter'; };
+function joinEmergencyChannel() {
+  dismissDispatchEmergency();
+  const emergencyChannel = pttChannels.find(c => c.id === 'emergency');
+  if (emergencyChannel) selectPTTChannel(emergencyChannel);
 }
 
 function dismissDispatchEmergency() {
   const banner = document.getElementById('pttEmergencyBanner');
   if (banner) banner.style.display = 'none';
-  pttLastEmergencyMsg = null;
 }
 
 // ─── Direct PTT Call ──────────────────────────────────────────────────────
@@ -7011,8 +6761,7 @@ async function showDirectPTTCall() {
     const res = await fetch(`${API_BASE}/admin/users`);
     if (!res.ok) throw new Error('Failed');
     const allUsers = await res.json();
-    // Filter out dispatch-console and deactivated users
-    const available = allUsers.filter(u => u.id !== 'dispatch-console' && u.status !== 'deactivated');
+    const available = allUsers.filter(u => u.status !== 'deactivated');
     if (available.length === 0) {
       listEl.innerHTML = '<div class="empty-state">Aucun utilisateur disponible</div>';
       return;
@@ -7024,7 +6773,7 @@ async function showDirectPTTCall() {
       return `<div class="ptt-direct-user-item" onclick="initiateDirectPTTCall('${u.id}', '${name.replace(/'/g, "\\'")}')">
         <span class="ptt-direct-user-icon">${icon}</span>
         <div class="ptt-direct-user-info">
-          <div class="ptt-direct-user-name">${name}</div>
+          <div class="ptt-direct-user-name">${escapeHtml(name)}</div>
           <div class="ptt-direct-user-role">${u.role}</div>
         </div>
         <span class="ptt-direct-call-icon">📞</span>
@@ -7047,17 +6796,12 @@ async function initiateDirectPTTCall(targetUserId, targetUserName) {
     const res = await fetch(`${API_BASE}/api/ptt/channels/direct`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId1: 'dispatch-console', userId2: targetUserId, userName1: 'Dispatch', userName2: targetUserName })
+      body: JSON.stringify({ userId2: targetUserId }),
     });
     if (!res.ok) throw new Error('Failed to create direct channel');
     const channel = await res.json();
-    // Add to local channels if not already present
-    if (!pttChannels.find(c => c.id === channel.id)) {
-      pttChannels.push(channel);
-    }
+    if (!pttChannels.find(c => c.id === channel.id)) pttChannels.push(channel);
     renderPTTChannels();
-    pttSelectedTargetUser = targetUserId;
-    pttSelectedTargetUser = targetUserId;
     selectPTTChannel(channel);
     showToast(`Canal direct avec ${targetUserName} prêt`, 'success');
   } catch (e) {
@@ -7066,9 +6810,20 @@ async function initiateDirectPTTCall(targetUserId, targetUserName) {
   }
 }
 
-function showCreatePTTGroup() {
+// ─── Group PTT Channel (dispatch decides the members) ──────────────────────
+async function showCreatePTTGroup() {
   const modal = document.getElementById('pttGroupModal');
   if (modal) modal.style.display = 'flex';
+  if (!pttAllUsersCache) {
+    try {
+      const res = await fetch(`${API_BASE}/api/users`);
+      pttAllUsersCache = res.ok ? await res.json() : [];
+    } catch (e) {
+      pttAllUsersCache = [];
+    }
+  }
+  document.getElementById('pttGroupMemberSearch').value = '';
+  renderPTTGroupMemberList();
 }
 
 function closePTTGroupModal() {
@@ -7076,24 +6831,37 @@ function closePTTGroupModal() {
   if (modal) modal.style.display = 'none';
 }
 
+function renderPTTGroupMemberList() {
+  const container = document.getElementById('pttGroupMemberList');
+  if (!container) return;
+  const query = (document.getElementById('pttGroupMemberSearch')?.value || '').trim().toLowerCase();
+  const list = (pttAllUsersCache || []).filter(u => !query || u.name.toLowerCase().includes(query));
+  container.innerHTML = list.map(u => `
+    <label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer;">
+      <input type="checkbox" value="${u.id}" class="ptt-group-member-check">
+      <span>${escapeHtml(u.name)} <span style="color:var(--text-muted);font-size:12px;">(${u.role})</span></span>
+    </label>`).join('');
+}
+
 async function createDispatchPTTGroup() {
   const name = document.getElementById('pttGroupName')?.value?.trim();
   const desc = document.getElementById('pttGroupDesc')?.value?.trim();
   if (!name) { showToast('Veuillez saisir un nom de groupe', 'error'); return; }
 
-  const roles = [];
-  document.querySelectorAll('#pttGroupModal .ptt-role-check input:checked').forEach(cb => roles.push(cb.value));
-  if (roles.length === 0) { showToast('Sélectionnez au moins un rôle', 'error'); return; }
+  const members = [];
+  document.querySelectorAll('#pttGroupMemberList .ptt-group-member-check:checked').forEach(cb => members.push(cb.value));
 
   try {
-    const res = await fetch(`${API_BASE}/api/ptt/groups`, {
+    const res = await fetch(`${API_BASE}/api/ptt/channels`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, description: desc || '', allowedRoles: roles, createdBy: 'dispatch-console' })
+      body: JSON.stringify({ name, description: desc || '', members }),
     });
     if (res.ok) {
       showToast(`Groupe "${name}" créé`, 'success');
       closePTTGroupModal();
+      document.getElementById('pttGroupName').value = '';
+      document.getElementById('pttGroupDesc').value = '';
       loadPTTChannels();
     } else {
       const err = await res.json();
@@ -7103,16 +6871,6 @@ async function createDispatchPTTGroup() {
     showToast('Erreur réseau', 'error');
   }
 }
-
-// Override startDispatchPTT to handle emergency mode
-const _origStartDispatchPTT = startDispatchPTT;
-startDispatchPTT = function() {
-  if (pttEmergencyMode) {
-    startEmergencyRecording();
-  } else {
-    _origStartDispatchPTT();
-  }
-};
 
 /// Initial load of PTT channels after a delay
 setTimeout(() => { loadPTTChannels(); }, 3000);
