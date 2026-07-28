@@ -22,8 +22,25 @@ import { offlineCache } from '@/services/offline-cache';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
-import * as Sharing from 'expo-sharing';
-import * as FileSystem from 'expo-file-system/legacy';
+
+// Loaded defensively (require + try/catch, not a static import) — matches the
+// pattern already established in lib/ptt-context.tsx for these same native
+// modules, whose comment there explains why: a plain static import throws at
+// module-evaluation time (crashing whichever screen loads this file) if the
+// native module isn't available in a given build, instead of failing only
+// when the feature that needs it is actually used.
+let SharingModule: any = null;
+let FileSystemModule: any = null;
+try {
+  SharingModule = require('expo-sharing');
+} catch (e) {
+  console.warn('[Patrol] Failed to load expo-sharing:', e);
+}
+try {
+  FileSystemModule = require('expo-file-system/legacy');
+} catch (e) {
+  console.warn('[Patrol] Failed to load expo-file-system:', e);
+}
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -684,15 +701,16 @@ export default function PatrolScreen() {
 
   const exportBlackbookPdf = useCallback(async () => {
     if (!currentBlackbookEntry) return;
+    if (!FileSystemModule) { Alert.alert('Indisponible', 'Export PDF non disponible sur cette version de l\'app.'); return; }
     try {
       const baseUrl = getApiBaseUrl();
       const hdr = await authHeader();
       const fileName = `blackbook-${(currentBlackbookEntry.lastName || 'dossier').replace(/[^a-zA-Z0-9-]/g, '_')}.pdf`;
-      const fileUri = `${FileSystem.cacheDirectory}${fileName}`;
-      const result = await FileSystem.downloadAsync(`${baseUrl}/api/blackbook/${currentBlackbookEntry.id}/pdf`, fileUri, { headers: hdr });
+      const fileUri = `${FileSystemModule.cacheDirectory}${fileName}`;
+      const result = await FileSystemModule.downloadAsync(`${baseUrl}/api/blackbook/${currentBlackbookEntry.id}/pdf`, fileUri, { headers: hdr });
       if (result.status !== 200) throw new Error('download failed');
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(result.uri, { mimeType: 'application/pdf' });
+      if (SharingModule && await SharingModule.isAvailableAsync()) {
+        await SharingModule.shareAsync(result.uri, { mimeType: 'application/pdf' });
       } else {
         Alert.alert('PDF téléchargé', fileUri);
       }
