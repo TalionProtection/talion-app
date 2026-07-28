@@ -10,7 +10,6 @@ import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
 import { authHeader } from '@/lib/auth-fetch';
 import { livekitPTT, isLiveKitAvailable, getLiveKitLoadError } from '@/lib/livekit-ptt';
-import { alertSoundService } from '@/services/alert-sound-service';
 
 interface PTTChannel {
   id: string;
@@ -89,7 +88,10 @@ export default function PTTScreen() {
   }, []);
 
   const startTransmit = useCallback(async () => {
-    alertSoundService.playPTTBeep();
+    // No beep here: expo-audio playback during an active LiveKit session is a
+    // confirmed unresolved upstream conflict on iOS (livekit/client-sdk-react-native#286)
+    // - it silently breaks the mic for the rest of the session. Not worth the
+    // walkie-talkie chirp losing core PTT audio.
     await livekitPTT.startTransmit();
     setTransmitting(true);
   }, []);
@@ -97,7 +99,6 @@ export default function PTTScreen() {
   const stopTransmit = useCallback(async () => {
     await livekitPTT.stopTransmit();
     setTransmitting(false);
-    alertSoundService.playPTTBeep();
   }, []);
 
   const triggerEmergency = useCallback(() => {
