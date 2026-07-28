@@ -6705,12 +6705,19 @@ async function selectPTTChannel(channel) {
     // audio from other participants (mobile app, other dispatchers) never
     // makes it out of the speakers even though the connection is otherwise
     // fully working.
-    pttRoom.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {
+    pttRoom.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+      console.log(`[PTT] TrackSubscribed: kind=${track.kind} from ${participant?.identity}`);
       if (track.kind !== 'audio') return;
-      const audioEl = track.attach();
-      audioEl.id = `ptt-audio-${track.sid}`;
-      audioEl.style.display = 'none';
-      document.body.appendChild(audioEl);
+      try {
+        const audioEl = track.attach();
+        audioEl.id = `ptt-audio-${track.sid}`;
+        audioEl.style.display = 'none';
+        document.body.appendChild(audioEl);
+        console.log(`[PTT] Audio element attached for track ${track.sid}`);
+      } catch (e) {
+        console.error('[PTT] Failed to attach audio track:', e);
+        showToast(`Erreur lecture audio PTT: ${e.message || e}`, 'error');
+      }
     });
     pttRoom.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track) => {
       track.detach().forEach(el => el.remove());
