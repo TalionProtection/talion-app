@@ -238,6 +238,16 @@
   </div>
 
   <script>
+    (() => {
+      const last401 = localStorage.getItem('talion_last_401');
+      if (last401) {
+        localStorage.removeItem('talion_last_401');
+        const errorEl = document.getElementById('errorMsg');
+        errorEl.textContent = `Session expirée ou invalide (requête refusée: ${last401}). Merci de vous reconnecter.`;
+        errorEl.style.display = 'block';
+      }
+    })();
+
     function updateLoginBtn() {
       const email = document.getElementById('email').value.trim();
       const password = document.getElementById('password').value.trim();

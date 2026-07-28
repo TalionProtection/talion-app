@@ -28,6 +28,9 @@ if (!localStorage.getItem('talion_token')) {
     if (token) headers.set('Authorization', `Bearer ${token}`);
     return _rawFetch(input, { ...init, headers }).then(res => {
       if (res.status === 401) {
+        const reqUrl = typeof input === 'string' ? input : (input && input.url) || String(input);
+        console.error(`[Auth] 401 on ${reqUrl} — redirecting to login`);
+        localStorage.setItem('talion_last_401', reqUrl);
         localStorage.removeItem('talion_token');
         localStorage.removeItem('talion_role');
         window.location.href = '/console/';
