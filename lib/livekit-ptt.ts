@@ -126,11 +126,23 @@ class LiveKitPTTService {
   async startTransmit(): Promise<void> {
     if (!this.room || !this.isConnected) return;
     try {
+      // react-native-webrtc's getUserMedia doesn't check/request mic permission
+      // itself - it just silently captures a dead/empty track if permission was
+      // never granted. Request explicitly first so a denial surfaces clearly.
+      if (Platform.OS !== 'web') {
+        const { requestRecordingPermissionsAsync } = require('expo-audio');
+        const { granted } = await requestRecordingPermissionsAsync();
+        if (!granted) {
+          this.onError?.('Accès au microphone refusé. Activez-le dans Réglages > Talion Crisis Comm > Microphone.');
+          return;
+        }
+      }
       await this.room.localParticipant.setMicrophoneEnabled(true);
       this.isTransmitting = true;
       console.log('[LiveKit] PTT: transmitting');
     } catch (e: any) {
       console.error('[LiveKit] Transmit error:', e);
+      this.onError?.(e?.message || 'Erreur lors de l\'activation du microphone');
     }
   }
 
@@ -142,6 +154,7 @@ class LiveKitPTTService {
       console.log('[LiveKit] PTT: stopped');
     } catch (e: any) {
       console.error('[LiveKit] Stop transmit error:', e);
+      this.onError?.(e?.message || 'Erreur lors de la désactivation du microphone');
     }
   }
 

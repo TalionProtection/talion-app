@@ -10,6 +10,7 @@ import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
 import { authHeader } from '@/lib/auth-fetch';
 import { livekitPTT, isLiveKitAvailable, getLiveKitLoadError } from '@/lib/livekit-ptt';
+import { alertSoundService } from '@/services/alert-sound-service';
 
 interface PTTChannel {
   id: string;
@@ -88,6 +89,7 @@ export default function PTTScreen() {
   }, []);
 
   const startTransmit = useCallback(async () => {
+    alertSoundService.playPTTBeep();
     await livekitPTT.startTransmit();
     setTransmitting(true);
   }, []);
@@ -95,6 +97,7 @@ export default function PTTScreen() {
   const stopTransmit = useCallback(async () => {
     await livekitPTT.stopTransmit();
     setTransmitting(false);
+    alertSoundService.playPTTBeep();
   }, []);
 
   const triggerEmergency = useCallback(() => {
