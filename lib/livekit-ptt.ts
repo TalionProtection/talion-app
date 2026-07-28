@@ -22,6 +22,8 @@ import { authHeader } from './auth-fetch';
 // before any Room is constructed.
 let RoomCtor: any = null;
 let RoomEventEnum: any = null;
+let AudioSessionCtor: any = null;
+let getAppleAudioConfig: any = null;
 let loadError: string | null = null;
 if (Platform.OS !== 'web') {
   // Hermes doesn't provide the browser global DOMException, and neither
@@ -39,8 +41,10 @@ if (Platform.OS !== 'web') {
     };
   }
   try {
-    const { registerGlobals } = require('@livekit/react-native');
+    const { registerGlobals, AudioSession, getDefaultAppleAudioConfigurationForMode } = require('@livekit/react-native');
     registerGlobals();
+    AudioSessionCtor = AudioSession;
+    getAppleAudioConfig = getDefaultAppleAudioConfigurationForMode;
     const { Room, RoomEvent } = require('livekit-client');
     RoomCtor = Room;
     RoomEventEnum = RoomEvent;
@@ -92,6 +96,22 @@ class LiveKitPTTService {
       if (this.room) await this.disconnect();
 
       const { token, url } = await this.getToken(roomName);
+
+      // Must configure + start the native AudioSession *before* connecting.
+      // registerGlobals()'s own category enforcement only kicks in once the
+      // mic is actually engaged (setMicrophoneEnabled(true)), which is why
+      // playback only worked after the app itself had transmitted at least
+      // once - if the other side spoke first, the session was still in
+      // whatever default/inactive state iOS left it in. Configuring
+      // playAndRecord upfront makes receive-only work from the first packet.
+      if (AudioSessionCtor && getAppleAudioConfig) {
+        try {
+          await AudioSessionCtor.configureAudio(getAppleAudioConfig('localAndRemote', true));
+          await AudioSessionCtor.startAudioSession();
+        } catch (e) {
+          console.warn('[LiveKit] AudioSession setup failed:', e);
+        }
+      }
 
       this.room = new RoomCtor();
       this.currentRoom = roomName;
@@ -164,6 +184,13 @@ class LiveKitPTTService {
       this.room = null;
       this.isConnected = false;
       this.isTransmitting = false;
+    }
+    if (AudioSessionCtor) {
+      try {
+        await AudioSessionCtor.stopAudioSession();
+      } catch (e) {
+        console.warn('[LiveKit] AudioSession stop failed:', e);
+      }
     }
   }
 
