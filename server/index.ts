@@ -1366,10 +1366,25 @@ function computeAutoPresence(userId: string): { status: 'inside' | 'outside' | '
     }
   }
 
+  const since = applyAutoPresenceResult(userId, result, prevState);
+  return { ...result, since };
+}
+
+// Shared by computeAutoPresence (GPS-based, lazy on read) and the geofence-event
+// route (background enter/exit callback, works even with the app fully closed
+// as long as iOS/Android haven't had the app force-quit by the user) — both
+// arrive at the same { status, matchedLabel } shape and need identical
+// transition-tracking/persistence/notification handling.
+function applyAutoPresenceResult(
+  userId: string,
+  result: { status: 'inside' | 'outside' | 'unknown'; matchedLabel?: string },
+  prevState: AutoPresenceState | undefined,
+): number {
+  const now = Date.now();
   // Track when this exact (status, place) combination started, so the
   // display can say "depuis HH:mm" rather than just describing "right now".
-  // Only persist on an actual transition — this function runs on every fetch,
-  // far more often than the state actually changes.
+  // Only persist on an actual transition — this runs far more often than the
+  // state actually changes (every GPS fetch, or every geofence callback).
   const changed = !prevState || prevState.status !== result.status || prevState.label !== result.matchedLabel;
   const since = changed ? now : prevState!.since;
   autoPresenceState.set(userId, { status: result.status, label: result.matchedLabel, since });
@@ -1383,8 +1398,7 @@ function computeAutoPresence(userId: string): { status: 'inside' | 'outside' | '
       (result.status === 'inside' || result.status === 'outside') && prevState.status !== result.status) {
     notifyPresenceTransition(userId, result.status, result.matchedLabel, since);
   }
-
-  return { ...result, since };
+  return since;
 }
 
 // Tell dispatch/responder/admin (web + mobile) and the target's family whenever
@@ -3108,6 +3122,34 @@ app.put('/api/family/presence/:targetUserId', requireAuth, (req, res) => {
     notifyStaffPresenceChangePush(name, entry.status, matchedLabel, isStaff ? caller.id : undefined).catch(() => {});
   }
   res.json({ success: true });
+});
+
+// POST /api/presence/geofence-event - reports a native geofence enter/exit for
+// one of the caller's own registered addresses. Called directly from a
+// headless background TaskManager task (services/presence-geofence-task.ts),
+// not through the WebSocket/app-foreground location pipeline, so this is what
+// makes auto presence keep updating even with the app fully closed (subject
+// to iOS/Android's own constraints on background execution after a user
+// force-quits the app - no client-side trick can override that).
+// Sets the AUTOMATIC layer only; a manual override (PUT above) still wins
+// via computeEffectivePresence regardless of what this reports.
+app.post('/api/presence/geofence-event', requireAuth, (req, res) => {
+  const userId = req.supabaseUser!.id;
+  const { addressId, eventType } = req.body;
+  if (!addressId || (eventType !== 'enter' && eventType !== 'exit')) {
+    return res.status(400).json({ error: "addressId and eventType ('enter'|'exit') required" });
+  }
+  const address = (userAddresses.get(userId) || []).find(a => a.id === addressId);
+  if (!address) return res.status(404).json({ error: 'Address not found for this user' });
+
+  const prevState = autoPresenceState.get(userId);
+  const result: { status: 'inside' | 'outside'; matchedLabel?: string } = eventType === 'enter'
+    ? { status: 'inside', matchedLabel: address.label }
+    : { status: 'outside', matchedLabel: prevState?.label };
+
+  applyAutoPresenceResult(userId, result, prevState);
+  console.log(`[Presence] Geofence ${eventType} for ${adminUsers.get(userId)?.name || userId} @ ${address.label}`);
+  res.json({ success: true, status: result.status, matchedLabel: result.matchedLabel });
 });
 
 // ─── Family Perimeter CRUD ───────────────────────────────────────────

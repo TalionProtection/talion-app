@@ -2,9 +2,10 @@ import React, { createContext, useContext, useEffect, useState, useCallback, use
 import { AppState, AppStateStatus, Platform } from 'react-native';
 import locationService, { UserLocation, LocationServiceState } from '@/services/location-service';
 
-// Import background task definition (must be in global scope for TaskManager)
+// Import background task definitions (must be in global scope for TaskManager)
 if (Platform.OS !== 'web') {
   require('@/services/background-location-task');
+  require('@/services/presence-geofence-task');
 }
 
 interface LocationContextValue {

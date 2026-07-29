@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import {
   View, Text, ScrollView, TouchableOpacity, FlatList, Alert,
   TextInput, Modal, ActivityIndicator, Platform, RefreshControl,
-  StyleSheet, Keyboard,
+  StyleSheet, Keyboard, Switch,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { IconSymbol } from '@/components/ui/icon-symbol';
@@ -14,6 +14,8 @@ import { useLocation } from '@/lib/location-context';
 import NativeMapView, { Marker, Circle, isNativeMap } from '@/components/map-view';
 import { websocketService } from '@/services/websocket';
 import * as Haptics from 'expo-haptics';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { syncPresenceGeofences, stopPresenceGeofences, isPresenceGeofencingActive } from '@/services/presence-geofence-service';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -202,6 +204,15 @@ export default function FamilyScreen() {
   const [myPresenceSetAt, setMyPresenceSetAt] = useState<number | undefined>(undefined);
   const [myPresenceSaving, setMyPresenceSaving] = useState<'inside' | 'outside' | 'auto' | null>(null);
 
+  // Auto presence tracking even with the app fully closed — opt-in, since it
+  // requires "Always" location permission. Registers native geofences around
+  // the user's own registered addresses (see services/presence-geofence-*);
+  // manual status-setting above always remains available and takes priority
+  // regardless of this setting.
+  const [autoTrackingEnabled, setAutoTrackingEnabled] = useState(false);
+  const [autoTrackingBusy, setAutoTrackingBusy] = useState(false);
+  const AUTO_TRACKING_STORAGE_KEY = 'talion_auto_presence_tracking';
+
   // Staff (responder/dispatcher/admin): can view and manually set presence
   // for every family, not just their own — mirrors the console's Familles tab.
   const [allFamilyGroups, setAllFamilyGroups] = useState<FamilyGroup[]>([]);
@@ -277,6 +288,49 @@ export default function FamilyScreen() {
 
   // Location context for "Use my position" button
   const locationCtx = useLocation();
+
+  // Restore the auto-tracking toggle's saved preference, and make sure the
+  // native geofences are actually registered to match (e.g. the OS may have
+  // dropped them after a device restart).
+  useEffect(() => {
+    if (Platform.OS === 'web' || !userId) return;
+    (async () => {
+      const stored = await AsyncStorage.getItem(AUTO_TRACKING_STORAGE_KEY);
+      const wanted = stored === 'true';
+      setAutoTrackingEnabled(wanted);
+      if (wanted) {
+        const active = await isPresenceGeofencingActive();
+        if (!active) await syncPresenceGeofences(userId);
+      }
+    })();
+  }, [userId]);
+
+  const toggleAutoTracking = useCallback(async (value: boolean) => {
+    if (!userId) return;
+    setAutoTrackingBusy(true);
+    try {
+      if (value) {
+        const granted = await locationCtx.requestBackgroundPermissions();
+        if (!granted) {
+          Alert.alert(
+            'Permission requise',
+            'Le suivi automatique nécessite l\'accès "Toujours" à la localisation. Activez-le dans Réglages > Talion Crisis Comm > Position.'
+          );
+          setAutoTrackingBusy(false);
+          return;
+        }
+        await syncPresenceGeofences(userId);
+      } else {
+        await stopPresenceGeofences();
+      }
+      setAutoTrackingEnabled(value);
+      await AsyncStorage.setItem(AUTO_TRACKING_STORAGE_KEY, value ? 'true' : 'false');
+    } catch (e) {
+      console.warn('[Family] toggleAutoTracking failed:', e);
+      Alert.alert('Erreur', 'Impossible de modifier le suivi automatique.');
+    }
+    setAutoTrackingBusy(false);
+  }, [userId, locationCtx]);
 
   // ─── Reverse-geocode each member's current position for display ───────
   // Keyed by "userId:lat,lng" (rounded) so a 30s poll that hasn't materially
@@ -1351,6 +1405,20 @@ export default function FamilyScreen() {
         </View>
       </View>
 
+      {Platform.OS !== 'web' && (
+        <View style={styles.autoTrackingRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.autoTrackingLabel}>Suivi auto même app fermée</Text>
+            <Text style={styles.autoTrackingHint}>Met à jour Présent/Sorti automatiquement, y compris app fermée</Text>
+          </View>
+          {autoTrackingBusy ? (
+            <ActivityIndicator size="small" color="#1e3a5f" />
+          ) : (
+            <Switch value={autoTrackingEnabled} onValueChange={toggleAutoTracking} />
+          )}
+        </View>
+      )}
+
       {/* Tab Bar */}
       <View style={styles.tabBar}>
         {([
@@ -2013,6 +2081,28 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   myPresenceMeta: {
+    fontSize: 11,
+    color: '#9CA3AF',
+    marginTop: 2,
+  },
+  autoTrackingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    marginHorizontal: 16,
+    marginBottom: 12,
+    padding: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    gap: 8,
+  },
+  autoTrackingLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#1f2937',
+  },
+  autoTrackingHint: {
     fontSize: 11,
     color: '#9CA3AF',
     marginTop: 2,
