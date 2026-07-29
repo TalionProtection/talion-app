@@ -508,6 +508,11 @@ interface Alert {
   origin?: 'dispatch' | 'mobile'; // who created it — console/dispatcher action vs. a mobile app user report
   archived?: boolean; // hidden from the normal active views but kept, findable via the Archives view
   archivedAt?: number;
+  // Real response-time tracking for the KPI dashboard (point 6, "think like
+  // Palantir") — set once, at the first genuine acknowledge/resolve, not
+  // recomputed on subsequent transitions to the same status.
+  acknowledgedAt?: number;
+  resolvedAt?: number;
 }
 
 interface AdminIncident {
@@ -2031,6 +2036,7 @@ function handleAcknowledgeAlert(ws: any, userId: string, alertData: any) {
       alert.respondingUsers.push(userId);
     }
     alert.status = 'acknowledged';
+    if (!alert.acknowledgedAt) alert.acknowledgedAt = Date.now();
     alerts.set(alert.id, alert);
     persistAlerts();
     console.log(`Alert ${alert.id} acknowledged by ${userId}`);
@@ -2499,6 +2505,7 @@ app.put('/alerts/:id/acknowledge', requireRole('dispatcher'), (req, res) => {
   const alert = alerts.get(req.params.id as string);
   if (!alert) return res.status(404).json({ error: 'Alert not found' });
   alert.status = 'acknowledged';
+  if (!alert.acknowledgedAt) alert.acknowledgedAt = Date.now();
   alerts.set(alert.id, alert);
   persistAlerts();
   addAuditEntry('incident', 'Alert Acknowledged', req.body?.userId || 'Mobile App', `Acknowledged ${alert.id}`);
@@ -2511,6 +2518,7 @@ app.put('/alerts/:id/resolve', requireRole('dispatcher'), (req, res) => {
   const alert = alerts.get(req.params.id as string);
   if (!alert) return res.status(404).json({ error: 'Alert not found' });
   alert.status = 'resolved';
+  if (!alert.resolvedAt) alert.resolvedAt = Date.now();
   alerts.set(alert.id, alert);
   persistAlerts();
   addAuditEntry('incident', 'Incident Resolved', req.body?.userId || 'Mobile App', `Resolved ${alert.id}: ${alert.type} at ${alert.location.address}`);
@@ -3487,6 +3495,56 @@ app.get('/admin/health', requireAuth, requireRole('dispatcher'), async (req, res
   });
 });
 
+// ─── Operational KPIs (point 6, "think like Palantir") ───────────────────
+// Real response-time metrics, computed from acknowledgedAt/resolvedAt set at
+// the moment those transitions actually happen (see the six call sites that
+// set alert.status = 'acknowledged'/'resolved') - replaces what used to be a
+// randomly-generated fake resolvedAt in /admin/incidents. False-alarm rate
+// and per-severity breakdowns use only real, already-tracked status data.
+function computeIncidentKPIs(days: number) {
+  const since = Date.now() - days * 24 * 60 * 60 * 1000;
+  const relevant = Array.from(alerts.values()).filter(a => a.createdAt >= since);
+
+  const bySeverity: Record<string, { count: number; ackTimes: number[]; resolveTimes: number[] }> = {};
+  let cancelledCount = 0;
+  const byStatus: Record<string, number> = {};
+
+  for (const a of relevant) {
+    byStatus[a.status] = (byStatus[a.status] || 0) + 1;
+    if (a.status === 'cancelled') cancelledCount++;
+
+    if (!bySeverity[a.severity]) bySeverity[a.severity] = { count: 0, ackTimes: [], resolveTimes: [] };
+    const bucket = bySeverity[a.severity];
+    bucket.count++;
+    if (a.acknowledgedAt) bucket.ackTimes.push(a.acknowledgedAt - a.createdAt);
+    if (a.resolvedAt) bucket.resolveTimes.push(a.resolvedAt - a.createdAt);
+  }
+
+  const avg = (nums: number[]) => nums.length === 0 ? null : Math.round(nums.reduce((s, n) => s + n, 0) / nums.length);
+
+  const bySeverityOut: Record<string, { count: number; avgTimeToAcknowledgeMs: number | null; avgTimeToResolveMs: number | null }> = {};
+  for (const [severity, bucket] of Object.entries(bySeverity)) {
+    bySeverityOut[severity] = {
+      count: bucket.count,
+      avgTimeToAcknowledgeMs: avg(bucket.ackTimes),
+      avgTimeToResolveMs: avg(bucket.resolveTimes),
+    };
+  }
+
+  return {
+    periodDays: days,
+    totalIncidents: relevant.length,
+    falseAlarmRate: relevant.length > 0 ? cancelledCount / relevant.length : 0,
+    incidentsByStatus: byStatus,
+    incidentsBySeverity: bySeverityOut,
+  };
+}
+
+app.get('/admin/kpis', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const days = Math.max(1, Math.min(365, Number(req.query.days) || 30));
+  res.json(computeIncidentKPIs(days));
+});
+
 // Admin users list
 app.get('/admin/users', (req, res) => {
   const users = Array.from(adminUsers.values()).map(u => {
@@ -3771,7 +3829,7 @@ app.get('/admin/incidents', (req, res) => {
     location: { latitude: a.location.latitude, longitude: a.location.longitude },
     description: a.description,
     timestamp: a.createdAt,
-    resolvedAt: a.status === 'resolved' ? a.createdAt + Math.floor(Math.random() * 3600000) : undefined,
+    resolvedAt: a.resolvedAt,
     assignedCount: a.respondingUsers.length,
     respondingUsers: a.respondingUsers || [],
     respondingNames: (a.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid),
@@ -3959,6 +4017,7 @@ app.put('/dispatch/incidents/:id/acknowledge', (req, res) => {
   const alert = alerts.get(req.params.id);
   if (!alert) return res.status(404).json({ error: 'Incident not found' });
   alert.status = 'acknowledged';
+  if (!alert.acknowledgedAt) alert.acknowledgedAt = Date.now();
   alerts.set(alert.id, alert);
   persistAlerts();
   addAuditEntry('incident', 'Alert Acknowledged', 'Dispatch Console', `Acknowledged ${alert.id}`);
@@ -3976,6 +4035,7 @@ app.put('/dispatch/incidents/:id/assign', (req, res) => {
   }
   if (alert.status === 'active' || alert.status === 'acknowledged') {
     alert.status = 'acknowledged';
+    if (!alert.acknowledgedAt) alert.acknowledgedAt = Date.now();
   }
   alerts.set(alert.id, alert);
   persistAlerts();
@@ -4205,6 +4265,7 @@ app.put('/dispatch/incidents/:id/resolve', (req, res) => {
   const alert = alerts.get(req.params.id);
   if (!alert) return res.status(404).json({ error: 'Incident not found' });
   alert.status = 'resolved';
+  if (!alert.resolvedAt) alert.resolvedAt = Date.now();
   // Stop any pending soft/hard escalation timers so a resolved incident can't keep "escalating"
   (alert.respondingUsers || []).forEach(uid => clearAcceptanceTimer(alert.id, uid));
   alerts.set(alert.id, alert);

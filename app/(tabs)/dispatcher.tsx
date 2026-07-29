@@ -199,6 +199,13 @@ export default function DispatcherScreen() {
   const [emergencyOverrideActive, setEmergencyOverrideActive] = useState(false);
   const [emergencyOverrideExpiry, setEmergencyOverrideExpiry] = useState<number | null>(null);
 
+  // Operational KPIs (point 6, "think like Palantir") — mirrors the
+  // console's Statistiques tab (same GET /admin/kpis endpoint).
+  const [showKPIsModal, setShowKPIsModal] = useState(false);
+  const [kpisData, setKpisData] = useState<any>(null);
+  const [kpisLoading, setKpisLoading] = useState(false);
+  const [kpisPeriodDays, setKpisPeriodDays] = useState(30);
+
   // Fetch responders from server
   const fetchResponders = useCallback(async () => {
     try {
@@ -474,6 +481,33 @@ export default function DispatcherScreen() {
     loadHealth();
   }, [loadHealth]);
 
+  const loadKPIs = useCallback(async (days?: number) => {
+    setKpisLoading(true);
+    try {
+      const baseUrl = getApiBaseUrl();
+      const res = await fetchWithTimeout(`${baseUrl}/admin/kpis?days=${days ?? kpisPeriodDays}`, { timeout: 10000, headers: await authHeader() });
+      setKpisData(res.ok ? await res.json() : null);
+    } catch (e) {
+      setKpisData(null);
+    }
+    setKpisLoading(false);
+  }, [kpisPeriodDays]);
+
+  const openKPIsModal = useCallback(() => {
+    setShowKPIsModal(true);
+    loadKPIs();
+  }, [loadKPIs]);
+
+  const formatDurationMs = (ms: number | null | undefined) => {
+    if (ms == null) return '—';
+    const minutes = Math.round(ms / 60000);
+    if (minutes < 60) return `${minutes} min`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h ${minutes % 60}min`;
+  };
+
+  const KPI_SEVERITY_LABELS: Record<string, string> = { low: 'Faible', medium: 'Moyen', high: 'Élevé', critical: 'Critique' };
+
   const formatUptime = (seconds: number) => {
     const d = Math.floor(seconds / 86400);
     const h = Math.floor((seconds % 86400) / 3600);
@@ -729,6 +763,12 @@ export default function DispatcherScreen() {
         >
           <Text style={styles.broadcastButtonIcon}>{'\u{1F6A8}'}</Text>
           <Text style={styles.broadcastButtonText}>{emergencyOverrideActive ? "Accès d'urgence ACTIF" : "Accès d'urgence"}</Text>
+        </TouchableOpacity>
+
+        {/* Operational KPIs Button */}
+        <TouchableOpacity style={[styles.broadcastButton, { backgroundColor: '#1e3a5f' }]} onPress={openKPIsModal}>
+          <Text style={styles.broadcastButtonIcon}>{'\u{1F4CA}'}</Text>
+          <Text style={styles.broadcastButtonText}>Statistiques</Text>
         </TouchableOpacity>
 
         {/* Refresh Button */}
@@ -1577,6 +1617,77 @@ export default function DispatcherScreen() {
             )}
 
             <TouchableOpacity style={styles.modalCloseBtn} onPress={() => setShowHealthModal(false)}>
+              <Text style={styles.modalCloseBtnText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Operational KPIs Modal — mirrors the console's Statistiques tab */}
+      <Modal visible={showKPIsModal} transparent animationType="slide">
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' }}>
+          <View style={{ backgroundColor: '#fff', borderTopLeftRadius: 16, borderTopRightRadius: 16, maxHeight: '85%', padding: 16 }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <Text style={{ fontSize: 18, fontWeight: '700', color: '#1f2937' }}>{'\u{1F4CA}'} Statistiques</Text>
+              <TouchableOpacity onPress={() => loadKPIs()}>
+                <Text style={{ fontSize: 20 }}>{'↻'}</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={{ flexDirection: 'row', gap: 6, marginBottom: 12 }}>
+              {[{ label: '7j', value: 7 }, { label: '30j', value: 30 }, { label: '90j', value: 90 }].map(p => (
+                <TouchableOpacity
+                  key={p.label}
+                  style={{
+                    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8,
+                    backgroundColor: kpisPeriodDays === p.value ? '#1e3a5f' : '#f3f4f6',
+                  }}
+                  onPress={() => { setKpisPeriodDays(p.value); loadKPIs(p.value); }}
+                >
+                  <Text style={{ fontSize: 12, fontWeight: '600', color: kpisPeriodDays === p.value ? '#fff' : '#374151' }}>{p.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {kpisLoading ? (
+              <ActivityIndicator size="large" color="#1e3a5f" style={{ marginTop: 24 }} />
+            ) : !kpisData ? (
+              <Text style={{ textAlign: 'center', color: '#9ca3af', marginTop: 24 }}>Erreur de chargement</Text>
+            ) : (
+              <ScrollView showsVerticalScrollIndicator={false}>
+                <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
+                  <View style={{ flex: 1, backgroundColor: '#eff6ff', borderRadius: 10, padding: 12 }}>
+                    <Text style={{ fontSize: 20, fontWeight: '700', color: '#1e3a5f' }}>{kpisData.totalIncidents}</Text>
+                    <Text style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>Incidents (période)</Text>
+                  </View>
+                  <View style={{ flex: 1, backgroundColor: kpisData.falseAlarmRate > 0.2 ? '#fef3c7' : '#dcfce7', borderRadius: 10, padding: 12 }}>
+                    <Text style={{ fontSize: 20, fontWeight: '700', color: kpisData.falseAlarmRate > 0.2 ? '#92400e' : '#166534' }}>{Math.round((kpisData.falseAlarmRate || 0) * 100)}%</Text>
+                    <Text style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>Taux de fausses alertes</Text>
+                  </View>
+                </View>
+
+                <Text style={{ fontSize: 13, fontWeight: '700', color: '#1f2937', marginBottom: 6 }}>
+                  {'⏱️'} Temps de réponse moyen par sévérité
+                </Text>
+                {Object.keys(kpisData.incidentsBySeverity || {}).length === 0 ? (
+                  <Text style={{ color: '#9ca3af', fontSize: 12 }}>Aucun incident sur cette période</Text>
+                ) : (
+                  Object.entries(kpisData.incidentsBySeverity).map(([severity, data]: [string, any]) => (
+                    <View key={severity} style={{ backgroundColor: '#f9fafb', borderRadius: 10, padding: 12, marginBottom: 8 }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: '#1f2937' }}>{KPI_SEVERITY_LABELS[severity] || severity}</Text>
+                        <Text style={{ fontSize: 12, color: '#6b7280' }}>{data.count} incident{data.count !== 1 ? 's' : ''}</Text>
+                      </View>
+                      <Text style={{ fontSize: 12, color: '#6b7280', marginTop: 4 }}>
+                        Accusé réception: {formatDurationMs(data.avgTimeToAcknowledgeMs)} · Résolution: {formatDurationMs(data.avgTimeToResolveMs)}
+                      </Text>
+                    </View>
+                  ))
+                )}
+              </ScrollView>
+            )}
+
+            <TouchableOpacity style={styles.modalCloseBtn} onPress={() => setShowKPIsModal(false)}>
               <Text style={styles.modalCloseBtnText}>Close</Text>
             </TouchableOpacity>
           </View>

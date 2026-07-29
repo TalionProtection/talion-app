@@ -663,7 +663,7 @@ function switchTab(tab) {
   document.querySelector(`.nav-item[data-tab="${tab}"]`)?.classList.add('active');
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.getElementById(`tab-${tab}`)?.classList.add('active');
-  const titles = { overview: "Vue d'ensemble", incidents: "Gestion des incidents", responders: "Unités d'intervention", broadcast: "Diffusion", map: "Carte en direct", messages: "Messages", patrol: "Rapports de Ronde", ptt: "Push-to-Talk", archives: "Archives", families: "Familles", visits: "Visites", blackbook: "Blackbook", health: "Santé Système" };
+  const titles = { overview: "Vue d'ensemble", incidents: "Gestion des incidents", responders: "Unités d'intervention", broadcast: "Diffusion", map: "Carte en direct", messages: "Messages", patrol: "Rapports de Ronde", ptt: "Push-to-Talk", archives: "Archives", families: "Familles", visits: "Visites", blackbook: "Blackbook", health: "Santé Système", kpis: "Statistiques" };
   document.getElementById('pageTitle').textContent = titles[tab] || tab;
   if (tab === 'map') {
     setTimeout(() => { if (dispatchMap) { dispatchMap.invalidateSize(); } else { initMap(); } }, 100);
@@ -685,6 +685,9 @@ function switchTab(tab) {
   }
   if (tab === 'health') {
     loadSystemHealth();
+  }
+  if (tab === 'kpis') {
+    loadKPIs();
   }
 }
 
@@ -829,6 +832,52 @@ async function loadSystemHealth() {
     document.getElementById('healthLastUpdated').textContent = `Mis à jour: ${new Date().toLocaleTimeString('fr-FR')}`;
   } catch (e) {
     console.error('[Health] Load error:', e);
+  }
+}
+
+// ─── Operational KPIs Tab (point 6, "think like Palantir") ────────────
+// Reuses the existing SEVERITY_LABELS constant (declared near the top of
+// this file for incident cards).
+function formatDurationMs(ms) {
+  if (ms == null) return '—';
+  const minutes = Math.round(ms / 60000);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const remMinutes = minutes % 60;
+  return `${hours}h ${remMinutes}min`;
+}
+
+async function loadKPIs() {
+  try {
+    const days = document.getElementById('kpisPeriod')?.value || '30';
+    const res = await fetch(`${API_BASE}/admin/kpis?days=${days}`);
+    if (!res.ok) throw new Error('Failed to load KPIs');
+    const kpis = await res.json();
+
+    document.getElementById('kpiTotalIncidents').textContent = kpis.totalIncidents;
+
+    const falseAlarmPct = Math.round(kpis.falseAlarmRate * 100);
+    document.getElementById('kpiFalseAlarmRate').textContent = `${falseAlarmPct}%`;
+    document.getElementById('kpiFalseAlarmCard').className = `stat-card ${falseAlarmPct > 20 ? 'stat-yellow' : 'stat-green'}`;
+
+    const tbody = document.getElementById('kpiSeverityTableBody');
+    const emptyState = document.getElementById('kpiSeverityEmptyState');
+    const severityEntries = Object.entries(kpis.incidentsBySeverity || {});
+    if (severityEntries.length === 0) {
+      tbody.innerHTML = '';
+      emptyState.style.display = 'block';
+    } else {
+      emptyState.style.display = 'none';
+      tbody.innerHTML = severityEntries.map(([severity, data]) => `
+        <tr>
+          <td>${SEVERITY_LABELS[severity] || severity}</td>
+          <td>${data.count}</td>
+          <td>${formatDurationMs(data.avgTimeToAcknowledgeMs)}</td>
+          <td>${formatDurationMs(data.avgTimeToResolveMs)}</td>
+        </tr>`).join('');
+    }
+  } catch (e) {
+    console.error('[KPIs] Load error:', e);
   }
 }
 

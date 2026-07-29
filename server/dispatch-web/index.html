@@ -61,6 +61,9 @@
       <a href="#" class="nav-item" data-tab="health">
         <span class="nav-icon">&#x1FA7A;</span> Santé Système
       </a>
+      <a href="#" class="nav-item" data-tab="kpis">
+        <span class="nav-icon">&#x1F4CA;</span> Statistiques
+      </a>
     </nav>
     <div class="sidebar-footer">
       <a href="/admin-console/" class="console-link">&#x1F6E1; Admin Console</a>
@@ -873,6 +876,40 @@
         </div>
         <div id="healthErrorsList" style="max-height:400px;overflow-y:auto;"></div>
         <div id="healthErrorsEmptyState" class="empty-state" style="display:none;"><p>Aucune erreur récente</p></div>
+      </div>
+    </section>
+
+    <!-- Operational KPIs Tab -->
+    <section class="tab-content" id="tab-kpis">
+      <div class="toolbar">
+        <select id="kpisPeriod" class="form-control" onchange="loadKPIs()">
+          <option value="7">7 derniers jours</option>
+          <option value="30" selected>30 derniers jours</option>
+          <option value="90">90 derniers jours</option>
+        </select>
+        <button class="btn btn-sm" onclick="loadKPIs()">&#x21BB; Rafraîchir</button>
+      </div>
+
+      <div class="stats-row">
+        <div class="stat-card stat-blue">
+          <div class="stat-number" id="kpiTotalIncidents">0</div>
+          <div class="stat-label">Incidents (période)</div>
+        </div>
+        <div class="stat-card" id="kpiFalseAlarmCard">
+          <div class="stat-number" id="kpiFalseAlarmRate">—</div>
+          <div class="stat-label">Taux de fausses alertes</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h3>⏱️ Temps de réponse moyen par sévérité</h3>
+        </div>
+        <table class="visits-table">
+          <thead><tr><th>Sévérité</th><th>Nb incidents</th><th>Temps moyen accusé réception</th><th>Temps moyen résolution</th></tr></thead>
+          <tbody id="kpiSeverityTableBody"></tbody>
+        </table>
+        <div id="kpiSeverityEmptyState" class="empty-state" style="display:none;"><p>Aucun incident sur cette période</p></div>
       </div>
     </section>
   </main>
