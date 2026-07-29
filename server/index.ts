@@ -811,56 +811,7 @@ const MAX_HISTORY_PER_USER = 200; // keep last 200 points per user
 // Track which responders are currently inside each zone: Map<zoneId, Set<responderId>>
 const responderZoneState = new Map<string, Set<string>>();
 
-// ─── Seed demo data ──────────────────────────────────────────────────
-function seedDemoData() {
-  const now = Date.now();
-  const hour = 3600000;
-  const day = 86400000;
-
-  // Default password hash for all demo users: 'talion2026'
-  const defaultPwHash = bcrypt.hashSync('talion2026', 10);
-
-  // Seed admin users
-  const demoUsers: AdminUser[] = [
-    { id: 'admin-001', firstName: 'Marie', lastName: 'Dupont', name: 'Marie Dupont', email: 'admin@talion.io', role: 'admin', status: 'active', lastLogin: now - 5 * 60000, createdAt: now - 90 * day, tags: ['command', 'zone-champel'], address: 'Avenue de Champel 24, 1206 Genève, Suisse', phoneMobile: '+41 79 123 45 67', phoneLandline: '+41 22 700 00 01', comments: 'Administratrice principale', passwordHash: defaultPwHash },
-    { id: 'disp-001', firstName: 'Jean', lastName: 'Moreau', name: 'Jean Moreau', email: 'dispatch@talion.io', role: 'dispatcher', status: 'active', lastLogin: now - 12 * 60000, createdAt: now - 75 * day, tags: ['equipe-alpha', 'zone-florissant'], address: 'Route de Florissant 62, 1206 Genève, Suisse', phoneMobile: '+41 79 234 56 78', comments: 'Dispatcher senior, equipe jour', passwordHash: defaultPwHash },
-    { id: 'disp-002', firstName: 'Sophie', lastName: 'Laurent', name: 'Sophie Laurent', email: 'dispatch2@talion.io', role: 'dispatcher', status: 'active', lastLogin: now - 2 * hour, createdAt: now - 60 * day, tags: ['equipe-bravo', 'zone-malagnou'], address: 'Route de Malagnou 32, 1208 Genève, Suisse', phoneMobile: '+41 79 345 67 89', passwordHash: defaultPwHash },
-    { id: 'resp-001', firstName: 'Pierre', lastName: 'Martin', name: 'Pierre Martin', email: 'responder@talion.io', role: 'responder', status: 'active', lastLogin: now - 8 * 60000, createdAt: now - 80 * day, tags: ['equipe-alpha', 'zone-champel', 'medical'], address: 'Chemin de Beau-Soleil 8, 1206 Genève, Suisse', phoneMobile: '+41 79 456 78 90', comments: 'Secouriste certifie', passwordHash: defaultPwHash },
-    { id: 'resp-002', firstName: 'Camille', lastName: 'Bernard', name: 'Camille Bernard', email: 'responder2@talion.io', role: 'responder', status: 'active', lastLogin: now - 30 * 60000, createdAt: now - 65 * day, tags: ['equipe-alpha', 'zone-malagnou', 'fire'], address: 'Avenue de Frontenex 45, 1207 Genève, Suisse', phoneMobile: '+41 79 567 89 01', passwordHash: defaultPwHash },
-    { id: 'resp-003', firstName: 'Lucas', lastName: 'Petit', name: 'Lucas Petit', email: 'responder3@talion.io', role: 'responder', status: 'active', lastLogin: now - 1 * hour, createdAt: now - 50 * day, tags: ['equipe-bravo', 'zone-vesenaz'], address: 'Route de Thonon 85, 1222 Vésenaz, Suisse', phoneMobile: '+41 79 678 90 12', passwordHash: defaultPwHash },
-    { id: 'resp-004', firstName: 'Emma', lastName: 'Roux', name: 'Emma Roux', email: 'responder4@talion.io', role: 'responder', status: 'suspended', lastLogin: now - 5 * day, createdAt: now - 45 * day, tags: ['equipe-bravo', 'medical'], address: 'Chemin de la Capite 12, 1222 Vésenaz, Suisse', phoneMobile: '+41 79 789 01 23', passwordHash: defaultPwHash },
-    { id: 'user-001', firstName: 'Thomas', lastName: 'Leroy', name: 'Thomas Leroy', email: 'thomas@example.com', role: 'user', status: 'active', lastLogin: now - 3 * hour, createdAt: now - 30 * day, tags: ['zone-champel', 'observateur'], address: 'Avenue de Miremont 30, 1206 Genève, Suisse', phoneMobile: '+41 79 890 12 34', relationships: [{ userId: 'user-002', type: 'spouse' }, { userId: 'user-004', type: 'parent' }, { userId: 'user-005', type: 'parent' }], passwordHash: defaultPwHash },
-    { id: 'user-002', firstName: 'Julie', lastName: 'Morel', name: 'Julie Morel', email: 'julie@example.com', role: 'user', status: 'active', lastLogin: now - 6 * hour, createdAt: now - 25 * day, tags: ['zone-florissant', 'observateur'], address: 'Avenue de Miremont 30, 1206 Genève, Suisse', phoneMobile: '+41 79 901 23 45', relationships: [{ userId: 'user-001', type: 'spouse' }, { userId: 'user-004', type: 'parent' }, { userId: 'user-005', type: 'parent' }], passwordHash: defaultPwHash },
-    { id: 'user-003', firstName: 'Nicolas', lastName: 'Fournier', name: 'Nicolas Fournier', email: 'nicolas@example.com', role: 'user', status: 'deactivated', lastLogin: now - 15 * day, createdAt: now - 40 * day, tags: [], address: 'Chemin du Velours 10, 1208 Genève, Suisse', passwordHash: defaultPwHash },
-    { id: 'user-004', firstName: 'Lea', lastName: 'Leroy', name: 'Lea Leroy', email: 'lea@example.com', role: 'user', status: 'active', lastLogin: now - 45 * 60000, createdAt: now - 20 * day, tags: ['zone-champel'], address: 'Avenue de Miremont 30, 1206 Genève, Suisse', phoneMobile: '+41 79 012 34 56', relationships: [{ userId: 'user-005', type: 'sibling' }, { userId: 'user-001', type: 'child' }, { userId: 'user-002', type: 'child' }], passwordHash: defaultPwHash },
-    { id: 'user-005', firstName: 'Hugo', lastName: 'Leroy', name: 'Hugo Leroy', email: 'hugo@example.com', role: 'user', status: 'active', lastLogin: now - 2 * day, createdAt: now - 10 * day, tags: ['zone-vesenaz'], address: 'Avenue de Miremont 30, 1206 Genève, Suisse', phoneMobile: '+41 79 123 45 00', relationships: [{ userId: 'user-004', type: 'sibling' }, { userId: 'user-001', type: 'child' }, { userId: 'user-002', type: 'child' }], passwordHash: defaultPwHash },
-  ];
-  demoUsers.forEach(u => adminUsers.set(u.id, u));
-  // Seed audit log
-  const demoAudit: AuditEntry[] = [
-    { id: uuidv4(), timestamp: now - 2 * 60000, category: 'incident', action: 'Incident Created', performedBy: 'Jean Moreau', details: 'Created INC-001: Urgence médicale à Avenue de Champel' },
-    { id: uuidv4(), timestamp: now - 5 * 60000, category: 'incident', action: 'Incident Created', performedBy: 'Sophie Laurent', details: 'Created INC-008: Feu de cuisine au Chemin du Velours' },
-    { id: uuidv4(), timestamp: now - 5 * 60000, category: 'auth', action: 'User Login', performedBy: 'Marie Dupont', details: 'Admin login from 192.168.1.100' },
-    { id: uuidv4(), timestamp: now - 8 * 60000, category: 'incident', action: 'Alert Acknowledged', performedBy: 'Pierre Martin', details: 'Acknowledged INC-002: Alarme incendie Route de Florissant' },
-    { id: uuidv4(), timestamp: now - 12 * 60000, category: 'auth', action: 'User Login', performedBy: 'Jean Moreau', details: 'Dispatcher login from mobile device' },
-    { id: uuidv4(), timestamp: now - 15 * 60000, category: 'user', action: 'Role Changed', performedBy: 'Marie Dupont', targetUser: 'Lucas Petit', details: 'Role changed from user to responder' },
-    { id: uuidv4(), timestamp: now - 30 * 60000, category: 'incident', action: 'Responder Assigned', performedBy: 'Jean Moreau', targetUser: 'Camille Bernard', details: 'Assigned to INC-003: Chemical spill' },
-    { id: uuidv4(), timestamp: now - 45 * 60000, category: 'incident', action: 'Incident Resolved', performedBy: 'Pierre Martin', details: 'Resolved INC-005: Alerte SOS à Vésenaz' },
-    { id: uuidv4(), timestamp: now - 1 * hour, category: 'broadcast', action: 'Zone Broadcast Sent', performedBy: 'Sophie Laurent', details: 'Alerte broadcast dans un rayon de 2km autour de Route de Malagnou' },
-    { id: uuidv4(), timestamp: now - 2 * hour, category: 'system', action: 'Server Restart', performedBy: 'System', details: 'Scheduled maintenance restart completed' },
-    { id: uuidv4(), timestamp: now - 2 * hour, category: 'incident', action: 'Incident Resolved', performedBy: 'Lucas Petit', details: 'Resolved INC-006: Chute personne âgée à Vésenaz' },
-    { id: uuidv4(), timestamp: now - 3 * hour, category: 'user', action: 'User Suspended', performedBy: 'Marie Dupont', targetUser: 'Emma Roux', details: 'Suspended for policy violation' },
-    { id: uuidv4(), timestamp: now - 4 * hour, category: 'incident', action: 'Incident Resolved', performedBy: 'Pierre Martin', details: 'Resolved INC-007: Minor vehicle collision' },
-    { id: uuidv4(), timestamp: now - 5 * hour, category: 'auth', action: 'User Login', performedBy: 'Thomas Leroy', details: 'User login from mobile device' },
-    { id: uuidv4(), timestamp: now - 6 * hour, category: 'system', action: 'Backup Completed', performedBy: 'System', details: 'Automated daily backup completed successfully' },
-    { id: uuidv4(), timestamp: now - 1 * day, category: 'user', action: 'User Deactivated', performedBy: 'Marie Dupont', targetUser: 'Nicolas Fournier', details: 'Account deactivated upon request' },
-  ];
-  auditLog.push(...demoAudit);
-}
-
-seedDemoData();
-
-// ─── Load persisted data (overrides seed data if files exist) ───────────
+// ─── Load persisted data ─────────────────────────────────────────────────
 (function loadPersistedData() {
   // Load persisted alerts (overrides seed alerts)
   const savedAlerts = loadJsonFile<Alert[]>(ALERTS_FILE, []);
@@ -4441,16 +4392,8 @@ app.post('/dispatch/geofence/zones', (req, res) => {
   responderZoneState.set(zone.id, new Set());
 
   // Check which responders are already inside the zone
-  const demoResponderLocations = [
-    { id: 'resp-001', lat: 46.1930, lng: 6.1540 },
-    { id: 'resp-002', lat: 46.2010, lng: 6.1620 },
-    { id: 'resp-003', lat: 46.1960, lng: 6.1680 },
-    { id: 'resp-004', lat: 46.2310, lng: 6.2050 },
-  ];
   const allResponders = Array.from(users.values()).filter(u => u.role === 'responder' && u.location);
-  const respondersToCheck = allResponders.length > 0
-    ? allResponders.map(r => ({ id: r.id, lat: r.location!.latitude, lng: r.location!.longitude }))
-    : demoResponderLocations;
+  const respondersToCheck = allResponders.map(r => ({ id: r.id, lat: r.location!.latitude, lng: r.location!.longitude }));
 
   respondersToCheck.forEach(r => {
     const dist = haversineDistance(r.lat, r.lng, zone.center.latitude, zone.center.longitude);
@@ -4607,7 +4550,6 @@ app.get('/dispatch/map/users', (req, res) => {
   const now = Date.now();
   const caller = req.supabaseUser!;
   const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
-  // Combine real connected users with demo user locations
   const connectedUsersList = Array.from(users.values())
     .filter(u => u.location && u.role !== 'responder')
     .filter(u => !(adminUsers.get(u.id)?.ghostMode && !isRevealedForActiveIncident(u.id)))
