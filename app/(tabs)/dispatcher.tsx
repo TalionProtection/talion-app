@@ -448,12 +448,15 @@ export default function DispatcherScreen() {
 
   const filteredVisits = useMemo(() => {
     const query = visitsSearch.trim().toLowerCase();
-    if (!query) return visitsData;
-    return visitsData.filter((o: any) => {
+    const filtered = !query ? visitsData : visitsData.filter((o: any) => {
       const haystack = [o.personName, o.personCompany, o.personVehiclePlate, o.personPhone, o.addressLabel, o.ownerName]
         .filter(Boolean).join(' ').toLowerCase();
       return haystack.includes(query);
     });
+    // Most recent/soonest first — matches the console's default sort, so a
+    // past visit that took place is right at the top instead of buried under
+    // older ones.
+    return [...filtered].sort((a: any, b: any) => (b.scheduledStart ?? 0) - (a.scheduledStart ?? 0));
   }, [visitsData, visitsSearch]);
 
   const filteredPeople = useMemo(() => {

@@ -1225,7 +1225,7 @@ async function loadUpcomingInterventions() {
 // resolution — "is this person/plate/company known anywhere" independent
 // of whether they have a visit scheduled right now) ─────────────────────
 let visitsData = [];
-let visitsSort = { key: 'scheduledStart', dir: 1 };
+let visitsSort = { key: 'scheduledStart', dir: -1 }; // most recent/soonest first by default
 let peopleData = [];
 let peopleSort = { key: 'name', dir: 1 };
 let visitsActiveSubtab = 'visits';
