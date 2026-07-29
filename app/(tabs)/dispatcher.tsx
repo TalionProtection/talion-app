@@ -1212,8 +1212,11 @@ export default function DispatcherScreen() {
             />
 
             {visitsSubtab === 'visits' && (
-              <View style={{ flexDirection: 'row', gap: 6, marginBottom: 12 }}>
-                {[{ label: '7j', value: 7 }, { label: '30j', value: 30 }, { label: '90j', value: 90 }, { label: '-30j', value: -30 }].map(r => (
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ flexDirection: 'row', gap: 6, marginBottom: 12 }}>
+                {[
+                  { label: '7j', value: 7 }, { label: '30j', value: 30 }, { label: '90j', value: 90 },
+                  { label: '-30j', value: -30 }, { label: '-90j', value: -90 }, { label: '-1an', value: -365 }, { label: '-3ans', value: -1095 },
+                ].map(r => (
                   <TouchableOpacity
                     key={r.label}
                     style={{
@@ -1225,7 +1228,7 @@ export default function DispatcherScreen() {
                     <Text style={{ fontSize: 12, fontWeight: '600', color: visitsRangeDays === r.value ? '#fff' : '#374151' }}>{r.label}</Text>
                   </TouchableOpacity>
                 ))}
-              </View>
+              </ScrollView>
             )}
 
             {visitsSubtab === 'visits' ? (
