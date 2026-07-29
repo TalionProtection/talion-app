@@ -106,11 +106,17 @@ class LiveKitPTTService {
       // playAndRecord upfront makes receive-only work from the first packet.
       if (AudioSessionCtor && getAppleAudioConfig) {
         try {
-          await AudioSessionCtor.configureAudio(getAppleAudioConfig('localAndRemote', true));
+          const audioConfig = getAppleAudioConfig('localAndRemote', true);
+          console.log('[LiveKit] Configuring AudioSession:', JSON.stringify(audioConfig));
+          await AudioSessionCtor.configureAudio(audioConfig);
           await AudioSessionCtor.startAudioSession();
-        } catch (e) {
-          console.warn('[LiveKit] AudioSession setup failed:', e);
+          console.log('[LiveKit] AudioSession started successfully');
+        } catch (e: any) {
+          console.error('[LiveKit] AudioSession setup failed:', e);
+          this.onError?.(`AudioSession non configurée: ${e?.message || e}`);
         }
+      } else {
+        console.warn('[LiveKit] AudioSession or getAppleAudioConfig not available - AudioSessionCtor:', !!AudioSessionCtor, 'getAppleAudioConfig:', !!getAppleAudioConfig);
       }
 
       this.room = new RoomCtor();
@@ -130,6 +136,10 @@ class LiveKitPTTService {
 
       this.room.on(RoomEventEnum.ActiveSpeakersChanged, (speakers: any[]) => {
         this.onActiveSpeakersChanged?.(speakers.map(s => ({ identity: s.identity, name: s.name || s.identity })));
+      });
+
+      this.room.on(RoomEventEnum.TrackSubscribed, (track: any, _pub: any, participant: any) => {
+        console.log(`[LiveKit] TrackSubscribed: kind=${track.kind} from ${participant?.identity} isMuted=${track.isMuted}`);
       });
 
       await this.room.connect(url, token, { autoSubscribe: true });
