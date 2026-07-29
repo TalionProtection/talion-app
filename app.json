@@ -80,7 +80,14 @@
         "@config-plugins/react-native-webrtc",
         {
           "microphonePermission": "Talion Crisis Comm needs your microphone to talk on PTT channels.",
-          "cameraPermission": "Talion Crisis Comm does not use your camera."
+          "cameraPermission": "Talion Crisis Comm uses your camera to attach photos to incident reports, patrol logs, and messages."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Talion Crisis Comm needs access to your photos to attach them to incident reports, patrol logs, messages, and your profile picture.",
+          "cameraPermission": "Talion Crisis Comm uses your camera to attach photos to incident reports, patrol logs, and messages."
         }
       ]
     ],
