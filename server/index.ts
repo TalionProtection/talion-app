@@ -10,6 +10,20 @@ import fs from 'fs';
 import { requireAuth, requireRole, optionalAuth } from './auth-middleware';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 
+// ─── Internal health/error tracking (no external service) ────────────────
+// Lightweight in-memory ring buffer so staff can see recent server errors
+// without a third-party crash reporter — surfaced via GET /admin/health.
+// Declared before the crash-safety-net handlers below so they can feed it.
+interface HealthErrorEntry { timestamp: number; context: string; message: string; stack?: string; }
+const recentErrors: HealthErrorEntry[] = [];
+const MAX_HEALTH_ERRORS = 200;
+function logHealthError(context: string, error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  const stack = error instanceof Error ? error.stack : undefined;
+  recentErrors.unshift({ timestamp: Date.now(), context, message, stack });
+  if (recentErrors.length > MAX_HEALTH_ERRORS) recentErrors.length = MAX_HEALTH_ERRORS;
+}
+
 // ─── Crash safety net ─────────────────────────────────────────────────────
 // Without this, a single unhandled promise rejection anywhere in this file
 // (a missed .catch() in any one route, timer, or WS handler) takes down the
@@ -21,9 +35,11 @@ import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 // it immediately either way, but this at least leaves a clear log line.
 process.on('unhandledRejection', (reason) => {
   console.error('[unhandledRejection] Kept server alive after:', reason);
+  logHealthError('unhandledRejection', reason);
 });
 process.on('uncaughtException', (error) => {
   console.error('[uncaughtException] Server crashing:', error);
+  logHealthError('uncaughtException', error);
   process.exit(1);
 });
 
@@ -3318,15 +3334,70 @@ app.get('/api/family/location-history', (req, res) => {
 
 // ─── Admin REST API ──────────────────────────────────────────────
 
-// Admin health (extended)
-app.get('/admin/health', (req, res) => {
+// ─── Health check helpers ─────────────────────────────────────────────────
+async function checkSupabaseHealth(): Promise<{ ok: boolean; latencyMs?: number; error?: string }> {
+  const start = Date.now();
+  try {
+    const { error } = await supabaseAdmin.from('admin_users').select('id').limit(1);
+    if (error) return { ok: false, error: error.message };
+    return { ok: true, latencyMs: Date.now() - start };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+async function checkLiveKitHealth(): Promise<{ ok: boolean; latencyMs?: number; error?: string }> {
+  const start = Date.now();
+  const url = process.env.LIVEKIT_URL;
+  if (!url) return { ok: false, error: 'LIVEKIT_URL not configured' };
+  try {
+    const httpUrl = url.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:');
+    const res = await fetch(httpUrl, { signal: AbortSignal.timeout(5000) });
+    return { ok: res.ok, latencyMs: Date.now() - start };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+// Responders/dispatchers who are supposedly on duty but haven't sent a
+// location ping in a while — usually means the app crashed, was killed, or
+// lost connectivity without anyone noticing yet.
+const STALE_DEVICE_THRESHOLD_MS = 10 * 60 * 1000;
+function computeStaleDevices(): { userId: string; name: string; role: string; lastSeenMinutesAgo: number }[] {
+  const now = Date.now();
+  const stale: { userId: string; name: string; role: string; lastSeenMinutesAgo: number }[] = [];
+  for (const [userId, user] of users) {
+    const isTrackedRole = user.role === 'responder' || user.role === 'dispatcher';
+    const shouldBeActive = isTrackedRole && (user.status === 'on_duty' || user.status === 'available' || user.status === 'responding');
+    if (shouldBeActive && user.lastSeen && (now - user.lastSeen) > STALE_DEVICE_THRESHOLD_MS) {
+      stale.push({
+        userId,
+        name: adminUsers.get(userId)?.name || userId,
+        role: user.role,
+        lastSeenMinutesAgo: Math.round((now - user.lastSeen) / 60000),
+      });
+    }
+  }
+  return stale.sort((a, b) => b.lastSeenMinutesAgo - a.lastSeenMinutesAgo);
+}
+
+// Admin health (extended) — staff-only (dispatcher or admin), since this now
+// surfaces recent server error messages/stack traces alongside the counts.
+app.get('/admin/health', requireAuth, requireRole('dispatcher'), async (req, res) => {
+  const [supabaseHealth, livekitHealth] = await Promise.all([checkSupabaseHealth(), checkLiveKitHealth()]);
   res.json({
     status: 'ok',
+    uptimeSeconds: Math.round(process.uptime()),
+    memory: process.memoryUsage(),
     connectedUsers: userConnections.size,
     totalUsers: adminUsers.size,
     activeAlerts: Array.from(alerts.values()).filter(a => a.status === 'active').length,
     totalAlerts: alerts.size,
     wsClients: wss.clients.size,
+    supabase: supabaseHealth,
+    livekit: livekitHealth,
+    staleDevices: computeStaleDevices(),
+    recentErrors: recentErrors.slice(0, 50),
     timestamp: Date.now(),
   });
 });

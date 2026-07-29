@@ -58,6 +58,9 @@
       <a href="#" class="nav-item" data-tab="blackbook">
         <span class="nav-icon">&#x1F575;&#xFE0F;</span> Blackbook
       </a>
+      <a href="#" class="nav-item" data-tab="health">
+        <span class="nav-icon">&#x1FA7A;</span> Santé Système
+      </a>
     </nav>
     <div class="sidebar-footer">
       <a href="/admin-console/" class="console-link">&#x1F6E1; Admin Console</a>
@@ -794,6 +797,58 @@
           <tbody id="blackbookTableBody"></tbody>
         </table>
         <div id="blackbookEmptyState" class="empty-state" style="display:none;"><div class="empty-icon">🕵️</div><p>Aucune fiche trouvée</p></div>
+      </div>
+    </section>
+
+    <!-- System Health Tab -->
+    <section class="tab-content" id="tab-health">
+      <div class="toolbar">
+        <button class="btn btn-sm" onclick="loadSystemHealth()">&#x21BB; Rafraîchir</button>
+        <span style="color:var(--text-muted);font-size:12px;" id="healthLastUpdated"></span>
+      </div>
+
+      <div class="stats-row">
+        <div class="stat-card" id="healthSupabaseCard">
+          <div class="stat-number" id="healthSupabaseStatus">—</div>
+          <div class="stat-label">Supabase</div>
+        </div>
+        <div class="stat-card" id="healthLivekitCard">
+          <div class="stat-number" id="healthLivekitStatus">—</div>
+          <div class="stat-label">LiveKit</div>
+        </div>
+        <div class="stat-card stat-blue">
+          <div class="stat-number" id="healthWsClients">0</div>
+          <div class="stat-label">Connexions WS</div>
+        </div>
+        <div class="stat-card stat-navy">
+          <div class="stat-number" id="healthUptime">—</div>
+          <div class="stat-label">Uptime serveur</div>
+        </div>
+        <div class="stat-card" id="healthMemoryCard">
+          <div class="stat-number" id="healthMemory">—</div>
+          <div class="stat-label">Mémoire (RSS)</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h3>📡 Appareils potentiellement hors ligne</h3>
+          <span class="stat-badge stat-yellow" id="healthStaleCount">0</span>
+        </div>
+        <table class="visits-table">
+          <thead><tr><th>Nom</th><th>Rôle</th><th>Dernière position vue il y a</th></tr></thead>
+          <tbody id="healthStaleTableBody"></tbody>
+        </table>
+        <div id="healthStaleEmptyState" class="empty-state" style="display:none;"><p>Tous les appareils en service sont à jour</p></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h3>⚠️ Erreurs serveur récentes</h3>
+          <span class="stat-badge stat-red" id="healthErrorCount">0</span>
+        </div>
+        <div id="healthErrorsList" style="max-height:400px;overflow-y:auto;"></div>
+        <div id="healthErrorsEmptyState" class="empty-state" style="display:none;"><p>Aucune erreur récente</p></div>
       </div>
     </section>
   </main>

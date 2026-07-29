@@ -654,7 +654,7 @@ function switchTab(tab) {
   document.querySelector(`.nav-item[data-tab="${tab}"]`)?.classList.add('active');
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.getElementById(`tab-${tab}`)?.classList.add('active');
-  const titles = { overview: "Vue d'ensemble", incidents: "Gestion des incidents", responders: "Unités d'intervention", broadcast: "Diffusion", map: "Carte en direct", messages: "Messages", patrol: "Rapports de Ronde", ptt: "Push-to-Talk", archives: "Archives", families: "Familles", visits: "Visites", blackbook: "Blackbook" };
+  const titles = { overview: "Vue d'ensemble", incidents: "Gestion des incidents", responders: "Unités d'intervention", broadcast: "Diffusion", map: "Carte en direct", messages: "Messages", patrol: "Rapports de Ronde", ptt: "Push-to-Talk", archives: "Archives", families: "Familles", visits: "Visites", blackbook: "Blackbook", health: "Santé Système" };
   document.getElementById('pageTitle').textContent = titles[tab] || tab;
   if (tab === 'map') {
     setTimeout(() => { if (dispatchMap) { dispatchMap.invalidateSize(); } else { initMap(); } }, 100);
@@ -673,6 +673,83 @@ function switchTab(tab) {
   }
   if (tab === 'blackbook') {
     loadBlackbook();
+  }
+  if (tab === 'health') {
+    loadSystemHealth();
+  }
+}
+
+// ─── System Health Tab ───────────────────────────────────────────────
+function formatUptime(seconds) {
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d > 0) return `${d}j ${h}h`;
+  if (h > 0) return `${h}h ${m}min`;
+  return `${m}min`;
+}
+
+async function loadSystemHealth() {
+  try {
+    const res = await fetch(`${API_BASE}/admin/health`);
+    if (!res.ok) throw new Error('Failed to load health');
+    const health = await res.json();
+
+    const supaEl = document.getElementById('healthSupabaseStatus');
+    const supaCard = document.getElementById('healthSupabaseCard');
+    supaEl.textContent = health.supabase?.ok ? `✅ ${health.supabase.latencyMs}ms` : '❌ Erreur';
+    supaCard.className = `stat-card ${health.supabase?.ok ? 'stat-green' : 'stat-red'}`;
+
+    const lkEl = document.getElementById('healthLivekitStatus');
+    const lkCard = document.getElementById('healthLivekitCard');
+    lkEl.textContent = health.livekit?.ok ? `✅ ${health.livekit.latencyMs}ms` : '❌ Erreur';
+    lkCard.className = `stat-card ${health.livekit?.ok ? 'stat-green' : 'stat-red'}`;
+
+    document.getElementById('healthWsClients').textContent = health.wsClients ?? 0;
+    document.getElementById('healthUptime').textContent = formatUptime(health.uptimeSeconds || 0);
+    const rssMb = health.memory?.rss ? Math.round(health.memory.rss / 1024 / 1024) : 0;
+    document.getElementById('healthMemory').textContent = `${rssMb} MB`;
+    document.getElementById('healthMemoryCard').className = `stat-card ${rssMb > 1024 ? 'stat-yellow' : ''}`;
+
+    const staleDevices = health.staleDevices || [];
+    document.getElementById('healthStaleCount').textContent = staleDevices.length;
+    const staleBody = document.getElementById('healthStaleTableBody');
+    const staleEmpty = document.getElementById('healthStaleEmptyState');
+    if (staleDevices.length === 0) {
+      staleBody.innerHTML = '';
+      staleEmpty.style.display = 'block';
+    } else {
+      staleEmpty.style.display = 'none';
+      staleBody.innerHTML = staleDevices.map(d => `
+        <tr>
+          <td>${escapeHtml(d.name)}</td>
+          <td>${escapeHtml(d.role)}</td>
+          <td>${d.lastSeenMinutesAgo} min</td>
+        </tr>`).join('');
+    }
+
+    const errors = health.recentErrors || [];
+    document.getElementById('healthErrorCount').textContent = errors.length;
+    const errorsList = document.getElementById('healthErrorsList');
+    const errorsEmpty = document.getElementById('healthErrorsEmptyState');
+    if (errors.length === 0) {
+      errorsList.innerHTML = '';
+      errorsEmpty.style.display = 'block';
+    } else {
+      errorsEmpty.style.display = 'none';
+      errorsList.innerHTML = errors.map(e => `
+        <div style="padding:10px;border-bottom:1px solid var(--border-color);">
+          <div style="display:flex;justify-content:space-between;">
+            <strong style="color:var(--danger-color, #dc2626);">${escapeHtml(e.context)}</strong>
+            <span style="color:var(--text-muted);font-size:12px;">${new Date(e.timestamp).toLocaleString('fr-FR')}</span>
+          </div>
+          <div style="font-size:13px;margin-top:4px;">${escapeHtml(e.message)}</div>
+        </div>`).join('');
+    }
+
+    document.getElementById('healthLastUpdated').textContent = `Mis à jour: ${new Date().toLocaleTimeString('fr-FR')}`;
+  } catch (e) {
+    console.error('[Health] Load error:', e);
   }
 }
 

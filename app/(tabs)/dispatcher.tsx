@@ -176,6 +176,12 @@ export default function DispatcherScreen() {
   const [peopleData, setPeopleData] = useState<any[]>([]);
   const [peopleLoading, setPeopleLoading] = useState(false);
 
+  // System health — mirrors the console's Santé Système tab (same
+  // GET /admin/health endpoint), per the console/app parity rule.
+  const [showHealthModal, setShowHealthModal] = useState(false);
+  const [healthData, setHealthData] = useState<any>(null);
+  const [healthLoading, setHealthLoading] = useState(false);
+
   // Fetch responders from server
   const fetchResponders = useCallback(async () => {
     try {
@@ -434,6 +440,32 @@ export default function DispatcherScreen() {
     setPeopleLoading(false);
   }, []);
 
+  const loadHealth = useCallback(async () => {
+    setHealthLoading(true);
+    try {
+      const baseUrl = getApiBaseUrl();
+      const res = await fetchWithTimeout(`${baseUrl}/admin/health`, { timeout: 10000, headers: await authHeader() });
+      setHealthData(res.ok ? await res.json() : null);
+    } catch (e) {
+      setHealthData(null);
+    }
+    setHealthLoading(false);
+  }, []);
+
+  const openHealthModal = useCallback(() => {
+    setShowHealthModal(true);
+    loadHealth();
+  }, [loadHealth]);
+
+  const formatUptime = (seconds: number) => {
+    const d = Math.floor(seconds / 86400);
+    const h = Math.floor((seconds % 86400) / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    if (d > 0) return `${d}j ${h}h`;
+    if (h > 0) return `${h}h ${m}min`;
+    return `${m}min`;
+  };
+
   const openVisitsModal = useCallback(() => {
     setShowVisitsModal(true);
     setVisitsSearch('');
@@ -552,6 +584,12 @@ export default function DispatcherScreen() {
         <TouchableOpacity style={[styles.broadcastButton, { backgroundColor: '#374151' }]} onPress={openVisitsModal}>
           <Text style={styles.broadcastButtonIcon}>{'\u{1F527}'}</Text>
           <Text style={styles.broadcastButtonText}>Visites & Prestataires</Text>
+        </TouchableOpacity>
+
+        {/* System Health Button */}
+        <TouchableOpacity style={[styles.broadcastButton, { backgroundColor: '#0f172a' }]} onPress={openHealthModal}>
+          <Text style={styles.broadcastButtonIcon}>{'\u{1FA7A}'}</Text>
+          <Text style={styles.broadcastButtonText}>Santé Système</Text>
         </TouchableOpacity>
 
         {/* Refresh Button */}
@@ -1290,6 +1328,86 @@ export default function DispatcherScreen() {
             )}
 
             <TouchableOpacity style={styles.modalCloseBtn} onPress={() => setShowVisitsModal(false)}>
+              <Text style={styles.modalCloseBtnText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* System Health Modal — mirrors the console's Santé Système tab */}
+      <Modal visible={showHealthModal} transparent animationType="slide">
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' }}>
+          <View style={{ backgroundColor: '#fff', borderTopLeftRadius: 16, borderTopRightRadius: 16, maxHeight: '85%', padding: 16 }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <Text style={{ fontSize: 18, fontWeight: '700', color: '#1f2937' }}>{'\u{1FA7A}'} Santé Système</Text>
+              <TouchableOpacity onPress={loadHealth}>
+                <Text style={{ fontSize: 20 }}>{'↻'}</Text>
+              </TouchableOpacity>
+            </View>
+
+            {healthLoading ? (
+              <ActivityIndicator size="large" color="#1e3a5f" style={{ marginTop: 24 }} />
+            ) : !healthData ? (
+              <Text style={{ textAlign: 'center', color: '#9ca3af', marginTop: 24 }}>Erreur de chargement</Text>
+            ) : (
+              <ScrollView showsVerticalScrollIndicator={false}>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+                  <View style={{ flex: 1, minWidth: '45%', backgroundColor: healthData.supabase?.ok ? '#dcfce7' : '#fee2e2', borderRadius: 10, padding: 12 }}>
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: healthData.supabase?.ok ? '#166534' : '#991b1b' }}>
+                      {healthData.supabase?.ok ? `✅ ${healthData.supabase.latencyMs}ms` : '❌ Erreur'}
+                    </Text>
+                    <Text style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>Supabase</Text>
+                  </View>
+                  <View style={{ flex: 1, minWidth: '45%', backgroundColor: healthData.livekit?.ok ? '#dcfce7' : '#fee2e2', borderRadius: 10, padding: 12 }}>
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: healthData.livekit?.ok ? '#166534' : '#991b1b' }}>
+                      {healthData.livekit?.ok ? `✅ ${healthData.livekit.latencyMs}ms` : '❌ Erreur'}
+                    </Text>
+                    <Text style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>LiveKit</Text>
+                  </View>
+                  <View style={{ flex: 1, minWidth: '45%', backgroundColor: '#eff6ff', borderRadius: 10, padding: 12 }}>
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: '#1e3a5f' }}>{healthData.wsClients ?? 0}</Text>
+                    <Text style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>Connexions WS</Text>
+                  </View>
+                  <View style={{ flex: 1, minWidth: '45%', backgroundColor: '#f3f4f6', borderRadius: 10, padding: 12 }}>
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: '#1f2937' }}>{formatUptime(healthData.uptimeSeconds || 0)}</Text>
+                    <Text style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>Uptime serveur</Text>
+                  </View>
+                </View>
+
+                <Text style={{ fontSize: 13, fontWeight: '700', color: '#1f2937', marginTop: 8, marginBottom: 6 }}>
+                  📡 Appareils potentiellement hors ligne ({(healthData.staleDevices || []).length})
+                </Text>
+                {(healthData.staleDevices || []).length === 0 ? (
+                  <Text style={{ color: '#9ca3af', fontSize: 12, marginBottom: 12 }}>Tous les appareils en service sont à jour</Text>
+                ) : (
+                  healthData.staleDevices.map((d: any) => (
+                    <View key={d.userId} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' }}>
+                      <Text style={{ fontSize: 12, color: '#1f2937' }}>{d.name} ({d.role})</Text>
+                      <Text style={{ fontSize: 12, color: '#f59e0b' }}>{d.lastSeenMinutesAgo} min</Text>
+                    </View>
+                  ))
+                )}
+
+                <Text style={{ fontSize: 13, fontWeight: '700', color: '#1f2937', marginTop: 12, marginBottom: 6 }}>
+                  ⚠️ Erreurs serveur récentes ({(healthData.recentErrors || []).length})
+                </Text>
+                {(healthData.recentErrors || []).length === 0 ? (
+                  <Text style={{ color: '#9ca3af', fontSize: 12 }}>Aucune erreur récente</Text>
+                ) : (
+                  healthData.recentErrors.slice(0, 20).map((e: any, i: number) => (
+                    <View key={i} style={{ backgroundColor: '#fef2f2', borderRadius: 8, padding: 10, marginBottom: 6 }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                        <Text style={{ fontSize: 12, fontWeight: '700', color: '#991b1b' }}>{e.context}</Text>
+                        <Text style={{ fontSize: 11, color: '#9ca3af' }}>{new Date(e.timestamp).toLocaleTimeString('fr-FR')}</Text>
+                      </View>
+                      <Text style={{ fontSize: 12, color: '#374151', marginTop: 2 }}>{e.message}</Text>
+                    </View>
+                  ))
+                )}
+              </ScrollView>
+            )}
+
+            <TouchableOpacity style={styles.modalCloseBtn} onPress={() => setShowHealthModal(false)}>
               <Text style={styles.modalCloseBtnText}>Close</Text>
             </TouchableOpacity>
           </View>
