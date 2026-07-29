@@ -6,7 +6,7 @@
     "dev": "concurrently -k -n metro,server -c blue,green \"pnpm dev:metro\" \"pnpm dev:server\"",
     "dev:metro": "expo start --web",
     "dev:server": "tsx server/index.ts",
-    "build": "expo export --platform web && esbuild server/index.ts --platform=node --packages=external --bundle --format=cjs --outdir=dist && esbuild server/dispatch-web/shared-entry.ts --bundle --format=iife --outfile=server/dispatch-web/shared.bundle.js",
+    "build": "expo export --platform web && esbuild server/index.ts --platform=node --packages=external --bundle --format=cjs --outdir=dist && esbuild shared/browser-entry.ts --bundle --format=iife --outfile=server/dispatch-web/shared.bundle.js && esbuild shared/browser-entry.ts --bundle --format=iife --outfile=server/admin-web/shared.bundle.js",
     "start": "NODE_ENV=production node dist/index.js",
     "reset-project": "node ./scripts/reset-project.js",
     "android": "expo start --android",

@@ -674,19 +674,51 @@ function removeRelationship(index) {
 }
 
 // ─── Same Address Info ───────────────────────────────────────────
-function updateSameAddressInfo() {
-  const address = document.getElementById('fieldAddress').value.trim();
+// Compares this user's registered residences (with GPS coordinates) against
+// every other user's, by proximity - not the old hidden legacy `address`
+// text field (still present as a hidden input for backward compatibility,
+// but no longer shown/editable anywhere, so it silently stays empty for any
+// account only ever managed through the newer "Adresses & Résidences"
+// structured-address flow, making the old exact-string comparison miss real
+// cohabitants like it did for Eytan Boon despite his residence being
+// correctly registered).
+const SAME_ADDRESS_TOLERANCE_METERS = 30;
+let allResidencesCache = null;
+
+async function updateSameAddressInfo() {
   const infoDiv = document.getElementById('sameAddressInfo');
-  if (!address) { infoDiv.style.display = 'none'; return; }
-  const sameAddr = allUsers.filter(u => u.id !== editingUserId && u.address && u.address.toLowerCase() === address.toLowerCase());
-  if (sameAddr.length > 0) {
+  if (!infoDiv) return;
+  const myAddresses = (currentAddresses || []).filter(a => a.latitude != null && a.longitude != null);
+  if (myAddresses.length === 0) { infoDiv.style.display = 'none'; return; }
+
+  if (!allResidencesCache) {
+    try {
+      const res = await fetch(`${API_BASE}/api/all-residences`);
+      allResidencesCache = res.ok ? await res.json() : [];
+    } catch (e) {
+      allResidencesCache = [];
+    }
+  }
+
+  const matches = new Map(); // userId -> {name, label}
+  for (const mine of myAddresses) {
+    for (const other of allResidencesCache) {
+      if (other.userId === editingUserId) continue;
+      const dist = TalionShared.haversineDistanceMeters(mine.latitude, mine.longitude, other.latitude, other.longitude);
+      if (dist <= SAME_ADDRESS_TOLERANCE_METERS && !matches.has(other.userId)) {
+        matches.set(other.userId, other.userName);
+      }
+    }
+  }
+
+  if (matches.size > 0) {
     infoDiv.style.display = 'block';
     infoDiv.innerHTML = `
       <div class="info-box info-box-blue">
         <span class="info-box-icon">🏠</span>
         <div class="info-box-text">
-          <strong>${sameAddr.length} autre(s) utilisateur(s) à la même adresse :</strong><br>
-          ${sameAddr.map(u => `• ${u.name} (${u.role})`).join('<br>')}
+          <strong>${matches.size} autre(s) utilisateur(s) à la même adresse :</strong><br>
+          ${Array.from(matches.values()).map(name => `• ${name}`).join('<br>')}
         </div>
       </div>
     `;
@@ -1295,6 +1327,7 @@ async function loadUserAddresses(userId) {
     currentAddresses = [];
     renderAddressesInDrawer();
   }
+  updateSameAddressInfo();
 }
 
 function renderAddressesInDrawer() {
