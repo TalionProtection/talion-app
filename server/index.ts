@@ -6885,6 +6885,74 @@ app.get('/api/known-people/all', requireAuth, (req, res) => {
   res.json(result);
 });
 
+// GET /api/entity-search?q= — cross-references a name/phone/plate against every
+// place a person can be known to the system today: Blackbook (threats/suspicious
+// persons), known people (providers/visitors per residence), and system accounts
+// (families/staff). These are three separate, unrelated data structures with no
+// links between them - this is a read-only unification layer answering "is this
+// person/vehicle known ANYWHERE" without a schema migration. Point 2 of the
+// ontology/entity-resolution discussion - the lightweight version.
+app.get('/api/entity-search', requireAuth, (req, res) => {
+  const caller = req.supabaseUser!;
+  const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder';
+  if (!isStaff) return res.status(403).json({ error: 'Staff only' });
+  const query = ((req.query.q as string) || '').trim().toLowerCase();
+  if (query.length < 2) return res.json([]);
+
+  const results: any[] = [];
+
+  for (const entry of blackbookEntries.values()) {
+    const haystacks = [
+      `${entry.firstName} ${entry.lastName}`,
+      ...entry.aliases,
+      ...entry.vehicles.map(v => v.plate || ''),
+    ].filter(Boolean).map(s => s.toLowerCase());
+    if (haystacks.some(h => h.includes(query))) {
+      const plates = entry.vehicles.map(v => v.plate).filter(Boolean).join(', ');
+      results.push({
+        source: 'blackbook',
+        id: entry.id,
+        name: `${entry.firstName} ${entry.lastName}`,
+        detail: `Blackbook — risque ${entry.riskLevel}${plates ? ` — ${plates}` : ''}`,
+        riskLevel: entry.riskLevel,
+        status: entry.status,
+      });
+    }
+  }
+
+  for (const [addressId, people] of knownPeople) {
+    for (const p of people) {
+      const haystack = [p.name, p.company, p.phone, p.vehiclePlate].filter(Boolean).join(' ').toLowerCase();
+      if (haystack.includes(query)) {
+        const owner = adminUsers.get(p.userId);
+        const addr = (userAddresses.get(p.userId) || []).find(a => a.id === addressId);
+        results.push({
+          source: 'known_person',
+          id: p.id,
+          name: p.name,
+          detail: `Personne connue — ${p.category}${owner ? ` — ${owner.name}` : ''}${addr ? ` (${addr.label})` : ''}`,
+          category: p.category,
+        });
+      }
+    }
+  }
+
+  for (const u of adminUsers.values()) {
+    const haystack = [u.name, u.email, u.phoneMobile, u.phoneLandline].filter(Boolean).join(' ').toLowerCase();
+    if (haystack.includes(query)) {
+      results.push({
+        source: 'system_account',
+        id: u.id,
+        name: u.name,
+        detail: `Compte système — ${u.role}`,
+        role: u.role,
+      });
+    }
+  }
+
+  res.json(results);
+});
+
 // GET /api/interventions/upcoming?from=&to= — cross-residence calendar for staff situational
 // awareness ("who's expected where today"), expanding simple weekly recurrences into
 // concrete occurrences within [from, to]. Defaults to the next 7 days.

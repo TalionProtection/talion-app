@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -172,9 +172,17 @@ export default function DispatcherScreen() {
   // Sub-view: scheduled visits, or every known person regardless of whether
   // they have a visit right now — for doubt resolution (someone's at the
   // gate, is this a known contact anywhere at all).
-  const [visitsSubtab, setVisitsSubtab] = useState<'visits' | 'people'>('visits');
+  const [visitsSubtab, setVisitsSubtab] = useState<'visits' | 'people' | 'global'>('visits');
   const [peopleData, setPeopleData] = useState<any[]>([]);
   const [peopleLoading, setPeopleLoading] = useState(false);
+
+  // Global entity search — cross-references Blackbook + Personnes connues +
+  // comptes système by name/téléphone/plaque, mirroring the console's
+  // "Recherche globale" subtab (point 2 of the ontology discussion, the
+  // lightweight version: read-only cross-reference, no schema changes).
+  const [globalSearchResults, setGlobalSearchResults] = useState<any[]>([]);
+  const [globalSearchLoading, setGlobalSearchLoading] = useState(false);
+  const globalSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // System health — mirrors the console's Santé Système tab (same
   // GET /admin/health endpoint), per the console/app parity rule.
@@ -473,10 +481,39 @@ export default function DispatcherScreen() {
     loadVisits(visitsRangeDays);
   }, [loadVisits, visitsRangeDays]);
 
-  const switchVisitsSubtab = useCallback((subtab: 'visits' | 'people') => {
+  const switchVisitsSubtab = useCallback((subtab: 'visits' | 'people' | 'global') => {
     setVisitsSubtab(subtab);
     if (subtab === 'people' && peopleData.length === 0) loadKnownPeopleAll();
   }, [peopleData.length, loadKnownPeopleAll]);
+
+  const loadGlobalSearch = useCallback(async (query: string) => {
+    setGlobalSearchLoading(true);
+    try {
+      const baseUrl = getApiBaseUrl();
+      const res = await fetchWithTimeout(`${baseUrl}/api/entity-search?q=${encodeURIComponent(query)}`, { timeout: 10000, headers: await authHeader() });
+      setGlobalSearchResults(res.ok ? await res.json() : []);
+    } catch (e) {
+      setGlobalSearchResults([]);
+    }
+    setGlobalSearchLoading(false);
+  }, []);
+
+  // Debounced search-as-you-type when on the global search subtab.
+  useEffect(() => {
+    if (visitsSubtab !== 'global') return;
+    if (globalSearchTimerRef.current) clearTimeout(globalSearchTimerRef.current);
+    const query = visitsSearch.trim();
+    if (query.length < 2) {
+      setGlobalSearchResults([]);
+      return;
+    }
+    globalSearchTimerRef.current = setTimeout(() => loadGlobalSearch(query), 300);
+    return () => {
+      if (globalSearchTimerRef.current) clearTimeout(globalSearchTimerRef.current);
+    };
+  }, [visitsSearch, visitsSubtab, loadGlobalSearch]);
+
+  const GLOBAL_SEARCH_SOURCE_LABEL: Record<string, string> = { blackbook: '🕵️ Blackbook', known_person: '👥 Personne connue', system_account: '🏠 Compte système' };
 
   const filteredVisits = useMemo(() => {
     const query = visitsSearch.trim().toLowerCase();
@@ -1239,11 +1276,21 @@ export default function DispatcherScreen() {
               >
                 <Text style={{ fontSize: 12, fontWeight: '700', color: visitsSubtab === 'people' ? '#1f2937' : '#6b7280' }}>👥 Personnes connues</Text>
               </TouchableOpacity>
+              <TouchableOpacity
+                style={{ flex: 1, paddingVertical: 8, borderRadius: 6, alignItems: 'center', backgroundColor: visitsSubtab === 'global' ? '#fff' : 'transparent' }}
+                onPress={() => switchVisitsSubtab('global')}
+              >
+                <Text style={{ fontSize: 12, fontWeight: '700', color: visitsSubtab === 'global' ? '#1f2937' : '#6b7280' }}>🔍 Recherche globale</Text>
+              </TouchableOpacity>
             </View>
 
             <TextInput
               style={{ backgroundColor: '#f3f4f6', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, marginBottom: 8 }}
-              placeholder={visitsSubtab === 'visits' ? 'Nom, société, plaque, résidence, famille...' : 'Nom, société, plaque, résidence, famille (toutes personnes connues)...'}
+              placeholder={
+                visitsSubtab === 'visits' ? 'Nom, société, plaque, résidence, famille...'
+                  : visitsSubtab === 'people' ? 'Nom, société, plaque, résidence, famille (toutes personnes connues)...'
+                    : 'Nom, téléphone, plaque — cherche dans Blackbook + Personnes connues + Comptes...'
+              }
               placeholderTextColor="#9ca3af"
               value={visitsSearch}
               onChangeText={setVisitsSearch}
@@ -1299,7 +1346,7 @@ export default function DispatcherScreen() {
                   )}
                 </ScrollView>
               )
-            ) : (
+            ) : visitsSubtab === 'people' ? (
               peopleLoading ? (
                 <ActivityIndicator size="large" color="#1e3a5f" style={{ marginTop: 24 }} />
               ) : (
@@ -1325,6 +1372,26 @@ export default function DispatcherScreen() {
                   )}
                 </ScrollView>
               )
+            ) : globalSearchLoading ? (
+              <ActivityIndicator size="large" color="#1e3a5f" style={{ marginTop: 24 }} />
+            ) : visitsSearch.trim().length < 2 ? (
+              <Text style={{ textAlign: 'center', color: '#9ca3af', marginTop: 24 }}>Tapez au moins 2 caractères pour rechercher</Text>
+            ) : (
+              <ScrollView showsVerticalScrollIndicator={false}>
+                {globalSearchResults.length === 0 ? (
+                  <Text style={{ textAlign: 'center', color: '#9ca3af', marginTop: 24 }}>Aucun résultat</Text>
+                ) : (
+                  globalSearchResults.map((r: any) => (
+                    <View key={`${r.source}-${r.id}`} style={{ backgroundColor: '#f9fafb', borderRadius: 10, padding: 12, marginBottom: 8 }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                        <Text style={{ fontSize: 14, fontWeight: '700', color: '#1f2937' }}>{r.name}</Text>
+                        <Text style={{ fontSize: 11, color: '#6b7280' }}>{GLOBAL_SEARCH_SOURCE_LABEL[r.source] || r.source}</Text>
+                      </View>
+                      <Text style={{ fontSize: 12, color: '#6b7280', marginTop: 2 }}>{r.detail}</Text>
+                    </View>
+                  ))
+                )}
+              </ScrollView>
             )}
 
             <TouchableOpacity style={styles.modalCloseBtn} onPress={() => setShowVisitsModal(false)}>

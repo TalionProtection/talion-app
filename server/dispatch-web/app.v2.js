@@ -1311,24 +1311,74 @@ function switchVisitsSubtab(subtab) {
   visitsActiveSubtab = subtab;
   document.getElementById('visitsSubtabBtn-visits').classList.toggle('active', subtab === 'visits');
   document.getElementById('visitsSubtabBtn-people').classList.toggle('active', subtab === 'people');
+  document.getElementById('visitsSubtabBtn-global').classList.toggle('active', subtab === 'global');
   document.getElementById('visitsTableWrap').style.display = subtab === 'visits' ? 'block' : 'none';
   document.getElementById('peopleTableWrap').style.display = subtab === 'people' ? 'block' : 'none';
+  document.getElementById('globalSearchWrap').style.display = subtab === 'global' ? 'block' : 'none';
   document.getElementById('visitsRangeFilter').style.display = subtab === 'visits' ? '' : 'none';
+  document.getElementById('visitsCategoryFilter').style.display = subtab === 'global' ? 'none' : '';
   document.getElementById('visitsSearch').placeholder = subtab === 'visits'
     ? '🔍 Nom, société, plaque, résidence, famille...'
-    : '🔍 Nom, société, plaque, résidence, famille (toutes personnes connues)...';
+    : subtab === 'people'
+      ? '🔍 Nom, société, plaque, résidence, famille (toutes personnes connues)...'
+      : '🔍 Nom, téléphone, plaque — cherche dans Blackbook + Personnes connues + Comptes...';
   if (subtab === 'people' && peopleData.length === 0) loadKnownPeopleAll();
   else renderCurrentVisitsSubtab();
 }
 
 function refreshVisitsSubtab() {
   if (visitsActiveSubtab === 'visits') loadVisits();
-  else loadKnownPeopleAll();
+  else if (visitsActiveSubtab === 'people') loadKnownPeopleAll();
+  else renderGlobalSearch();
 }
 
 function renderCurrentVisitsSubtab() {
   if (visitsActiveSubtab === 'visits') renderVisitsTable();
-  else renderPeopleTable();
+  else if (visitsActiveSubtab === 'people') renderPeopleTable();
+  else renderGlobalSearch();
+}
+
+// ─── Global entity search: Blackbook + Personnes connues + Comptes système ──
+const GLOBAL_SEARCH_SOURCE_LABEL = { blackbook: '🕵️ Blackbook', known_person: '👥 Personne connue', system_account: '🏠 Compte système' };
+const GLOBAL_SEARCH_SOURCE_BADGE = { blackbook: 'stat-red', known_person: 'stat-blue', system_account: 'stat-green' };
+let globalSearchTimer = null;
+
+function renderGlobalSearch() {
+  const query = (document.getElementById('visitsSearch')?.value || '').trim();
+  clearTimeout(globalSearchTimer);
+  if (query.length < 2) {
+    document.getElementById('globalSearchTableBody').innerHTML = '';
+    document.getElementById('globalSearchEmptyState').style.display = 'block';
+    document.getElementById('globalSearchEmptyState').querySelector('p').textContent = 'Tapez au moins 2 caractères pour rechercher';
+    document.getElementById('visitsCount').textContent = '';
+    return;
+  }
+  globalSearchTimer = setTimeout(() => loadGlobalSearch(query), 300);
+}
+
+async function loadGlobalSearch(query) {
+  try {
+    const res = await fetch(`${API_BASE}/api/entity-search?q=${encodeURIComponent(query)}`);
+    const results = res.ok ? await res.json() : [];
+    const tbody = document.getElementById('globalSearchTableBody');
+    const emptyState = document.getElementById('globalSearchEmptyState');
+    document.getElementById('visitsCount').textContent = `${results.length} résultat${results.length !== 1 ? 's' : ''}`;
+    if (results.length === 0) {
+      tbody.innerHTML = '';
+      emptyState.querySelector('p').textContent = 'Aucun résultat';
+      emptyState.style.display = 'block';
+      return;
+    }
+    emptyState.style.display = 'none';
+    tbody.innerHTML = results.map(r => `
+      <tr>
+        <td><span class="stat-badge ${GLOBAL_SEARCH_SOURCE_BADGE[r.source] || ''}">${GLOBAL_SEARCH_SOURCE_LABEL[r.source] || r.source}</span></td>
+        <td>${escapeHtml(r.name)}</td>
+        <td>${escapeHtml(r.detail)}</td>
+      </tr>`).join('');
+  } catch (e) {
+    console.error('[GlobalSearch] Error:', e);
+  }
 }
 
 async function loadKnownPeopleAll() {

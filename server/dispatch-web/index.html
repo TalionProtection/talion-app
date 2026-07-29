@@ -684,6 +684,7 @@
           <div class="visits-subtabs">
             <button class="visits-subtab active" id="visitsSubtabBtn-visits" onclick="switchVisitsSubtab('visits')">📅 Visites prévues</button>
             <button class="visits-subtab" id="visitsSubtabBtn-people" onclick="switchVisitsSubtab('people')">👥 Personnes connues</button>
+            <button class="visits-subtab" id="visitsSubtabBtn-global" onclick="switchVisitsSubtab('global')">🔍 Recherche globale</button>
           </div>
           <span class="stat-badge stat-blue" id="visitsCount">0</span>
           <button class="btn btn-sm" onclick="refreshVisitsSubtab()">&#x21BB; Rafraîchir</button>
@@ -752,6 +753,22 @@
           <tbody id="peopleTableBody"></tbody>
         </table>
         <div id="peopleEmptyState" class="empty-state" style="display:none;"><div class="empty-icon">👥</div><p>Aucune personne trouvée</p></div>
+      </div>
+
+      <!-- Global search: cross-references Blackbook + Personnes connues + comptes
+           système by name/téléphone/plaque - "is this person known ANYWHERE" -->
+      <div class="visits-table-wrap" id="globalSearchWrap" style="display:none;">
+        <table class="visits-table">
+          <thead>
+            <tr>
+              <th>Source</th>
+              <th>Nom</th>
+              <th>Détail</th>
+            </tr>
+          </thead>
+          <tbody id="globalSearchTableBody"></tbody>
+        </table>
+        <div id="globalSearchEmptyState" class="empty-state" style="display:none;"><div class="empty-icon">🔍</div><p>Tapez au moins 2 caractères pour rechercher</p></div>
       </div>
     </section>
 
