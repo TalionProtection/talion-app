@@ -82,12 +82,19 @@
       <h1 class="page-title" id="pageTitle">Vue d'ensemble</h1>
       <div class="topbar-actions">
         <span id="wsTopIndicator" class="ws-top-indicator">⚡ Real-time</span>
+        <button id="btnEmergencyOverride" class="btn btn-notif" onclick="toggleEmergencyOverride()" title="Accès d'urgence — contourne temporairement la restriction par famille assignée">🚨 Accès d'urgence</button>
         <button id="btnNotifToggle" class="btn btn-notif" onclick="toggleBrowserNotifications()" title="Toggle browser notifications">🔔 Notifications</button>
         <button id="btnThemeToggle" class="btn btn-theme" onclick="toggleTheme()" title="Toggle dark/light mode">☀️ Light</button>
         <span class="last-updated">Mis à jour : <span id="lastUpdated">--</span></span>
         <button class="btn btn-primary" onclick="refreshData()">&#x21BB; Refresh</button>
       </div>
     </header>
+
+    <!-- Emergency access override banner — visible whenever active, on any tab -->
+    <div id="emergencyOverrideBanner" class="ptt-emergency-banner" style="display:none;">
+      <span>🚨 Accès d'urgence ACTIF — toutes les familles sont visibles, expire à <strong id="emergencyOverrideExpiry"></strong></span>
+      <button class="btn btn-sm" onclick="toggleEmergencyOverride()">Désactiver</button>
+    </div>
 
     <!-- Overview Tab -->
     <section class="tab-content active" id="tab-overview">

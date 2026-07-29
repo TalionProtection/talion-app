@@ -622,6 +622,7 @@ setInterval(() => {
 // ─── Init ────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   setupNavigation();
+  checkEmergencyOverrideStatus();
   // Show audio unlock reminder
   setTimeout(() => {
     if (!browserNotificationsEnabled) {
@@ -684,6 +685,76 @@ function switchTab(tab) {
   }
   if (tab === 'health') {
     loadSystemHealth();
+  }
+}
+
+// ─── Emergency access override (point 4, "think like Palantir") ────────
+// Break-glass: temporarily bypasses the caller's own family-assignment
+// restriction. Never affects incidents/alerts, which are unrestricted for
+// everyone regardless. Every enable/disable is logged server-side.
+let emergencyOverrideTimer = null;
+
+async function checkEmergencyOverrideStatus() {
+  try {
+    const res = await fetch(`${API_BASE}/api/access/emergency-override`);
+    const data = res.ok ? await res.json() : { active: false };
+    updateEmergencyOverrideBanner(data.active, data.expiresAt);
+  } catch (e) {
+    console.error('[EmergencyOverride] Status check error:', e);
+  }
+}
+
+function updateEmergencyOverrideBanner(active, expiresAt) {
+  const banner = document.getElementById('emergencyOverrideBanner');
+  const btn = document.getElementById('btnEmergencyOverride');
+  if (emergencyOverrideTimer) { clearTimeout(emergencyOverrideTimer); emergencyOverrideTimer = null; }
+  if (active) {
+    banner.style.display = 'flex';
+    document.getElementById('emergencyOverrideExpiry').textContent = new Date(expiresAt).toLocaleTimeString('fr-FR');
+    btn.style.background = '#dc2626';
+    btn.style.color = '#fff';
+    const msUntilExpiry = expiresAt - Date.now();
+    if (msUntilExpiry > 0) {
+      emergencyOverrideTimer = setTimeout(() => checkEmergencyOverrideStatus(), msUntilExpiry + 1000);
+    }
+  } else {
+    banner.style.display = 'none';
+    btn.style.background = '';
+    btn.style.color = '';
+  }
+}
+
+async function toggleEmergencyOverride() {
+  const banner = document.getElementById('emergencyOverrideBanner');
+  const isActive = banner.style.display !== 'none';
+  if (isActive) {
+    if (!confirm('Désactiver l\'accès d\'urgence et revenir à la restriction normale ?')) return;
+    try {
+      await fetch(`${API_BASE}/api/access/emergency-override`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enable: false }),
+      });
+      updateEmergencyOverrideBanner(false);
+      showToast('Accès d\'urgence désactivé', 'success');
+    } catch (e) {
+      showToast('Erreur réseau', 'error');
+    }
+  } else {
+    const reason = prompt('Raison de l\'accès d\'urgence (visible dans le journal d\'audit) :');
+    if (reason === null) return; // cancelled
+    if (!confirm('Activer l\'accès d\'urgence ? Vous verrez toutes les familles pendant 2h, action tracée.')) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/access/emergency-override`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enable: true, reason }),
+      });
+      if (!res.ok) throw new Error('failed');
+      const data = await res.json();
+      updateEmergencyOverrideBanner(true, data.expiresAt);
+      showToast('Accès d\'urgence activé', 'warning');
+    } catch (e) {
+      showToast('Erreur lors de l\'activation', 'error');
+    }
   }
 }
 

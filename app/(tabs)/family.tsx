@@ -507,7 +507,7 @@ export default function FamilyScreen() {
   const openPlacePickerForSelf = useCallback(async () => {
     if (!userId) return;
     try {
-      const res = await fetchWithTimeout(`${BASE}/api/users/${userId}/addresses`, { timeout: 10000 });
+      const res = await fetchWithTimeout(`${BASE}/api/users/${userId}/addresses`, { timeout: 10000, headers: await authHeader() });
       const data = await res.json();
       setPlacePickerAddresses(Array.isArray(data) ? data.map((a: any) => ({ label: a.label, address: a.address, isPrimary: a.isPrimary })) : []);
     } catch (e) {
@@ -561,7 +561,7 @@ export default function FamilyScreen() {
     setInterventionsList([]);
     setProvidersLoading(true);
     try {
-      const res = await fetchWithTimeout(`${BASE}/api/users/${member.userId}/addresses`, { timeout: 10000 });
+      const res = await fetchWithTimeout(`${BASE}/api/users/${member.userId}/addresses`, { timeout: 10000, headers: await authHeader() });
       const data = await res.json();
       const addrs = Array.isArray(data) ? data.map((a: any) => ({ id: a.id, label: a.label, address: a.address, isPrimary: a.isPrimary })) : [];
       setProvidersAddresses(addrs);

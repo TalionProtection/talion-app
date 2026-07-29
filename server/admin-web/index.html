@@ -369,7 +369,7 @@
         <div class="form-grid">
           <div class="form-group">
             <label class="form-label">Rôle dans l'app</label>
-            <select class="form-select" id="fieldRole">
+            <select class="form-select" id="fieldRole" onchange="updateAssignedFamiliesVisibility()">
               <option value="user">Utilisateur</option>
               <option value="responder">Intervenant</option>
               <option value="dispatcher">Dispatcher</option>
@@ -421,6 +421,15 @@
             <option value="other">Autre</option>
           </select>
           <button class="btn btn-sm btn-primary" onclick="addRelationship()">Ajouter</button>
+        </div>
+
+        <!-- Family assignment (dispatcher/responder only) -->
+        <div id="assignedFamiliesSection" style="display:none">
+          <div class="form-section"><span class="form-section-icon">&#x1F512;</span> Familles assignées (contrôle d'accès)</div>
+          <p style="font-size:12px;color:var(--text-secondary);margin:0 0 8px;">
+            Aucune sélection = voit toutes les familles (comportement actuel). Cocher restreint ce compte aux familles sélectionnées uniquement (les incidents/alertes restent toujours visibles).
+          </p>
+          <div class="relationships-list" id="assignedFamiliesList"></div>
         </div>
 
         <!-- Same address info -->

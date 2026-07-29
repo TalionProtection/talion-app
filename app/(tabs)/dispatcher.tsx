@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   TextInput,
   Modal,
+  Platform,
 } from 'react-native';
 import { useAuth } from '@/hooks/useAuth';
 import { TalionScreen } from '@/components/talion-banner';
@@ -189,6 +190,12 @@ export default function DispatcherScreen() {
   const [showHealthModal, setShowHealthModal] = useState(false);
   const [healthData, setHealthData] = useState<any>(null);
   const [healthLoading, setHealthLoading] = useState(false);
+
+  // Emergency access override (point 4, access control by family
+  // assignment) — break-glass bypass of the caller's own restriction,
+  // mirrors the console's button+banner. Never affects incidents/alerts.
+  const [emergencyOverrideActive, setEmergencyOverrideActive] = useState(false);
+  const [emergencyOverrideExpiry, setEmergencyOverrideExpiry] = useState<number | null>(null);
 
   // Fetch responders from server
   const fetchResponders = useCallback(async () => {
@@ -474,6 +481,80 @@ export default function DispatcherScreen() {
     return `${m}min`;
   };
 
+  const checkEmergencyOverrideStatus = useCallback(async () => {
+    try {
+      const baseUrl = getApiBaseUrl();
+      const res = await fetchWithTimeout(`${baseUrl}/api/access/emergency-override`, { timeout: 10000, headers: await authHeader() });
+      const data = res.ok ? await res.json() : { active: false };
+      setEmergencyOverrideActive(!!data.active);
+      setEmergencyOverrideExpiry(data.expiresAt || null);
+    } catch (e) {
+      // leave as-is
+    }
+  }, []);
+
+  useEffect(() => {
+    checkEmergencyOverrideStatus();
+  }, [checkEmergencyOverrideStatus]);
+
+  const toggleEmergencyOverride = useCallback(() => {
+    if (emergencyOverrideActive) {
+      Alert.alert('Désactiver', "Désactiver l'accès d'urgence et revenir à la restriction normale ?", [
+        { text: 'Annuler', style: 'cancel' },
+        {
+          text: 'Désactiver', style: 'destructive', onPress: async () => {
+            try {
+              const baseUrl = getApiBaseUrl();
+              await fetchWithTimeout(`${baseUrl}/api/access/emergency-override`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+                body: JSON.stringify({ enable: false }), timeout: 10000,
+              });
+              setEmergencyOverrideActive(false);
+              setEmergencyOverrideExpiry(null);
+            } catch (e) {
+              Alert.alert('Erreur', 'Erreur réseau');
+            }
+          },
+        },
+      ]);
+      return;
+    }
+    const enableOverride = async (reason: string) => {
+      try {
+        const baseUrl = getApiBaseUrl();
+        const res = await fetchWithTimeout(`${baseUrl}/api/access/emergency-override`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+          body: JSON.stringify({ enable: true, reason }), timeout: 10000,
+        });
+        if (!res.ok) throw new Error('failed');
+        const data = await res.json();
+        setEmergencyOverrideActive(true);
+        setEmergencyOverrideExpiry(data.expiresAt || null);
+      } catch (e) {
+        Alert.alert('Erreur', "Impossible d'activer l'accès d'urgence");
+      }
+    };
+    // Alert.prompt (text input) is iOS-only in React Native — Android falls
+    // back to a plain confirm without a reason field rather than silently
+    // doing nothing.
+    if (Platform.OS === 'ios' && Alert.prompt) {
+      Alert.prompt(
+        "Accès d'urgence",
+        "Raison de l'accès d'urgence (visible dans le journal d'audit) :",
+        [
+          { text: 'Annuler', style: 'cancel' },
+          { text: 'Activer', onPress: (reason?: string) => enableOverride(reason || '') },
+        ],
+        'plain-text'
+      );
+    } else {
+      Alert.alert("Accès d'urgence", 'Activer l\'accès d\'urgence ? Vous verrez toutes les familles pendant 2h, action tracée.', [
+        { text: 'Annuler', style: 'cancel' },
+        { text: 'Activer', onPress: () => enableOverride('') },
+      ]);
+    }
+  }, [emergencyOverrideActive]);
+
   const openVisitsModal = useCallback(() => {
     setShowVisitsModal(true);
     setVisitsSearch('');
@@ -611,6 +692,18 @@ export default function DispatcherScreen() {
           </View>
         </View>
 
+        {/* Emergency access override banner — visible whenever active */}
+        {emergencyOverrideActive && (
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#dc2626', borderRadius: 10, padding: 12, marginBottom: 12 }}>
+            <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600', flex: 1 }}>
+              {'\u{1F6A8}'} Accès d'urgence ACTIF — toutes les familles visibles{emergencyOverrideExpiry ? `, expire à ${new Date(emergencyOverrideExpiry).toLocaleTimeString('fr-FR')}` : ''}
+            </Text>
+            <TouchableOpacity onPress={toggleEmergencyOverride}>
+              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 12 }}>Désactiver</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
         {/* Broadcast Button */}
         <TouchableOpacity style={styles.broadcastButton} onPress={() => setShowBroadcastModal(true)}>
           <Text style={styles.broadcastButtonIcon}>{'\u{1F4E2}'}</Text>
@@ -627,6 +720,15 @@ export default function DispatcherScreen() {
         <TouchableOpacity style={[styles.broadcastButton, { backgroundColor: '#0f172a' }]} onPress={openHealthModal}>
           <Text style={styles.broadcastButtonIcon}>{'\u{1FA7A}'}</Text>
           <Text style={styles.broadcastButtonText}>Santé Système</Text>
+        </TouchableOpacity>
+
+        {/* Emergency Access Override Button */}
+        <TouchableOpacity
+          style={[styles.broadcastButton, { backgroundColor: emergencyOverrideActive ? '#dc2626' : '#7f1d1d' }]}
+          onPress={toggleEmergencyOverride}
+        >
+          <Text style={styles.broadcastButtonIcon}>{'\u{1F6A8}'}</Text>
+          <Text style={styles.broadcastButtonText}>{emergencyOverrideActive ? "Accès d'urgence ACTIF" : "Accès d'urgence"}</Text>
         </TouchableOpacity>
 
         {/* Refresh Button */}

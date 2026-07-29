@@ -62,6 +62,8 @@ function typeLbl(t) { return TYPE_LABELS_FR[t] || (t ? t.charAt(0).toUpperCase()
 let editingUserId = null; // null = new user, string = editing
 let currentTags = [];
 let currentRelationships = []; // [{userId, type}]
+let currentAssignedFamilyIds = []; // access control (point 4) - empty = sees everything
+let allFamilyGroupsCache = null; // [{id, memberNames}], fetched once and cached
 let currentPhotoUrl = '';
 let addressDebounceTimer = null;
 
@@ -464,6 +466,7 @@ function openUserDrawer(userId) {
     document.getElementById('passwordIndicator').className = user.hasPassword ? 'password-indicator set' : 'password-indicator not-set';
     currentTags = [...(user.tags || [])];
     currentRelationships = [...(user.relationships || [])];
+    currentAssignedFamilyIds = [...(user.assignedFamilyIds || [])];
     currentPhotoUrl = user.photoUrl || '';
     document.getElementById('deleteZone').style.display = 'block';
     document.getElementById('btnSaveUser').textContent = '💾 Mettre à jour';
@@ -485,6 +488,7 @@ function openUserDrawer(userId) {
     document.getElementById('passwordIndicator').className = 'password-indicator';
     document.getElementById('deleteZone').style.display = 'none';
     document.getElementById('btnSaveUser').textContent = '💾 Enregistrer';
+    currentAssignedFamilyIds = [];
   }
 
   renderTagsInDrawer();
@@ -499,6 +503,7 @@ function openUserDrawer(userId) {
   renderRelationshipsInDrawer();
   updatePhotoPreview();
   populateRelUserSelect();
+  updateAssignedFamiliesVisibility();
   updateSameAddressInfo();
 
   document.getElementById('userDrawer').classList.add('visible');
@@ -598,6 +603,50 @@ function renderRelationshipsInDrawer() {
       </div>
     `;
   }).join('');
+}
+
+// ─── Family assignment (access control, point 4) ────────────────────────
+function updateAssignedFamiliesVisibility() {
+  const role = document.getElementById('fieldRole').value;
+  const section = document.getElementById('assignedFamiliesSection');
+  const relevant = role === 'dispatcher' || role === 'responder';
+  section.style.display = relevant ? 'block' : 'none';
+  if (relevant) loadFamilyGroupsForAssignment();
+}
+
+async function loadFamilyGroupsForAssignment() {
+  if (!allFamilyGroupsCache) {
+    try {
+      const res = await fetch(`${API_BASE}/admin/family-groups`);
+      allFamilyGroupsCache = res.ok ? await res.json() : [];
+    } catch (e) {
+      allFamilyGroupsCache = [];
+    }
+  }
+  renderAssignedFamiliesInDrawer();
+}
+
+function renderAssignedFamiliesInDrawer() {
+  const list = document.getElementById('assignedFamiliesList');
+  const groups = allFamilyGroupsCache || [];
+  if (groups.length === 0) {
+    list.innerHTML = '<p style="color:var(--text-faint);font-size:12px;padding:4px 0">Aucune famille enregistrée</p>';
+    return;
+  }
+  list.innerHTML = groups.map(g => `
+    <label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer;">
+      <input type="checkbox" value="${g.id}" ${currentAssignedFamilyIds.includes(g.id) ? 'checked' : ''} onchange="toggleAssignedFamily('${g.id}', this.checked)">
+      <span>${g.memberNames.join(' & ')}</span>
+    </label>
+  `).join('');
+}
+
+function toggleAssignedFamily(familyId, checked) {
+  if (checked) {
+    if (!currentAssignedFamilyIds.includes(familyId)) currentAssignedFamilyIds.push(familyId);
+  } else {
+    currentAssignedFamilyIds = currentAssignedFamilyIds.filter(id => id !== familyId);
+  }
 }
 
 function populateRelUserSelect() {
@@ -721,6 +770,7 @@ async function saveUser() {
     comments: document.getElementById('fieldComments').value.trim(),
     photoUrl: currentPhotoUrl,
     relationships: currentRelationships,
+    assignedFamilyIds: currentAssignedFamilyIds,
   };
   // Only include password if user typed one
   if (password) payload.password = password;

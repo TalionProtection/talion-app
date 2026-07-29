@@ -401,6 +401,12 @@ interface AdminUser {
   relationships?: { userId: string; type: string }[]; // type: 'parent', 'child', 'spouse', 'sibling', 'cohabitant', 'other'
   passwordHash?: string; // bcrypt-hashed password for email+password auth
   ghostMode?: boolean; // hides this user from dispatch's live location view until revealed for an active incident, or the user turns it off themselves
+  // Only meaningful for role 'dispatcher'/'responder' — the family group ids
+  // (getFamilyGroupId) this staff member is restricted to in "calm" views
+  // (see canAccessFamily). Empty/undefined = sees every family, unchanged
+  // from today's behavior — restriction only activates once an admin
+  // explicitly assigns someone, so there's no disruptive cutover.
+  assignedFamilyIds?: string[];
 }
 
 interface LoginHistoryEntry {
@@ -533,7 +539,7 @@ interface AdminIncident {
 interface AuditEntry {
   id: string;
   timestamp: number;
-  category: 'auth' | 'user' | 'incident' | 'system' | 'broadcast';
+  category: 'auth' | 'user' | 'incident' | 'system' | 'broadcast' | 'access_override';
   action: string;
   performedBy: string;
   targetUser?: string;
@@ -1514,17 +1520,96 @@ function computeFamilyGroups(): string[][] {
   return groups;
 }
 
+// A stable id for a user's family group, derived from its members (the
+// lexicographically-smallest member id) rather than stored separately —
+// no persisted "Family" entity exists in this codebase, this is deliberately
+// reused instead of inventing one (see canAccessFamily below for the access-
+// control feature this also feeds). Unlike getFamilyChannelId, this always
+// returns an id, even for a lone individual with no linked relationships —
+// a "family of one" can still be assigned to a dispatcher for access
+// control, even though it doesn't need its own PTT channel.
+function getFamilyGroupId(userId: string): string {
+  const groups = computeFamilyGroups();
+  const group = groups.find(g => g.includes(userId));
+  if (!group || group.length < 2) return `family-${userId}`;
+  return `family-${[...group].sort()[0]}`;
+}
+
 // ─── PTT channel access (family/staff/group model) ─────────────────────
-// A stable id for a family's PTT channel, derived from the group's members
-// rather than stored separately — the lexicographically-smallest member id
-// is used as the canonical key so the same family always maps to the same
-// channel id across restarts, without needing its own persisted identity.
+// A stable id for a family's PTT channel — same derivation as
+// getFamilyGroupId, but null for a lone individual since a "family" of one
+// doesn't need a channel (unlike access-control assignment, which does still
+// apply to single-person families).
 function getFamilyChannelId(userId: string): string | null {
   const groups = computeFamilyGroups();
   const group = groups.find(g => g.includes(userId));
-  if (!group || group.length < 2) return null; // a "family" of one doesn't need a channel
-  return `family-${[...group].sort()[0]}`;
+  if (!group || group.length < 2) return null;
+  return getFamilyGroupId(userId);
 }
+
+// ─── Access control by family assignment (point 4, "think like Palantir") ──
+// Break-glass emergency override: a dispatcher/responder can temporarily
+// bypass their own family-assignment restriction for a fixed window, always
+// logged. Incidents/alerts are NEVER gated by this — see canAccessFamily,
+// which this only affects for the "calm" views (families/blackbook/visits/
+// known people/live map) it's actually applied to.
+interface EmergencyOverride { enabledAt: number; expiresAt: number; reason?: string; }
+const emergencyOverrides = new Map<string, EmergencyOverride>();
+const EMERGENCY_OVERRIDE_DURATION_MS = 2 * 60 * 60 * 1000; // 2 hours
+
+function hasActiveEmergencyOverride(userId: string): boolean {
+  const entry = emergencyOverrides.get(userId);
+  if (!entry) return false;
+  if (Date.now() > entry.expiresAt) { emergencyOverrides.delete(userId); return false; }
+  return true;
+}
+
+// The single gate used by every Phase-1 "calm view" route: can this caller
+// see data belonging to targetUserId? Admins are never restricted (they're
+// the ones defining assignments); an empty/absent assignedFamilyIds means
+// "sees everything" (the safe default until an admin explicitly restricts
+// someone) - only a caller with a NON-empty assignedFamilyIds is actually
+// scoped down to those specific family groups.
+function canAccessFamily(caller: { id: string; role: string; assignedFamilyIds?: string[] }, targetUserId: string): boolean {
+  if (caller.role === 'admin') return true;
+  if (hasActiveEmergencyOverride(caller.id)) return true;
+  if (!caller.assignedFamilyIds || caller.assignedFamilyIds.length === 0) return true;
+  return caller.assignedFamilyIds.includes(getFamilyGroupId(targetUserId));
+}
+
+// POST /api/access/emergency-override — break-glass: temporarily lifts the
+// caller's own family-assignment restriction (never affects incidents/alerts,
+// which are already unrestricted for everyone). Every enable/disable is
+// logged via addAuditEntry - not each individual read made during the
+// window, which would flood the audit log without adding real accountability
+// value (the standard "break-glass" convention: log the grant, not every use).
+app.post('/api/access/emergency-override', requireAuth, (req, res) => {
+  const caller = req.supabaseUser!;
+  const isStaff = caller.role === 'dispatcher' || caller.role === 'responder' || caller.role === 'admin';
+  if (!isStaff) return res.status(403).json({ error: 'Staff only' });
+  const { enable, reason } = req.body;
+  const callerName = adminUsers.get(caller.id)?.name || caller.id;
+
+  if (enable) {
+    const entry: EmergencyOverride = { enabledAt: Date.now(), expiresAt: Date.now() + EMERGENCY_OVERRIDE_DURATION_MS, reason: reason || undefined };
+    emergencyOverrides.set(caller.id, entry);
+    addAuditEntry('access_override', 'Accès d\'urgence activé', callerName, reason || '(aucune raison fournie)');
+    return res.json({ success: true, expiresAt: entry.expiresAt });
+  } else {
+    emergencyOverrides.delete(caller.id);
+    addAuditEntry('access_override', 'Accès d\'urgence désactivé', callerName, reason || '');
+    return res.json({ success: true });
+  }
+});
+
+// GET /api/access/emergency-override — the caller's own current override
+// status, so console/app can render the persistent banner correctly on load.
+app.get('/api/access/emergency-override', requireAuth, (req, res) => {
+  const caller = req.supabaseUser!;
+  const entry = emergencyOverrides.get(caller.id);
+  const active = !!entry && hasActiveEmergencyOverride(caller.id);
+  res.json({ active, expiresAt: active ? entry!.expiresAt : undefined });
+});
 
 // Auto-provisions the caller's family channel the first time it's needed
 // (e.g. when listing channels) rather than requiring dispatch/admin to set
@@ -3411,6 +3496,17 @@ app.get('/admin/users', (req, res) => {
   res.json(users);
 });
 
+// GET /admin/family-groups — every family unit with its stable assignment id
+// (getFamilyGroupId) and member names, for the "Familles assignées" picker in
+// a dispatcher/responder's user drawer (see canAccessFamily).
+app.get('/admin/family-groups', (req, res) => {
+  const groups = computeFamilyGroups().map(memberIds => ({
+    id: getFamilyGroupId(memberIds[0]),
+    memberNames: memberIds.map(uid => adminUsers.get(uid)?.name || uid),
+  }));
+  res.json(groups);
+});
+
 // Admin change user role
 app.put('/admin/users/:id/role', (req, res) => {
   const user = adminUsers.get(req.params.id);
@@ -3547,7 +3643,7 @@ app.post('/admin/users', async (req, res) => {
 app.put('/admin/users/:id', (req, res) => {
   const user = adminUsers.get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
-  const { firstName, lastName, email, role, tags, address, addressComponents, phoneLandline, phoneMobile, comments, photoUrl, relationships, status, password } = req.body;
+  const { firstName, lastName, email, role, tags, address, addressComponents, phoneLandline, phoneMobile, comments, photoUrl, relationships, status, password, assignedFamilyIds } = req.body;
   // Check email uniqueness if changed
   if (email && email !== user.email) {
     const existing = Array.from(adminUsers.values()).find(u => u.email === email && u.id !== user.id);
@@ -3572,6 +3668,7 @@ app.put('/admin/users/:id', (req, res) => {
   if (phoneMobile !== undefined) { user.phoneMobile = phoneMobile; changes.push('phoneMobile'); }
   if (comments !== undefined) { user.comments = comments; changes.push('comments'); }
   if (photoUrl !== undefined) { user.photoUrl = photoUrl; changes.push('photo'); }
+  if (assignedFamilyIds !== undefined) { user.assignedFamilyIds = assignedFamilyIds; changes.push('assignedFamilyIds'); }
   if (password) { user.passwordHash = bcrypt.hashSync(password, 10); changes.push('password'); }
   if (relationships !== undefined) {
     // Remove old reciprocal relationships
@@ -3714,10 +3811,12 @@ app.get('/dispatch', (req, res) => {
 // Family groups overview: every family unit (connected component over the
 // parent/child/sibling/spouse graph, across ALL admin users — not scoped to
 // one owner), each member's residences and effective presence status.
-function buildFamilyGroupsOverview() {
+function buildFamilyGroupsOverview(caller?: { id: string; role: string; assignedFamilyIds?: string[] }) {
   const groups = computeFamilyGroups();
-  return groups.map((memberIds, i) => ({
-    id: `family-${i}`,
+  return groups
+    .filter(memberIds => !caller || canAccessFamily(caller, memberIds[0]))
+    .map((memberIds) => ({
+    id: getFamilyGroupId(memberIds[0]), // stable across calls, unlike the previous array-index id
     members: memberIds.map(uid => {
       const u = adminUsers.get(uid);
       const presence = computeEffectivePresence(uid, true);
@@ -3740,18 +3839,19 @@ function buildFamilyGroupsOverview() {
 }
 
 app.get('/dispatch/family-groups', (req, res) => {
-  res.json(buildFamilyGroupsOverview());
+  const caller = req.supabaseUser!;
+  res.json(buildFamilyGroupsOverview({ id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds }));
 });
 
 // Same overview, reachable from the mobile app for staff roles (responders
 // included — they sit below 'dispatcher' in the role hierarchy so the
 // /dispatch prefix's requireRole('dispatcher') would otherwise block them).
 app.get('/api/family-groups', requireAuth, (req, res) => {
-  const role = req.supabaseUser!.role;
-  if (role !== 'responder' && role !== 'dispatcher' && role !== 'admin') {
+  const caller = req.supabaseUser!;
+  if (caller.role !== 'responder' && caller.role !== 'dispatcher' && caller.role !== 'admin') {
     return res.status(403).json({ error: 'Not authorized' });
   }
-  res.json(buildFamilyGroupsOverview());
+  res.json(buildFamilyGroupsOverview({ id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds }));
 });
 
 // Dispatch responders list (with location and assignment info)
@@ -4436,10 +4536,13 @@ app.delete('/dispatch/sectors/:id', requireRole('admin'), (req, res) => {
 // Map: all users with locations (for map display)
 app.get('/dispatch/map/users', (req, res) => {
   const now = Date.now();
+  const caller = req.supabaseUser!;
+  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
   // Combine real connected users with demo user locations
   const connectedUsersList = Array.from(users.values())
     .filter(u => u.location && u.role !== 'responder')
     .filter(u => !(adminUsers.get(u.id)?.ghostMode && !isRevealedForActiveIncident(u.id)))
+    .filter(u => canAccessFamily(callerAccess, u.id))
     .map(u => {
       const adminUser = adminUsers.get(u.id);
       const name = adminUser ? `${adminUser.firstName} ${adminUser.lastName}`.trim() : u.id;
@@ -5973,6 +6076,7 @@ async function loadAdminUsersFromSupabase(): Promise<void> {
           comments: u.comments || '', photoUrl: u.photo_url || '',
           relationships: u.relationships || [], passwordHash: u.password_hash || undefined,
           ghostMode: u.ghost_mode || false,
+          assignedFamilyIds: u.assigned_family_ids || [],
         });
       });
       console.log(`[Supabase] Loaded ${data.length} users from admin_users`);
@@ -5991,6 +6095,7 @@ async function saveAdminUserToSupabase(user: AdminUser): Promise<void> {
       comments: user.comments || '', photo_url: user.photoUrl || '',
       relationships: user.relationships || [], password_hash: user.passwordHash || null,
       ghost_mode: user.ghostMode || false,
+      assigned_family_ids: user.assignedFamilyIds || [],
     });
     if (error) console.error('[Supabase] saveAdminUserToSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] saveAdminUserToSupabase error:', e); }
@@ -6869,9 +6974,11 @@ app.get('/api/known-people/all', requireAuth, (req, res) => {
   const caller = req.supabaseUser!;
   const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder';
   if (!isStaff) return res.status(403).json({ error: 'Staff only' });
+  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
   const result: any[] = [];
   for (const [addressId, people] of knownPeople) {
     for (const p of people) {
+      if (!canAccessFamily(callerAccess, p.userId)) continue;
       const owner = adminUsers.get(p.userId);
       const addr = (userAddresses.get(p.userId) || []).find(a => a.id === addressId);
       result.push({
@@ -6898,10 +7005,14 @@ app.get('/api/entity-search', requireAuth, (req, res) => {
   if (!isStaff) return res.status(403).json({ error: 'Staff only' });
   const query = ((req.query.q as string) || '').trim().toLowerCase();
   if (query.length < 2) return res.json([]);
+  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
 
   const results: any[] = [];
 
   for (const entry of blackbookEntries.values()) {
+    // Entries not linked to any specific family are general threats, not
+    // confidential to one client — only gate entries that ARE linked.
+    if (entry.linkedUserId && !canAccessFamily(callerAccess, entry.linkedUserId)) continue;
     const haystacks = [
       `${entry.firstName} ${entry.lastName}`,
       ...entry.aliases,
@@ -6922,6 +7033,7 @@ app.get('/api/entity-search', requireAuth, (req, res) => {
 
   for (const [addressId, people] of knownPeople) {
     for (const p of people) {
+      if (!canAccessFamily(callerAccess, p.userId)) continue;
       const haystack = [p.name, p.company, p.phone, p.vehiclePlate].filter(Boolean).join(' ').toLowerCase();
       if (haystack.includes(query)) {
         const owner = adminUsers.get(p.userId);
@@ -6938,6 +7050,10 @@ app.get('/api/entity-search', requireAuth, (req, res) => {
   }
 
   for (const u of adminUsers.values()) {
+    // Only civilian ('user') accounts are family-confidential data; staff
+    // directory entries (dispatcher/responder/admin) aren't a client's
+    // private information and stay visible to any staff searching.
+    if (u.role === 'user' && !canAccessFamily(callerAccess, u.id)) continue;
     const haystack = [u.name, u.email, u.phoneMobile, u.phoneLandline].filter(Boolean).join(' ').toLowerCase();
     if (haystack.includes(query)) {
       results.push({
@@ -6962,11 +7078,13 @@ app.get('/api/interventions/upcoming', requireAuth, (req, res) => {
   if (!isStaff) return res.status(403).json({ error: 'Staff only' });
   const from = req.query.from ? Number(req.query.from) : Date.now();
   const to = req.query.to ? Number(req.query.to) : from + 7 * 24 * 60 * 60 * 1000;
+  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
   const occurrences: any[] = [];
 
   for (const [addressId, list] of plannedInterventions) {
     for (const iv of list) {
       if (iv.status === 'cancelled') continue;
+      if (!canAccessFamily(callerAccess, iv.userId)) continue;
       const owner = adminUsers.get(iv.userId);
       const addr = (userAddresses.get(iv.userId) || []).find(a => a.id === addressId);
       const person = iv.personId ? (knownPeople.get(addressId) || []).find(p => p.id === iv.personId) : undefined;
@@ -7109,15 +7227,25 @@ function enrichBlackbookEntry(entry: BlackbookEntry) {
 }
 
 app.get('/api/blackbook', requireAuth, (req, res) => {
-  if (!isBlackbookStaff(req.supabaseUser!.role)) return res.status(403).json({ error: 'Staff only' });
-  res.json(Array.from(blackbookEntries.values()).sort((a, b) => b.updatedAt - a.updatedAt).map(enrichBlackbookEntry));
+  const caller = req.supabaseUser!;
+  if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
+  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  // Entries not linked to any specific family are general threats, not
+  // confidential to one client — only gate entries that ARE linked.
+  const entries = Array.from(blackbookEntries.values())
+    .filter(e => !e.linkedUserId || canAccessFamily(callerAccess, e.linkedUserId))
+    .sort((a, b) => b.updatedAt - a.updatedAt).map(enrichBlackbookEntry);
+  res.json(entries);
 });
 
 // GET /api/blackbook/:id
 app.get('/api/blackbook/:id', requireAuth, (req, res) => {
-  if (!isBlackbookStaff(req.supabaseUser!.role)) return res.status(403).json({ error: 'Staff only' });
+  const caller = req.supabaseUser!;
+  if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
   const entry = blackbookEntries.get(req.params.id as string);
   if (!entry) return res.status(404).json({ error: 'Entry not found' });
+  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  if (entry.linkedUserId && !canAccessFamily(callerAccess, entry.linkedUserId)) return res.status(403).json({ error: 'Not authorized for this entry' });
   res.json(enrichBlackbookEntry(entry));
 });
 
@@ -7407,16 +7535,29 @@ app.get('/api/blackbook/:id/pdf', requireAuth, (req, res) => {
 
 // ─── User Addresses REST API ──────────────────────────────────────────────
 
-// GET /api/users/:id/addresses
-app.get('/api/users/:id/addresses', (req, res) => {
-  const addresses = userAddresses.get(req.params.id) || [];
+// GET /api/users/:id/addresses — previously had NO auth check at all, meaning
+// anyone could read any user's registered addresses. Allowed for: the user
+// themselves, a family member (getFamilyMemberIds), or staff who can access
+// this family (canAccessFamily).
+app.get('/api/users/:id/addresses', requireAuth, (req, res) => {
+  const caller = req.supabaseUser!;
+  const targetId = req.params.id as string;
+  const isSelf = caller.id === targetId;
+  const isFamilyMember = getFamilyMemberIds(targetId).includes(caller.id);
+  const isStaff = caller.role === 'dispatcher' || caller.role === 'responder' || caller.role === 'admin';
+  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  if (!isSelf && !isFamilyMember && !(isStaff && canAccessFamily(callerAccess, targetId))) {
+    return res.status(403).json({ error: 'Not authorized' });
+  }
+  const addresses = userAddresses.get(targetId) || [];
   res.json(addresses);
 });
 
-function computeAllResidences(): { id: string; userId: string; latitude: number; longitude: number; label: string; address: string; userName: string }[] {
+function computeAllResidences(caller?: { id: string; role: string; assignedFamilyIds?: string[] }): { id: string; userId: string; latitude: number; longitude: number; label: string; address: string; userName: string }[] {
   const now = Date.now();
   const result: { id: string; userId: string; latitude: number; longitude: number; label: string; address: string; userName: string }[] = [];
   for (const [userId, addresses] of userAddresses) {
+    if (caller && !canAccessFamily(caller, userId)) continue;
     const userName = adminUsers.get(userId)?.name || userId;
     for (const a of addresses) {
       if (a.latitude == null || a.longitude == null) continue;
@@ -7431,8 +7572,9 @@ function computeAllResidences(): { id: string; userId: string; latitude: number;
 // by responders too (the /dispatch prefix requires dispatcher+, which blocks them) —
 // needed for the Blackbook sighting residence picker on mobile.
 app.get('/api/all-residences', requireAuth, (req, res) => {
-  if (!isBlackbookStaff(req.supabaseUser!.role)) return res.status(403).json({ error: 'Staff only' });
-  res.json(computeAllResidences());
+  const caller = req.supabaseUser!;
+  if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
+  res.json(computeAllResidences({ id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds }));
 });
 
 // GET /dispatch/all-residences — every geocoded address across every user
@@ -7440,7 +7582,8 @@ app.get('/api/all-residences', requireAuth, (req, res) => {
 // to fit the view to wherever people's registered places actually are,
 // instead of a hardcoded city.
 app.get('/dispatch/all-residences', (req, res) => {
-  res.json(computeAllResidences());
+  const caller = req.supabaseUser!;
+  res.json(computeAllResidences({ id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds }));
 });
 
 // POST /api/users/:id/addresses
