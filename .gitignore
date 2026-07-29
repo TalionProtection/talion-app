@@ -42,6 +42,10 @@ app-example
 /ios
 /android
 
+# server build output (esbuild bundle) - Render rebuilds this fresh from
+# source on every deploy, it's never actually read from what's committed
+/dist
+
 # Persisted runtime data (regenerated from seed on startup)
 data/
 *.ipa
