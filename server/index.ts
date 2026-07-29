@@ -5798,16 +5798,12 @@ function handlePTTEmergency(ws: any, userId: string, userRole: string, data: any
   const allUserIds = Array.from(users.keys());
   allUserIds.forEach(uid => {
     if (uid === userId) return;
-    const tokens = pushTokens.get(uid);
-    if (tokens) {
-      tokens.forEach(token => {
-        sendPushNotification(token, {
-          title: '🚨 ALERTE URGENCE PTT',
-          body: `Message d'urgence de ${senderName} (${userRole})`,
-          data: { type: 'pttEmergency', messageId: emergencyMsg.id },
-        });
-      });
-    }
+    sendPushToUser(
+      uid,
+      '🚨 ALERTE URGENCE PTT',
+      `Message d'urgence de ${senderName} (${userRole})`,
+      { type: 'pttEmergency', messageId: emergencyMsg.id }
+    ).catch(() => {});
   });
 
   ws.send(JSON.stringify({ type: 'pttEmergencyAck', messageId: emergencyMsg.id }));
