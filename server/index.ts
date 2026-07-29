@@ -7618,8 +7618,14 @@ function computeAllResidences(caller?: { id: string; role: string; assignedFamil
   const now = Date.now();
   const result: { id: string; userId: string; latitude: number; longitude: number; label: string; address: string; userName: string }[] = [];
   for (const [userId, addresses] of userAddresses) {
+    // Skip residences left behind by a deleted account (orphaned userId no
+    // longer in adminUsers) - surfacing the raw id as a fake "name" is
+    // confusing (found via the same-address bug for Eytan Boon), and a
+    // deleted account's old address isn't useful data anyway.
+    const owner = adminUsers.get(userId);
+    if (!owner) continue;
     if (caller && !canAccessFamily(caller, userId)) continue;
-    const userName = adminUsers.get(userId)?.name || userId;
+    const userName = owner.name;
     for (const a of addresses) {
       if (a.latitude == null || a.longitude == null) continue;
       if (a.temporary && a.expiresAt && a.expiresAt <= now) continue;
