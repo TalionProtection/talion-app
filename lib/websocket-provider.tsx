@@ -165,6 +165,22 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
       });
     });
 
+    // Proactive Blackbook correlation alert (point 3 of the "think like
+    // Palantir" review) - this entry/vehicle was just sighted at 2+ distinct
+    // residences within 90 days, per checkBlackbookCrossResidencePattern on
+    // the server. Dispatcher/admin only, mirrors the console's toast.
+    const unsubBlackbookPattern = wsManager.on('blackbookPatternDetected' as any, (msg: any) => {
+      if (!isStaffRole) return;
+      const data = msg.data || msg;
+      import('@/services/notification-service').then(({ notificationService }) => {
+        notificationService.sendStatusUpdate(
+          data.title || 'Pattern Blackbook détecté',
+          data.body || '',
+          { type: 'blackbook_pattern', entryId: data.entryId }
+        );
+      });
+    });
+
     // Poll connection status
     statusPollRef.current = setInterval(() => {
       const connected = wsManager.isConnected();
@@ -186,7 +202,8 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
       unsubStatusUpdate();
       unsubAlertsSnapshot();
       unsubPresenceUpdated();
-      
+      unsubBlackbookPattern();
+
       if (statusPollRef.current) {
         clearInterval(statusPollRef.current);
       }

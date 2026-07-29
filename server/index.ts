@@ -7209,12 +7209,78 @@ app.post('/api/blackbook/:id/sightings', requireAuth, async (req, res) => {
     notes: notes || undefined,
     reportedBy: caller.id, reportedByName: callerUser?.name || caller.id,
   };
+  // Distinct residences this entry has been sighted at, BEFORE this new
+  // sighting, so the correlation check below only fires when this specific
+  // sighting is what crosses/extends the multi-residence threshold - not on
+  // every single sighting logged once an entry is already flagged.
+  const priorDistinctResidences = new Set(
+    entry.sightings.filter(s => s.residenceOwnerId).map(s => s.residenceOwnerId)
+  );
+
   entry.sightings.push(sighting);
   entry.updatedAt = Date.now();
   blackbookEntries.set(entry.id, entry);
   saveBlackbookEntryToSupabase(entry).catch(() => {});
+  checkBlackbookCrossResidencePattern(entry, priorDistinctResidences);
   res.status(201).json(sighting);
 });
+
+// Proactive signal, not just a passive record: if this entry (a
+// person/vehicle flagged in the Blackbook) has now been sighted at more than
+// one DIFFERENT family's residence within a rolling window, that's a
+// "casing multiple properties" pattern worth surfacing to dispatch right
+// away rather than waiting for someone to notice it buried in the entry's
+// own sighting history. Point 3 of the "think like Palantir" review -
+// reactive-to-proactive, built on the residence linking already on
+// BlackbookSighting.
+const BLACKBOOK_CORRELATION_WINDOW_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
+function checkBlackbookCrossResidencePattern(entry: BlackbookEntry, priorDistinctResidences: Set<string | undefined>) {
+  const now = Date.now();
+  const distinctResidences = new Map<string, { ownerName: string; label: string }>();
+  for (const s of entry.sightings) {
+    if (!s.residenceOwnerId || (now - s.timestamp) > BLACKBOOK_CORRELATION_WINDOW_MS) continue;
+    if (!distinctResidences.has(s.residenceOwnerId)) {
+      distinctResidences.set(s.residenceOwnerId, { ownerName: s.residenceOwnerName || '', label: s.residenceLabel || '' });
+    }
+  }
+  if (distinctResidences.size < 2 || distinctResidences.size <= priorDistinctResidences.size) return;
+
+  const name = `${entry.firstName} ${entry.lastName}`;
+  const residenceList = Array.from(distinctResidences.values()).map(r => `${r.ownerName} (${r.label})`).join(', ');
+  const title = `⚠️ Pattern Blackbook détecté : ${name}`;
+  const body = `Signalé(e) à ${distinctResidences.size} résidences différentes en 90 jours : ${residenceList}`;
+
+  addAuditEntry('system', 'Blackbook - pattern multi-résidences', name, body);
+  const payload = {
+    type: 'blackbookPatternDetected',
+    data: { entryId: entry.id, name, riskLevel: entry.riskLevel, residenceCount: distinctResidences.size, residences: Array.from(distinctResidences.values()), title, body },
+  };
+  broadcastToRole('dispatcher', payload);
+  broadcastToRole('admin', payload);
+  notifyStaffBlackbookPatternPush(title, body).catch(() => {});
+  console.log(`[Blackbook] Cross-residence pattern detected for ${name}: ${distinctResidences.size} residences`);
+}
+
+async function notifyStaffBlackbookPatternPush(title: string, body: string) {
+  const targetTokens: string[] = [];
+  for (const [token, entry] of pushTokens) {
+    if (entry.userRole === 'dispatcher' || entry.userRole === 'admin') targetTokens.push(token);
+  }
+  if (targetTokens.length === 0) return;
+  const messages = targetTokens.map((token) => ({
+    to: token, sound: 'default', title, body,
+    data: { type: 'blackbook_pattern' },
+    priority: 'high' as const, channelId: 'family-alerts',
+  }));
+  try {
+    const response = await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: { 'Accept': 'application/json', 'Accept-Encoding': 'gzip, deflate', 'Content-Type': 'application/json' },
+      body: JSON.stringify(messages),
+    });
+    if (!response.ok) console.error(`[Push] Expo API error for blackbook pattern: ${response.status}`);
+  } catch (err) { console.error('[Push] Failed to send blackbook pattern push:', err); }
+}
 
 // DELETE /api/blackbook/:id/sightings/:sightingId
 app.delete('/api/blackbook/:id/sightings/:sightingId', requireAuth, async (req, res) => {

@@ -562,6 +562,14 @@ function handleWsMessage(msg) {
       break;
     }
 
+    case 'blackbookPatternDetected': {
+      // Proactive correlation alert - this Blackbook entry has now been
+      // sighted at 2+ distinct residences within 90 days.
+      const bData = msg.data || msg;
+      showToast(bData.title || 'Pattern Blackbook détecté', 'warning');
+      break;
+    }
+
     case 'pttTransmitAck':
     case 'pttEmergencyAck':
       // Acknowledgements from server — no action needed
