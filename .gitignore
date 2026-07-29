@@ -49,3 +49,6 @@ app-example
 # Persisted runtime data (regenerated from seed on startup)
 data/
 *.ipa
+
+# Supabase CLI local link cache (machine-specific, no project config to share)
+supabase/.temp/

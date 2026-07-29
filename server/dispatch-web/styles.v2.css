@@ -159,6 +159,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 /* Escalation states — reuse existing blink-border / pulse-marker keyframes, no new animations */
 .incident-card.escalated-soft, .ov-inc-card.escalated-soft { border-left-color: #f59e0b; animation: blink-border 1.2s infinite; }
 .incident-card.escalated-hard, .ov-inc-card.escalated-hard { border-left-color: #ef4444; animation: pulse-marker 1.6s infinite; }
+/* Duress code — the single most critical signal in the system: a "cancelled"
+   SOS that's actually a real, silent distress call. Must never blend in with
+   ordinary severity/escalation styling. */
+.incident-card.is-duress { border-left-color: #b91c1c; border-left-width: 8px; animation: pulse-marker 1s infinite; }
+tr.is-duress { background: rgba(185,28,28,0.12) !important; font-weight: 700; }
+.duress-banner {
+  background: #7f1d1d; color: #fff; font-weight: 800; font-size: 13px;
+  padding: 8px 12px; border-radius: 8px; margin-bottom: 10px;
+  display: flex; align-items: center; gap: 8px; letter-spacing: 0.3px;
+}
 .inc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
 .inc-header-left { display: flex; align-items: center; gap: 10px; }
 .inc-type-icon { font-size: 28px; }

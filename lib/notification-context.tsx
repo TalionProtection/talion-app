@@ -71,6 +71,8 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
         console.log('Notification tapped:', data);
         if (data?.type === 'reveal_request' && data?.alertId) {
           router.push({ pathname: '/reveal-confirm', params: { alertId: String(data.alertId) } });
+        } else if (data?.type === 'checkin_reminder' && data?.checkInId) {
+          router.push({ pathname: '/checkin-confirm', params: { checkInId: String(data.checkInId) } });
         }
       });
     };

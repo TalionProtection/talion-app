@@ -37,6 +37,29 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
   const alertIdRef = useRef<string | null>(null);
   const liveTrackingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Duress code — opt-in alternate deactivation PIN (see server/index.ts
+  // POST /api/sos/duress-check for the full rationale). Fetched once so the
+  // "Désactiver" tap knows whether to prompt for a PIN at all; defaults to
+  // false (today's zero-friction instant deactivation) until/unless loaded.
+  const [duressEnabled, setDuressEnabled] = useState(false);
+  const [showDuressPad, setShowDuressPad] = useState(false);
+  const [duressPin, setDuressPin] = useState('');
+  const [duressError, setDuressError] = useState(false);
+  const [duressChecking, setDuressChecking] = useState(false);
+
+  useEffect(() => {
+    if (!userId) return;
+    (async () => {
+      try {
+        const res = await fetch(`${getApiBaseUrl()}/api/users/${userId}/duress-settings`, { headers: await authHeader() });
+        if (res.ok) {
+          const data = await res.json();
+          setDuressEnabled(Boolean(data.enabled));
+        }
+      } catch {}
+    })();
+  }, [userId]);
+
   useEffect(() => {
     if (isActive) {
       Animated.loop(
@@ -69,14 +92,62 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
     return () => clearTimeout(timer);
   }, [showCountdown, countdown]);
 
+  const completeDeactivation = () => {
+    setIsActive(false);
+    onDeactivate?.();
+    Alert.alert('SOS Désactivé', 'Le partage de position a été arrêté.');
+  };
+
   const handlePress = () => {
     if (isActive) {
-      setIsActive(false);
-      onDeactivate?.();
-      Alert.alert('SOS Désactivé', 'Le partage de position a été arrêté.');
+      if (duressEnabled) {
+        setDuressPin('');
+        setDuressError(false);
+        setShowDuressPad(true);
+      } else {
+        completeDeactivation();
+      }
     } else {
       setShowConfirmation(true);
     }
+  };
+
+  const handleDuressDigit = (digit: string) => {
+    if (duressChecking) return;
+    setDuressError(false);
+    setDuressPin(p => (p.length < 6 ? p + digit : p));
+  };
+
+  const handleDuressBackspace = () => {
+    if (duressChecking) return;
+    setDuressError(false);
+    setDuressPin(p => p.slice(0, -1));
+  };
+
+  const handleDuressConfirm = async () => {
+    if (duressPin.length < 4 || duressChecking) return;
+    setDuressChecking(true);
+    try {
+      const res = await fetch(`${getApiBaseUrl()}/api/sos/duress-check`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({ pin: duressPin, alertId: alertIdRef.current }),
+      });
+      // Any valid code (normal or duress) shows the exact same outcome on
+      // screen — only the server-side branch differs, silently.
+      if (res.ok) {
+        setShowDuressPad(false);
+        setDuressPin('');
+        completeDeactivation();
+      } else {
+        setDuressError(true);
+        setDuressPin('');
+      }
+    } catch {
+      setDuressError(true);
+      setDuressPin('');
+    }
+    setDuressChecking(false);
   };
 
   const sendSOSViaREST = async (alertData: {
@@ -301,6 +372,42 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
           </View>
         </View>
       </Modal>
+
+      {/* Deactivation PIN pad — deliberately neutral wording; nothing here
+          hints that a second, silent code exists. */}
+      <Modal visible={showDuressPad} transparent animationType="fade" onRequestClose={() => setShowDuressPad(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Désactiver le SOS</Text>
+            <Text style={styles.modalText}>Entrez votre code pour confirmer.</Text>
+            <View style={styles.pinDotsRow}>
+              {[0, 1, 2, 3, 4, 5].map(i => (
+                <View key={i} style={[styles.pinDot, i < duressPin.length && styles.pinDotFilled]} />
+              ))}
+            </View>
+            {duressError && <Text style={styles.pinErrorText}>Code incorrect</Text>}
+            <View style={styles.pinPadGrid}>
+              {['1', '2', '3', '4', '5', '6', '7', '8', '9', '⌫', '0', 'OK'].map(key => (
+                <TouchableOpacity
+                  key={key}
+                  style={styles.pinPadKey}
+                  disabled={duressChecking}
+                  onPress={() => {
+                    if (key === '⌫') handleDuressBackspace();
+                    else if (key === 'OK') handleDuressConfirm();
+                    else handleDuressDigit(key);
+                  }}
+                >
+                  <Text style={styles.pinPadKeyText}>{key}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <TouchableOpacity style={styles.cancelButton} onPress={() => setShowDuressPad(false)} disabled={duressChecking}>
+              <Text style={styles.cancelButtonText}>Annuler</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </>
   );
 }
@@ -440,5 +547,46 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontWeight: '700',
     fontSize: 15,
+  },
+  pinDotsRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 10,
+    marginBottom: 8,
+  },
+  pinDot: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    borderWidth: 1.5,
+    borderColor: '#d1d5db',
+  },
+  pinDotFilled: {
+    backgroundColor: '#1e3a5f',
+    borderColor: '#1e3a5f',
+  },
+  pinErrorText: {
+    color: '#ef4444',
+    fontSize: 13,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: 8,
+  },
+  pinPadGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginTop: 20,
+    marginBottom: 8,
+  },
+  pinPadKey: {
+    width: '33.33%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+  },
+  pinPadKeyText: {
+    fontSize: 22,
+    fontWeight: '600',
+    color: '#1f2937',
   },
 });

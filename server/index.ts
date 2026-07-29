@@ -103,6 +103,7 @@ const ALERTS_FILE = path.join(dataDir, 'alerts.json');
 const LOCATION_HISTORY_FILE = path.join(dataDir, 'location-history.json');
 const FAMILY_PERIMETERS_FILE = path.join(dataDir, 'family-perimeters.json');
 const CURFEW_CHECKS_FILE = path.join(dataDir, 'curfew-checks.json');
+const SCHEDULED_CHECKINS_FILE = path.join(dataDir, 'scheduled-checkins.json');
 const PROXIMITY_ALERTS_FILE = path.join(dataDir, 'proximity-alerts.json');
 const PATROL_REPORTS_FILE = path.join(dataDir, 'patrol-reports.json');
 const PTT_CHANNELS_FILE = path.join(dataDir, 'ptt-channels.json');
@@ -401,6 +402,16 @@ interface AdminUser {
   relationships?: { userId: string; type: string }[]; // type: 'parent', 'child', 'spouse', 'sibling', 'cohabitant', 'other'
   passwordHash?: string; // bcrypt-hashed password for email+password auth
   ghostMode?: boolean; // hides this user from dispatch's live location view until revealed for an active incident, or the user turns it off themselves
+  // Duress code: an opt-in alternate SOS-deactivation PIN. Entering the normal
+  // PIN cancels SOS exactly as before; entering the duress PIN shows the
+  // identical "SOS Désactivé" confirmation but silently raises a real alert to
+  // dispatch instead — for a scenario where someone is forced to "cancel" the
+  // alarm under coercion. Both PINs are bcrypt-hashed, never stored/sent in
+  // plaintext once set. Disabled (undefined/false) by default: zero added
+  // friction for anyone who hasn't opted in.
+  duressCodeEnabled?: boolean;
+  normalPinHash?: string;
+  duressPinHash?: string;
   // Only meaningful for role 'dispatcher'/'responder' — the family group ids
   // (getFamilyGroupId) this staff member is restricted to in "calm" views
   // (see canAccessFamily). Empty/undefined = sees every family, unchanged
@@ -513,6 +524,10 @@ interface Alert {
   // recomputed on subsequent transitions to the same status.
   acknowledgedAt?: number;
   resolvedAt?: number;
+  // Set only by the duress-code path (POST /api/sos/duress-check) — never
+  // shown to the reporting user's own device, only surfaced to dispatch as a
+  // distinct, high-priority banner (a "cancelled" SOS that's actually real).
+  isDuress?: boolean;
 }
 
 interface AdminIncident {
@@ -656,6 +671,27 @@ interface CurfewCheck {
   lastResult?: 'inside' | 'outside';
 }
 
+// ─── Scheduled Check-in types ──────────────────────────────────────────
+// A "confirm you're safe by this time" dead-man's switch — unlike CurfewCheck
+// (passive: is the target inside/outside a geofence at time X), this requires
+// an affirmative tap from the target; if it doesn't arrive, a reminder push
+// fires, then a grace period, then dispatch is alerted. Same setTimeout +
+// rehydration-on-boot mechanism as CurfewCheck (see scheduleCurfewCheck).
+interface ScheduledCheckIn {
+  id: string;
+  ownerId: string; // who created it (self or a parent)
+  targetUserId: string;
+  targetUserName: string;
+  dueAt: number; // epoch ms — when confirmation is due
+  graceMinutes: number; // delay after the reminder before escalating to dispatch
+  status: 'pending' | 'awaiting_confirmation' | 'confirmed' | 'escalated' | 'cancelled';
+  nextFireAt: number; // epoch ms of the next setTimeout, whatever the stage
+  stage: 'due' | 'escalation'; // which handler nextFireAt should invoke
+  createdAt: number;
+  confirmedAt?: number;
+  escalatedAt?: number;
+}
+
 // ─── Patrol Report types ──────────────────────────────────────────────
 type PatrolStatus = 'habituel' | 'inhabituel' | 'identification' | 'suspect' | 'menace' | 'attaque';
 type TaskResult = 'ok' | 'pas_ok';
@@ -787,6 +823,10 @@ const perimeterState = new Map<string, boolean>(); // true = outside
 const curfewChecks = new Map<string, CurfewCheck>();
 const curfewTimers = new Map<string, ReturnType<typeof setTimeout>>(); // key: check.id
 
+// Scheduled check-in storage (persisted) + their scheduled timers (in-memory only)
+const scheduledCheckIns = new Map<string, ScheduledCheckIn>();
+const checkInTimers = new Map<string, ReturnType<typeof setTimeout>>(); // key: checkIn.id
+
 // Patrol reports storage
 const patrolReports: PatrolReport[] = [];
 
@@ -864,6 +904,12 @@ const responderZoneState = new Map<string, Set<string>>();
     console.log(`[Persist] Loaded ${savedCurfewChecks.length} curfew checks from disk`);
   }
 
+  const savedCheckIns = loadJsonFile<ScheduledCheckIn[]>(SCHEDULED_CHECKINS_FILE, []);
+  savedCheckIns.forEach(c => scheduledCheckIns.set(c.id, c));
+  if (savedCheckIns.length > 0) {
+    console.log(`[Persist] Loaded ${savedCheckIns.length} scheduled check-ins from disk`);
+  }
+
   // Load persisted location history
   const savedHistory = loadJsonFile<Record<string, LocationHistoryEntry[]>>(LOCATION_HISTORY_FILE, {});
   for (const [uid, entries] of Object.entries(savedHistory)) {
@@ -897,6 +943,11 @@ function persistPerimeters() {
 // Helper: persist curfew checks to disk (debounced)
 function persistCurfewChecks() {
   debouncedSave(CURFEW_CHECKS_FILE, Array.from(curfewChecks.values()));
+}
+
+// Helper: persist scheduled check-ins to disk (debounced)
+function persistCheckIns() {
+  debouncedSave(SCHEDULED_CHECKINS_FILE, Array.from(scheduledCheckIns.values()));
 }
 
 // Helper: persist sectors to disk (debounced)
@@ -1881,6 +1932,79 @@ async function fireCurfewCheck(id: string) {
   }
   curfewChecks.set(check.id, check);
   persistCurfewChecks();
+}
+
+// ─── Scheduled Check-ins ────────────────────────────────────────────────
+// "Confirm you're safe by X" dead-man's switch. Same setTimeout + rehydration
+// mechanism as CurfewCheck above, but with an active-confirmation semantics:
+// due time → reminder push + grace timer → still unconfirmed → dispatch alert.
+
+function clearCheckInTimer(id: string) {
+  const t = checkInTimers.get(id);
+  if (t) { clearTimeout(t); checkInTimers.delete(id); }
+}
+
+function scheduleCheckIn(checkIn: ScheduledCheckIn) {
+  clearCheckInTimer(checkIn.id);
+  if (checkIn.status !== 'pending' && checkIn.status !== 'awaiting_confirmation') return;
+  const delay = Math.max(0, checkIn.nextFireAt - Date.now());
+  const handler = checkIn.stage === 'due' ? fireCheckInDue : fireCheckInEscalation;
+  checkInTimers.set(checkIn.id, setTimeout(() => handler(checkIn.id), delay));
+}
+
+async function fireCheckInDue(id: string) {
+  const checkIn = scheduledCheckIns.get(id);
+  if (!checkIn || checkIn.status !== 'pending') return;
+
+  sendPushToUser(
+    checkIn.targetUserId,
+    '⏰ Confirmation de sécurité',
+    `Confirme que tu vas bien — prévu(e) avant ${new Date(checkIn.dueAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}.`,
+    { type: 'checkin_reminder', checkInId: checkIn.id }
+  ).catch(() => {});
+
+  checkIn.status = 'awaiting_confirmation';
+  checkIn.stage = 'escalation';
+  checkIn.nextFireAt = Date.now() + checkIn.graceMinutes * 60 * 1000;
+  scheduledCheckIns.set(checkIn.id, checkIn);
+  persistCheckIns();
+  scheduleCheckIn(checkIn);
+}
+
+async function fireCheckInEscalation(id: string) {
+  const checkIn = scheduledCheckIns.get(id);
+  if (!checkIn || checkIn.status !== 'awaiting_confirmation') return;
+
+  checkIn.status = 'escalated';
+  checkIn.escalatedAt = Date.now();
+  scheduledCheckIns.set(checkIn.id, checkIn);
+  persistCheckIns();
+
+  const target = users.get(checkIn.targetUserId);
+  const location = target?.location
+    ? { latitude: target.location.latitude, longitude: target.location.longitude, address: 'Dernière position connue' }
+    : { latitude: 0, longitude: 0, address: 'Position inconnue' };
+
+  const alert: Alert = {
+    id: await generateIncidentId('other', checkIn.targetUserName, location),
+    type: 'other',
+    severity: 'high',
+    location,
+    description: `Check-in manqué — ${checkIn.targetUserName} n'a pas confirmé être en sécurité.`,
+    createdBy: 'system',
+    reporterId: checkIn.targetUserId,
+    origin: 'mobile',
+    createdAt: Date.now(),
+    status: 'active',
+    respondingUsers: [],
+    photos: [],
+  };
+  alerts.set(alert.id, alert);
+  linkPossibleDuplicates(alert);
+  persistAlerts();
+  addAuditEntry('incident', 'Check-in manqué', checkIn.ownerId, `Check-in ${checkIn.id}: ${checkIn.targetUserName}`);
+  broadcastMessage({ type: 'newAlert', data: alert });
+  sendPushToDispatchersAndResponders(alert, checkIn.targetUserName).catch(() => {});
 }
 
 // Location update handler
@@ -3346,6 +3470,69 @@ app.delete('/api/family/curfew-checks/:id', (req, res) => {
   res.json({ success: existed });
 });
 
+// GET /api/family/checkins?userId= - list scheduled check-ins owned by a user
+app.get('/api/family/checkins', requireAuth, (req, res) => {
+  const userId = req.query.userId as string;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  const userCheckIns = Array.from(scheduledCheckIns.values())
+    .filter(c => c.ownerId === userId)
+    .sort((a, b) => b.createdAt - a.createdAt);
+  res.json(userCheckIns);
+});
+
+// POST /api/family/checkins - create a scheduled check-in (dead-man's switch)
+app.post('/api/family/checkins', requireAuth, (req, res) => {
+  const { ownerId, targetUserId, dueAt, graceMinutes } = req.body;
+  if (!ownerId || !targetUserId || !dueAt) {
+    return res.status(400).json({ error: 'ownerId, targetUserId, and dueAt required' });
+  }
+  const familyIds = getFamilyMemberIds(ownerId);
+  if (!familyIds.includes(targetUserId)) {
+    return res.status(403).json({ error: 'Target user is not a family member' });
+  }
+  const targetAdmin = adminUsers.get(targetUserId);
+  const checkIn: ScheduledCheckIn = {
+    id: uuidv4(),
+    ownerId,
+    targetUserId,
+    targetUserName: targetAdmin?.name || targetUserId,
+    dueAt: Number(dueAt),
+    graceMinutes: graceMinutes != null ? Number(graceMinutes) : 30,
+    status: 'pending',
+    nextFireAt: Number(dueAt),
+    stage: 'due',
+    createdAt: Date.now(),
+  };
+  scheduledCheckIns.set(checkIn.id, checkIn);
+  persistCheckIns();
+  scheduleCheckIn(checkIn);
+  console.log(`[CheckIn] Created ${checkIn.id} for ${checkIn.targetUserName} by ${ownerId}, due ${new Date(checkIn.dueAt).toISOString()}`);
+  res.json(checkIn);
+});
+
+// POST /api/family/checkins/:id/confirm - the target user confirms they're safe
+app.post('/api/family/checkins/:id/confirm', requireAuth, (req, res) => {
+  const checkIn = scheduledCheckIns.get(req.params.id as string);
+  if (!checkIn) return res.status(404).json({ error: 'Check-in not found' });
+  const caller = req.supabaseUser!;
+  if (caller.id !== checkIn.targetUserId) return res.status(403).json({ error: 'Not authorized' });
+  if (checkIn.status === 'confirmed' || checkIn.status === 'cancelled') return res.json(checkIn);
+  clearCheckInTimer(checkIn.id);
+  checkIn.status = 'confirmed';
+  checkIn.confirmedAt = Date.now();
+  scheduledCheckIns.set(checkIn.id, checkIn);
+  persistCheckIns();
+  res.json(checkIn);
+});
+
+// DELETE /api/family/checkins/:id - cancel a scheduled check-in
+app.delete('/api/family/checkins/:id', requireAuth, (req, res) => {
+  clearCheckInTimer(req.params.id as string);
+  const existed = scheduledCheckIns.delete(req.params.id as string);
+  if (existed) persistCheckIns();
+  res.json({ success: existed });
+});
+
 // GET /api/family/proximity-alerts - get proximity alerts for a user (owner)
 app.get('/api/family/proximity-alerts', (req, res) => {
   const userId = req.query.userId as string;
@@ -4695,6 +4882,132 @@ app.put('/api/users/:id/ghost-mode', requireAuth, (req, res) => {
   res.json({ success: true, ghostMode: user.ghostMode });
 });
 
+// GET /api/users/:id/duress-settings — self only, never exposes the hashes,
+// only whether the feature is turned on (the app uses this to decide whether
+// to prompt for a PIN on SOS deactivation at all).
+app.get('/api/users/:id/duress-settings', requireAuth, (req, res) => {
+  const targetId = req.params.id as string;
+  const caller = req.supabaseUser!;
+  if (caller.id !== targetId) return res.status(403).json({ error: 'Not authorized' });
+  const user = adminUsers.get(targetId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  res.json({ enabled: Boolean(user.duressCodeEnabled) });
+});
+
+// PUT /api/users/:id/duress-settings — self only. Set/replace both PINs together
+// (never independently — a stale duress PIN left over from a previous normal
+// PIN would be a real safety bug) or disable the feature entirely.
+app.put('/api/users/:id/duress-settings', requireAuth, (req, res) => {
+  const targetId = req.params.id as string;
+  const caller = req.supabaseUser!;
+  if (caller.id !== targetId) return res.status(403).json({ error: 'Not authorized' });
+  const user = adminUsers.get(targetId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  const { enabled } = req.body;
+  if (enabled === false) {
+    user.duressCodeEnabled = false;
+    user.normalPinHash = undefined;
+    user.duressPinHash = undefined;
+    adminUsers.set(user.id, user);
+    saveAdminUserToSupabase(user).catch(e => console.error('[Duress] Supabase save error:', e));
+    return res.json({ success: true, enabled: false });
+  }
+
+  const { normalPin, duressPin } = req.body;
+  const pinPattern = /^\d{4,6}$/;
+  if (!pinPattern.test(normalPin || '') || !pinPattern.test(duressPin || '')) {
+    return res.status(400).json({ error: 'normalPin and duressPin must be 4-6 digits' });
+  }
+  if (normalPin === duressPin) {
+    return res.status(400).json({ error: 'normalPin and duressPin must be different' });
+  }
+  user.duressCodeEnabled = true;
+  user.normalPinHash = bcrypt.hashSync(normalPin, 10);
+  user.duressPinHash = bcrypt.hashSync(duressPin, 10);
+  adminUsers.set(user.id, user);
+  saveAdminUserToSupabase(user).catch(e => console.error('[Duress] Supabase save error:', e));
+  res.json({ success: true, enabled: true });
+});
+
+// POST /api/sos/duress-check — called from the SOS button's "deactivate" flow
+// when the caller has a duress code configured. Always looks and feels the
+// same to the person typing regardless of which PIN they enter; only the
+// server-side branch differs, silently, based on which hash matched.
+app.post('/api/sos/duress-check', requireAuth, (req, res) => {
+  const caller = req.supabaseUser!;
+  const user = adminUsers.get(caller.id);
+  if (!user || !user.duressCodeEnabled || !user.normalPinHash || !user.duressPinHash) {
+    return res.status(400).json({ error: 'Duress code not configured' });
+  }
+  const { pin, alertId } = req.body;
+  if (typeof pin !== 'string') return res.status(400).json({ error: 'pin required' });
+
+  if (bcrypt.compareSync(pin, user.normalPinHash)) {
+    return res.json({ result: 'normal' });
+  }
+
+  if (bcrypt.compareSync(pin, user.duressPinHash)) {
+    // The normal case: SOS was already active (that's the only way this modal
+    // shows), so an alert already exists — mark it rather than creating a
+    // duplicate. Only falls back to a fresh alert if the original POST /api/sos
+    // never reached the server (e.g. was queued offline).
+    let alert = alertId ? alerts.get(alertId) : undefined;
+    const isNew = !alert;
+    if (!alert) {
+      alert = {
+        id: uuidv4(),
+        type: 'sos',
+        severity: 'critical',
+        location: { latitude: 0, longitude: 0, address: 'Position inconnue' },
+        description: `Code de contrainte activé par ${user.name}.`,
+        createdBy: user.name,
+        reporterId: user.id,
+        origin: 'mobile',
+        createdAt: Date.now(),
+        status: 'active',
+        respondingUsers: [],
+        photos: [],
+      };
+    }
+    alert.isDuress = true;
+    alert.description = isNew ? alert.description : `⚠️ Code de contrainte — "annulation" de SOS forcée. ${alert.description}`;
+    if (!alert.revealedUserIds) alert.revealedUserIds = [];
+    if (!alert.revealedUserIds.includes(user.id)) alert.revealedUserIds.push(user.id);
+    alerts.set(alert.id, alert);
+    if (isNew) linkPossibleDuplicates(alert);
+    persistAlerts();
+    addAuditEntry('incident', 'Duress code triggered', user.id, `Alert ${alert.id}`);
+
+    // Auto-reveal: same effect as POST /alerts/:id/reveal, but performed
+    // synchronously here rather than waiting on the push+confirm round trip —
+    // someone forced into this has no time to spare on a second tap.
+    const runtimeUser = users.get(user.id);
+    if (runtimeUser?.location) {
+      const showMsg = { type: 'userLocationUpdate', userId: user.id, name: user.name, location: runtimeUser.location, timestamp: Date.now() };
+      broadcastToRole('dispatcher', showMsg);
+      broadcastToRole('admin', showMsg);
+    }
+
+    // Deliberately role-scoped rather than the usual broadcastMessage() fan-out
+    // to every connected client — that would also reach the reporter's own
+    // phone (which stays connected) and could trigger a siren/visible update
+    // on the exact device this whole feature exists to keep quiet.
+    const duressMsg = {
+      type: isNew ? 'newAlert' : 'alertUpdate',
+      data: { ...alert, respondingNames: alert.respondingUsers.map(uid => adminUsers.get(uid)?.name || uid) },
+    };
+    broadcastToRole('dispatcher', duressMsg);
+    broadcastToRole('admin', duressMsg);
+    broadcastToRole('responder', duressMsg);
+    sendPushToDispatchersAndResponders(alert, user.name).catch(() => {});
+
+    return res.json({ result: 'duress' });
+  }
+
+  res.status(401).json({ result: 'invalid' });
+});
+
 // GET /api/conversations?userId=xxx - list conversations for a user
 app.get('/api/conversations', (req, res) => {
   const userId = req.query.userId as string;
@@ -6035,6 +6348,8 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
     loadMessagesFromSupabase(),
     loadKnownPeopleFromSupabase(),
     loadPlannedInterventionsFromSupabase(),
+    loadTravelItinerariesFromSupabase(),
+    loadPreauthorizedGuestsFromSupabase(),
   ]);
   console.log('[Startup] All Supabase data loaded — ready to serve requests');
 
@@ -6054,6 +6369,22 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
   }
   if (rehydratedCount > 0) {
     console.log(`[Startup] Rehydrated ${rehydratedCount} active curfew checks`);
+  }
+
+  // Rehydrate scheduled check-ins — same rationale as curfew checks above.
+  let rehydratedCheckInCount = 0;
+  for (const checkIn of scheduledCheckIns.values()) {
+    if (checkIn.status !== 'pending' && checkIn.status !== 'awaiting_confirmation') continue;
+    rehydratedCheckInCount++;
+    const handler = checkIn.stage === 'due' ? fireCheckInDue : fireCheckInEscalation;
+    if (checkIn.nextFireAt <= Date.now()) {
+      handler(checkIn.id).catch(e => console.error('[CheckIn] Rehydration fire error:', e));
+    } else {
+      scheduleCheckIn(checkIn);
+    }
+  }
+  if (rehydratedCheckInCount > 0) {
+    console.log(`[Startup] Rehydrated ${rehydratedCheckInCount} active scheduled check-ins`);
   }
 
   console.log(`WebSocket endpoint: ws://localhost:${PORT}`);
@@ -6083,6 +6414,9 @@ async function loadAdminUsersFromSupabase(): Promise<void> {
           comments: u.comments || '', photoUrl: u.photo_url || '',
           relationships: u.relationships || [], passwordHash: u.password_hash || undefined,
           ghostMode: u.ghost_mode || false,
+          duressCodeEnabled: u.duress_code_enabled || false,
+          normalPinHash: u.normal_pin_hash || undefined,
+          duressPinHash: u.duress_pin_hash || undefined,
           assignedFamilyIds: u.assigned_family_ids || [],
         });
       });
@@ -6102,6 +6436,9 @@ async function saveAdminUserToSupabase(user: AdminUser): Promise<void> {
       comments: user.comments || '', photo_url: user.photoUrl || '',
       relationships: user.relationships || [], password_hash: user.passwordHash || null,
       ghost_mode: user.ghostMode || false,
+      duress_code_enabled: user.duressCodeEnabled || false,
+      normal_pin_hash: user.normalPinHash || null,
+      duress_pin_hash: user.duressPinHash || null,
       assigned_family_ids: user.assignedFamilyIds || [],
     });
     if (error) console.error('[Supabase] saveAdminUserToSupabase error:', error.message);
@@ -6653,6 +6990,7 @@ interface UserAddress {
   radiusMeters?: number; // "at this address" proximity radius for presence detection; defaults to 150m
   temporary?: boolean; // e.g. a vacation rental — surfaced distinctly and auto-excluded once expired
   expiresAt?: number; // only meaningful when temporary; the address stops counting for presence after this
+  occupancyStatus?: 'occupied' | 'unoccupied'; // undefined = not tracked
   createdAt: number;
   updatedAt: number;
 }
@@ -6673,6 +7011,7 @@ async function loadUserAddressesFromSupabase(): Promise<void> {
           radiusMeters: a.radius_meters || undefined,
           temporary: a.temporary || false,
           expiresAt: a.expires_at || undefined,
+          occupancyStatus: a.occupancy_status || undefined,
           createdAt: a.created_at, updatedAt: a.updated_at,
         };
         if (!userAddresses.has(addr.userId)) userAddresses.set(addr.userId, []);
@@ -6702,6 +7041,7 @@ interface KnownPerson {
   vehicleDescription?: string;
   photoUrl?: string;
   notes?: string;
+  verificationStatus?: 'verified' | 'pending' | 'flagged';
   createdBy: string;
   createdAt: number;
   updatedAt: number;
@@ -6724,8 +7064,47 @@ interface PlannedIntervention {
   updatedAt: number;
 }
 
+// ─── Travel Itineraries ─────────────────────────────────────────────────
+// Calqued on PlannedIntervention (same CRUD + Supabase shape) but scoped by
+// userId (the traveling family member) rather than addressId, since travel
+// isn't tied to one residence. Status ('à venir'/'en cours'/'terminé') is
+// derived at read time from now vs departureAt/returnAt rather than stored,
+// to avoid a second timer/scheduling system alongside CurfewCheck/ScheduledCheckIn.
+interface TravelItinerary {
+  id: string;
+  userId: string;
+  userName: string; // denormalized snapshot
+  destinationLabel: string;
+  destinationAddress?: string;
+  departureAt: number;
+  returnAt?: number;
+  notes?: string;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+// ─── Pre-authorized guests ──────────────────────────────────────────────
+// Calqued on KnownPerson (same address-scoped CRUD shape) but for a time-
+// bounded guest list checked at the gate for a specific event, rather than
+// a standing directory of recurring providers/staff.
+interface PreAuthorizedGuest {
+  id: string;
+  addressId: string;
+  userId: string; // residence owner
+  guestName: string;
+  guestPhone?: string;
+  eventLabel?: string;
+  validFrom: number;
+  validUntil: number;
+  addedBy: string;
+  createdAt: number;
+}
+
 const knownPeople = new Map<string, KnownPerson[]>(); // addressId -> people
 const plannedInterventions = new Map<string, PlannedIntervention[]>(); // addressId -> interventions
+const travelItineraries = new Map<string, TravelItinerary[]>(); // userId -> itineraries
+const preauthorizedGuests = new Map<string, PreAuthorizedGuest[]>(); // addressId -> guests
 
 async function loadKnownPeopleFromSupabase(): Promise<void> {
   try {
@@ -6739,6 +7118,7 @@ async function loadKnownPeopleFromSupabase(): Promise<void> {
           company: p.company || undefined, phone: p.phone || undefined, email: p.email || undefined,
           vehiclePlate: p.vehicle_plate || undefined, vehicleDescription: p.vehicle_description || undefined,
           photoUrl: p.photo_url || undefined, notes: p.notes || undefined,
+          verificationStatus: p.verification_status || undefined,
           createdBy: p.created_by, createdAt: p.created_at, updatedAt: p.updated_at,
         };
         if (!knownPeople.has(person.addressId)) knownPeople.set(person.addressId, []);
@@ -6769,6 +7149,48 @@ async function loadPlannedInterventionsFromSupabase(): Promise<void> {
       console.log(`[Supabase] Loaded ${data.length} planned interventions`);
     }
   } catch (e) { console.error('[Supabase] loadPlannedInterventionsFromSupabase error:', e); }
+}
+
+async function loadTravelItinerariesFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('travel_itineraries').select('*');
+    if (error) { console.error('[Supabase] Failed to load travel_itineraries:', error.message); return; }
+    if (data && data.length > 0) {
+      travelItineraries.clear();
+      data.forEach((it: any) => {
+        const itinerary: TravelItinerary = {
+          id: it.id, userId: it.user_id, userName: it.user_name,
+          destinationLabel: it.destination_label, destinationAddress: it.destination_address || undefined,
+          departureAt: it.departure_at, returnAt: it.return_at || undefined, notes: it.notes || undefined,
+          createdBy: it.created_by, createdAt: it.created_at, updatedAt: it.updated_at,
+        };
+        if (!travelItineraries.has(itinerary.userId)) travelItineraries.set(itinerary.userId, []);
+        travelItineraries.get(itinerary.userId)!.push(itinerary);
+      });
+      console.log(`[Supabase] Loaded ${data.length} travel itineraries`);
+    }
+  } catch (e) { console.error('[Supabase] loadTravelItinerariesFromSupabase error:', e); }
+}
+
+async function loadPreauthorizedGuestsFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('preauthorized_guests').select('*');
+    if (error) { console.error('[Supabase] Failed to load preauthorized_guests:', error.message); return; }
+    if (data && data.length > 0) {
+      preauthorizedGuests.clear();
+      data.forEach((g: any) => {
+        const guest: PreAuthorizedGuest = {
+          id: g.id, addressId: g.address_id, userId: g.user_id, guestName: g.guest_name,
+          guestPhone: g.guest_phone || undefined, eventLabel: g.event_label || undefined,
+          validFrom: g.valid_from, validUntil: g.valid_until,
+          addedBy: g.added_by, createdAt: g.created_at,
+        };
+        if (!preauthorizedGuests.has(guest.addressId)) preauthorizedGuests.set(guest.addressId, []);
+        preauthorizedGuests.get(guest.addressId)!.push(guest);
+      });
+      console.log(`[Supabase] Loaded ${data.length} preauthorized guests`);
+    }
+  } catch (e) { console.error('[Supabase] loadPreauthorizedGuestsFromSupabase error:', e); }
 }
 
 // A caller may view/manage a residence's known people & interventions if they own it,
@@ -6804,7 +7226,7 @@ app.post('/api/addresses/:addressId/people', requireAuth, async (req, res) => {
   if (!ownerId) return res.status(404).json({ error: 'Address not found' });
   const caller = req.supabaseUser!;
   if (!canEditAddressAssets(ownerId, caller)) return res.status(403).json({ error: 'Not authorized' });
-  const { name, category, company, phone, email, vehiclePlate, vehicleDescription, photoUrl, notes } = req.body;
+  const { name, category, company, phone, email, vehiclePlate, vehicleDescription, photoUrl, notes, verificationStatus } = req.body;
   if (!name) return res.status(400).json({ error: 'name is required' });
   const now = Date.now();
   const person: KnownPerson = {
@@ -6812,6 +7234,7 @@ app.post('/api/addresses/:addressId/people', requireAuth, async (req, res) => {
     company: company || undefined, phone: phone || undefined, email: email || undefined,
     vehiclePlate: vehiclePlate || undefined, vehicleDescription: vehicleDescription || undefined,
     photoUrl: photoUrl || undefined, notes: notes || undefined,
+    verificationStatus: verificationStatus || 'pending',
     createdBy: caller.id, createdAt: now, updatedAt: now,
   };
   if (!knownPeople.has(addressId)) knownPeople.set(addressId, []);
@@ -6821,6 +7244,7 @@ app.post('/api/addresses/:addressId/people', requireAuth, async (req, res) => {
     company: person.company || null, phone: person.phone || null, email: person.email || null,
     vehicle_plate: person.vehiclePlate || null, vehicle_description: person.vehicleDescription || null,
     photo_url: person.photoUrl || null, notes: person.notes || null,
+    verification_status: person.verificationStatus || null,
     created_by: person.createdBy, created_at: now, updated_at: now,
   });
   if (error) console.error('[Supabase] Failed to persist known person:', error.message);
@@ -6837,7 +7261,7 @@ app.put('/api/addresses/:addressId/people/:personId', requireAuth, async (req, r
   const people = knownPeople.get(addressId) || [];
   const idx = people.findIndex(p => p.id === (req.params.personId as string));
   if (idx === -1) return res.status(404).json({ error: 'Person not found' });
-  const { name, category, company, phone, email, vehiclePlate, vehicleDescription, photoUrl, notes } = req.body;
+  const { name, category, company, phone, email, vehiclePlate, vehicleDescription, photoUrl, notes, verificationStatus } = req.body;
   const updated: KnownPerson = {
     ...people[idx],
     name: name ?? people[idx].name,
@@ -6849,6 +7273,7 @@ app.put('/api/addresses/:addressId/people/:personId', requireAuth, async (req, r
     vehicleDescription: vehicleDescription !== undefined ? vehicleDescription : people[idx].vehicleDescription,
     photoUrl: photoUrl !== undefined ? photoUrl : people[idx].photoUrl,
     notes: notes !== undefined ? notes : people[idx].notes,
+    verificationStatus: verificationStatus !== undefined ? verificationStatus : people[idx].verificationStatus,
     updatedAt: Date.now(),
   };
   people[idx] = updated;
@@ -6856,7 +7281,7 @@ app.put('/api/addresses/:addressId/people/:personId', requireAuth, async (req, r
     name: updated.name, category: updated.category, company: updated.company || null,
     phone: updated.phone || null, email: updated.email || null, vehicle_plate: updated.vehiclePlate || null,
     vehicle_description: updated.vehicleDescription || null, photo_url: updated.photoUrl || null,
-    notes: updated.notes || null, updated_at: updated.updatedAt,
+    notes: updated.notes || null, verification_status: updated.verificationStatus || null, updated_at: updated.updatedAt,
   }).eq('id', updated.id);
   if (error) console.error('[Supabase] Failed to persist known person update:', error.message);
   res.json(updated);
@@ -6875,6 +7300,60 @@ app.delete('/api/addresses/:addressId/people/:personId', requireAuth, async (req
   people.splice(idx, 1);
   const { error } = await supabaseAdmin.from('known_people').delete().eq('id', (req.params.personId as string));
   if (error) console.error('[Supabase] Failed to persist known person deletion:', error.message);
+  res.json({ success: true });
+});
+
+// GET /api/addresses/:addressId/guests
+app.get('/api/addresses/:addressId/guests', requireAuth, (req, res) => {
+  const ownerId = resolveAddressOwner((req.params.addressId as string));
+  if (!ownerId) return res.status(404).json({ error: 'Address not found' });
+  if (!canViewAddressAssets(ownerId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
+  res.json(preauthorizedGuests.get((req.params.addressId as string)) || []);
+});
+
+// POST /api/addresses/:addressId/guests
+app.post('/api/addresses/:addressId/guests', requireAuth, async (req, res) => {
+  const addressId = (req.params.addressId as string);
+  const ownerId = resolveAddressOwner(addressId);
+  if (!ownerId) return res.status(404).json({ error: 'Address not found' });
+  const caller = req.supabaseUser!;
+  if (!canEditAddressAssets(ownerId, caller)) return res.status(403).json({ error: 'Not authorized' });
+  const { guestName, guestPhone, eventLabel, validFrom, validUntil } = req.body;
+  if (!guestName || !validFrom || !validUntil) {
+    return res.status(400).json({ error: 'guestName, validFrom, and validUntil are required' });
+  }
+  const now = Date.now();
+  const guest: PreAuthorizedGuest = {
+    id: uuidv4(), addressId, userId: ownerId, guestName,
+    guestPhone: guestPhone || undefined, eventLabel: eventLabel || undefined,
+    validFrom: Number(validFrom), validUntil: Number(validUntil),
+    addedBy: caller.id, createdAt: now,
+  };
+  if (!preauthorizedGuests.has(addressId)) preauthorizedGuests.set(addressId, []);
+  preauthorizedGuests.get(addressId)!.push(guest);
+  const { error } = await supabaseAdmin.from('preauthorized_guests').insert({
+    id: guest.id, address_id: addressId, user_id: ownerId, guest_name: guest.guestName,
+    guest_phone: guest.guestPhone || null, event_label: guest.eventLabel || null,
+    valid_from: guest.validFrom, valid_until: guest.validUntil,
+    added_by: guest.addedBy, created_at: now,
+  });
+  if (error) console.error('[Supabase] Failed to persist preauthorized guest:', error.message);
+  res.status(201).json(guest);
+});
+
+// DELETE /api/addresses/:addressId/guests/:guestId
+app.delete('/api/addresses/:addressId/guests/:guestId', requireAuth, async (req, res) => {
+  const addressId = (req.params.addressId as string);
+  const ownerId = resolveAddressOwner(addressId);
+  if (!ownerId) return res.status(404).json({ error: 'Address not found' });
+  const caller = req.supabaseUser!;
+  if (!canEditAddressAssets(ownerId, caller)) return res.status(403).json({ error: 'Not authorized' });
+  const guests = preauthorizedGuests.get(addressId) || [];
+  const idx = guests.findIndex(g => g.id === (req.params.guestId as string));
+  if (idx === -1) return res.status(404).json({ error: 'Guest not found' });
+  guests.splice(idx, 1);
+  const { error } = await supabaseAdmin.from('preauthorized_guests').delete().eq('id', (req.params.guestId as string));
+  if (error) console.error('[Supabase] Failed to persist preauthorized guest deletion:', error.message);
   res.json({ success: true });
 });
 
@@ -6970,6 +7449,116 @@ app.delete('/api/addresses/:addressId/interventions/:interventionId', requireAut
   const { error } = await supabaseAdmin.from('planned_interventions').delete().eq('id', (req.params.interventionId as string));
   if (error) console.error('[Supabase] Failed to persist intervention deletion:', error.message);
   res.json({ success: true });
+});
+
+// ─── Travel Itineraries ─────────────────────────────────────────────────
+
+function findItineraryById(id: string): { itinerary: TravelItinerary; userId: string } | undefined {
+  for (const [userId, list] of travelItineraries) {
+    const itinerary = list.find(it => it.id === id);
+    if (itinerary) return { itinerary, userId };
+  }
+  return undefined;
+}
+
+// GET /api/family/itineraries?userId= - itineraries for a user and their family
+app.get('/api/family/itineraries', requireAuth, (req, res) => {
+  const userId = req.query.userId as string;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  if (!canViewAddressAssets(userId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
+  const familyIds = new Set([userId, ...getFamilyMemberIds(userId)]);
+  const all: TravelItinerary[] = [];
+  for (const [uid, list] of travelItineraries) {
+    if (familyIds.has(uid)) all.push(...list);
+  }
+  all.sort((a, b) => b.departureAt - a.departureAt);
+  res.json(all);
+});
+
+// POST /api/family/itineraries
+app.post('/api/family/itineraries', requireAuth, async (req, res) => {
+  const { userId, destinationLabel, destinationAddress, departureAt, returnAt, notes } = req.body;
+  if (!userId || !destinationLabel || !departureAt) {
+    return res.status(400).json({ error: 'userId, destinationLabel, and departureAt required' });
+  }
+  const caller = req.supabaseUser!;
+  if (!canEditAddressAssets(userId, caller)) return res.status(403).json({ error: 'Not authorized' });
+  const now = Date.now();
+  const itinerary: TravelItinerary = {
+    id: uuidv4(), userId, userName: adminUsers.get(userId)?.name || userId,
+    destinationLabel, destinationAddress: destinationAddress || undefined,
+    departureAt: Number(departureAt), returnAt: returnAt ? Number(returnAt) : undefined,
+    notes: notes || undefined, createdBy: caller.id, createdAt: now, updatedAt: now,
+  };
+  if (!travelItineraries.has(userId)) travelItineraries.set(userId, []);
+  travelItineraries.get(userId)!.push(itinerary);
+  const { error } = await supabaseAdmin.from('travel_itineraries').insert({
+    id: itinerary.id, user_id: userId, user_name: itinerary.userName,
+    destination_label: itinerary.destinationLabel, destination_address: itinerary.destinationAddress || null,
+    departure_at: itinerary.departureAt, return_at: itinerary.returnAt || null, notes: itinerary.notes || null,
+    created_by: caller.id, created_at: now, updated_at: now,
+  });
+  if (error) console.error('[Supabase] Failed to persist travel itinerary:', error.message);
+  res.status(201).json(itinerary);
+});
+
+// PUT /api/family/itineraries/:id
+app.put('/api/family/itineraries/:id', requireAuth, async (req, res) => {
+  const found = findItineraryById(req.params.id as string);
+  if (!found) return res.status(404).json({ error: 'Itinerary not found' });
+  const caller = req.supabaseUser!;
+  if (!canEditAddressAssets(found.userId, caller)) return res.status(403).json({ error: 'Not authorized' });
+  const { destinationLabel, destinationAddress, departureAt, returnAt, notes } = req.body;
+  const updated: TravelItinerary = {
+    ...found.itinerary,
+    destinationLabel: destinationLabel ?? found.itinerary.destinationLabel,
+    destinationAddress: destinationAddress !== undefined ? destinationAddress : found.itinerary.destinationAddress,
+    departureAt: departureAt !== undefined ? Number(departureAt) : found.itinerary.departureAt,
+    returnAt: returnAt !== undefined ? Number(returnAt) : found.itinerary.returnAt,
+    notes: notes !== undefined ? notes : found.itinerary.notes,
+    updatedAt: Date.now(),
+  };
+  const list = travelItineraries.get(found.userId)!;
+  list[list.findIndex(it => it.id === updated.id)] = updated;
+  const { error } = await supabaseAdmin.from('travel_itineraries').update({
+    destination_label: updated.destinationLabel, destination_address: updated.destinationAddress || null,
+    departure_at: updated.departureAt, return_at: updated.returnAt || null, notes: updated.notes || null,
+    updated_at: updated.updatedAt,
+  }).eq('id', updated.id);
+  if (error) console.error('[Supabase] Failed to persist travel itinerary update:', error.message);
+  res.json(updated);
+});
+
+// DELETE /api/family/itineraries/:id
+app.delete('/api/family/itineraries/:id', requireAuth, async (req, res) => {
+  const found = findItineraryById(req.params.id as string);
+  if (!found) return res.status(404).json({ error: 'Itinerary not found' });
+  if (!canEditAddressAssets(found.userId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
+  const list = travelItineraries.get(found.userId)!;
+  list.splice(list.findIndex(it => it.id === found.itinerary.id), 1);
+  const { error } = await supabaseAdmin.from('travel_itineraries').delete().eq('id', found.itinerary.id);
+  if (error) console.error('[Supabase] Failed to persist travel itinerary deletion:', error.message);
+  res.json({ success: true });
+});
+
+// GET /api/itineraries/upcoming?from=&to= - staff-only, who's traveling in a window
+app.get('/api/itineraries/upcoming', requireAuth, (req, res) => {
+  const caller = req.supabaseUser!;
+  const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder';
+  if (!isStaff) return res.status(403).json({ error: 'Staff only' });
+  const from = req.query.from ? Number(req.query.from) : Date.now();
+  const to = req.query.to ? Number(req.query.to) : from + 7 * 24 * 60 * 60 * 1000;
+  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  const results: TravelItinerary[] = [];
+  for (const [userId, list] of travelItineraries) {
+    if (!canAccessFamily(callerAccess, userId)) continue;
+    for (const it of list) {
+      const end = it.returnAt ?? it.departureAt;
+      if (it.departureAt <= to && end >= from) results.push(it);
+    }
+  }
+  results.sort((a, b) => a.departureAt - b.departureAt);
+  res.json(results);
 });
 
 // GET /api/known-people/all — every known provider/visitor across every residence,
@@ -7654,7 +8243,7 @@ app.post('/api/users/:id/addresses', async (req, res) => {
 
 // PUT /api/users/:id/addresses/:addressId
 app.put('/api/users/:id/addresses/:addressId', async (req, res) => {
-  const { label, address, latitude, longitude, placeId, isPrimary, alarmCode, notes, radiusMeters, temporary, expiresAt } = req.body;
+  const { label, address, latitude, longitude, placeId, isPrimary, alarmCode, notes, radiusMeters, temporary, expiresAt, occupancyStatus } = req.body;
   const userId = req.params.id;
   const addresses = userAddresses.get(userId) || [];
   const idx = addresses.findIndex(a => a.id === req.params.addressId);
@@ -7677,6 +8266,7 @@ app.put('/api/users/:id/addresses/:addressId', async (req, res) => {
     radiusMeters: radiusMeters != null ? Number(radiusMeters) : addresses[idx].radiusMeters,
     temporary: temporary != null ? Boolean(temporary) : addresses[idx].temporary,
     expiresAt: expiresAt != null ? Number(expiresAt) : addresses[idx].expiresAt,
+    occupancyStatus: occupancyStatus !== undefined ? occupancyStatus : addresses[idx].occupancyStatus,
     updatedAt: Date.now() };
   addresses[idx] = updated;
   const { error: updateAddrError } = await supabaseAdmin.from('user_addresses').update({
@@ -7684,9 +8274,31 @@ app.put('/api/users/:id/addresses/:addressId', async (req, res) => {
     longitude: updated.longitude, is_primary: updated.isPrimary,
     alarm_code: updated.alarmCode, notes: updated.notes, radius_meters: updated.radiusMeters || null,
     temporary: updated.temporary || false, expires_at: updated.expiresAt || null,
+    occupancy_status: updated.occupancyStatus || null,
     updated_at: updated.updatedAt,
   }).eq('id', updated.id);
   if (updateAddrError) console.error('[Supabase] Failed to persist address update (will revert on restart):', updateAddrError.message);
+  res.json(updated);
+});
+
+// PATCH /api/users/:id/addresses/:addressId/occupancy — lightweight toggle so the
+// app (which has no full address-edit UI) can flip this without going through PUT.
+app.patch('/api/users/:id/addresses/:addressId/occupancy', requireAuth, async (req, res) => {
+  const userId = req.params.id as string;
+  const addresses = userAddresses.get(userId) || [];
+  const idx = addresses.findIndex(a => a.id === req.params.addressId);
+  if (idx === -1) return res.status(404).json({ error: 'Address not found' });
+  if (!canEditAddressAssets(userId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
+  const { occupancyStatus } = req.body;
+  if (occupancyStatus !== 'occupied' && occupancyStatus !== 'unoccupied') {
+    return res.status(400).json({ error: "occupancyStatus must be 'occupied' or 'unoccupied'" });
+  }
+  const updated = { ...addresses[idx], occupancyStatus, updatedAt: Date.now() };
+  addresses[idx] = updated;
+  const { error } = await supabaseAdmin.from('user_addresses')
+    .update({ occupancy_status: updated.occupancyStatus, updated_at: updated.updatedAt })
+    .eq('id', updated.id);
+  if (error) console.error('[Supabase] Failed to persist occupancy status:', error.message);
   res.json(updated);
 });
 
@@ -7776,7 +8388,7 @@ app.get('/api/alerts/:id/context', async (req, res) => {
 
   // Known providers/visitors at the matched residence, and who's expected there
   // today — so staff on scene can recognize an expected vehicle/person.
-  let residenceContext: { addressId: string; knownPeople: KnownPerson[]; todayInterventions: PlannedIntervention[] } | null = null;
+  let residenceContext: { addressId: string; knownPeople: KnownPerson[]; todayInterventions: PlannedIntervention[]; occupancyStatus?: 'occupied' | 'unoccupied' } | null = null;
   if (matchedAddress) {
     const now = new Date();
     const todayStart = new Date(now); todayStart.setHours(0, 0, 0, 0);
@@ -7790,6 +8402,7 @@ app.get('/api/alerts/:id/context', async (req, res) => {
       addressId: matchedAddress.id,
       knownPeople: knownPeople.get(matchedAddress.id) || [],
       todayInterventions,
+      occupancyStatus: matchedAddress.occupancyStatus,
     };
   }
 

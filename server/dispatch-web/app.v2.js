@@ -1212,7 +1212,8 @@ function renderIncidentsCards(container, filtered) {
       : '';
 
     return `
-      <div class="incident-card sev-${inc.severity}${escClass}${agingClass}" style="cursor:pointer;" onclick="openDetailModal('${inc.id}')">
+      <div class="incident-card sev-${inc.severity}${escClass}${agingClass}${inc.isDuress ? ' is-duress' : ''}" style="cursor:pointer;" onclick="openDetailModal('${inc.id}')">
+        ${inc.isDuress ? '<div class="duress-banner">🔴 CODE DE CONTRAINTE — le SOS a été "annulé" sous la contrainte, menace réelle probable</div>' : ''}
         <div class="inc-header">
           <div class="inc-header-left">
             <span class="inc-type-icon">${TYPE_ICONS[inc.type] || '🚨'}</span>
@@ -1248,13 +1249,13 @@ function renderIncidentsCards(container, filtered) {
 function renderIncidentsTable(container, filtered) {
   const rows = filtered.map(inc => {
     const agingTier = incidentAgingTier(inc);
-    const rowClass = agingTier ? ` class="aging-${agingTier}"` : '';
+    const rowClass = inc.isDuress ? ' class="is-duress"' : (agingTier ? ` class="aging-${agingTier}"` : '');
     const ageLabel = agingTier ? `⏳ ${formatAgeMinutes(inc)}` : formatTimeAgo(inc.timestamp);
     const dupCount = (inc.possibleDuplicates || []).length;
     const dupBadge = dupCount > 0 ? ` <span class="dup-badge proximity" title="Doublons possibles">${dupCount}×🔗</span>` : '';
     return `
       <tr${rowClass} onclick="openDetailModal('${inc.id}')">
-        <td>${formatIncidentId(inc.id)}${dupBadge}</td>
+        <td>${inc.isDuress ? '🔴 ' : ''}${formatIncidentId(inc.id)}${dupBadge}</td>
         <td>${TYPE_ICONS[inc.type] || '🚨'} ${typeLabel(inc.type)}</td>
         <td><span class="badge badge-${inc.severity}">${sevLabel(inc.severity)}</span></td>
         <td><span class="badge badge-${inc.status}">${statusLabel(inc.status)}</span></td>
@@ -1390,6 +1391,7 @@ async function loadFamilyGroups() {
   }
   renderFamilyGroups();
   loadUpcomingInterventions();
+  loadUpcomingItineraries();
 }
 
 // ─── Cross-residence interventions calendar ────────────────────────────
@@ -1422,6 +1424,39 @@ async function loadUpcomingInterventions() {
       </div>`).join('');
   } catch (e) {
     console.error('[Interventions] Load error:', e);
+    container.innerHTML = '<div class="empty-state" style="padding:12px;"><p>Erreur de chargement</p></div>';
+  }
+}
+
+// ─── Cross-family travel itineraries — "who's away" for the dispatch week ──
+function toggleItinerariesPanel() {
+  const el = document.getElementById('itinerariesUpcomingList');
+  const caret = document.getElementById('itinerariesCaret');
+  if (!el) return;
+  const isHidden = el.style.display === 'none';
+  el.style.display = isHidden ? 'block' : 'none';
+  if (caret) caret.textContent = isHidden ? '▴' : '▾';
+}
+
+async function loadUpcomingItineraries() {
+  const container = document.getElementById('itinerariesUpcomingList');
+  if (!container) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/itineraries/upcoming`);
+    const itineraries = res.ok ? await res.json() : [];
+    if (itineraries.length === 0) {
+      container.innerHTML = '<div class="empty-state" style="padding:12px;"><p>Aucun voyage annoncé cette semaine</p></div>';
+      return;
+    }
+    container.innerHTML = itineraries.map(it => `
+      <div class="intervention-row">
+        <div class="intervention-row-main">
+          <strong>${escapeHtml(it.userName)}</strong> → ${escapeHtml(it.destinationLabel)}
+          <div class="intervention-row-detail">Départ: ${new Date(it.departureAt).toLocaleString('fr-FR', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}${it.returnAt ? ` · Retour: ${new Date(it.returnAt).toLocaleDateString('fr-FR')}` : ''}</div>
+        </div>
+      </div>`).join('');
+  } catch (e) {
+    console.error('[Itineraries] Load error:', e);
     container.innerHTML = '<div class="empty-state" style="padding:12px;"><p>Erreur de chargement</p></div>';
   }
 }
@@ -1695,12 +1730,14 @@ const PROVIDER_CATEGORY_LABEL = {
 let providersAddressId = null;
 let providersKnownPeople = [];
 let providersInterventions = [];
+let providersGuests = [];
 
 async function openProvidersModal(addressId, addressLabel) {
   providersAddressId = addressId;
   document.getElementById('providersModalTitle').textContent = `🔧 Prestataires — ${addressLabel}`;
   document.getElementById('addPersonForm').style.display = 'none';
   document.getElementById('addInterventionForm').style.display = 'none';
+  document.getElementById('addGuestForm').style.display = 'none';
   document.getElementById('providersModal').style.display = 'flex';
   await loadProviders();
 }
@@ -1713,17 +1750,85 @@ function closeProvidersModal() {
 async function loadProviders() {
   if (!providersAddressId) return;
   try {
-    const [peopleRes, ivRes] = await Promise.all([
+    const [peopleRes, ivRes, guestsRes] = await Promise.all([
       fetch(`${API_BASE}/api/addresses/${providersAddressId}/people`),
       fetch(`${API_BASE}/api/addresses/${providersAddressId}/interventions`),
+      fetch(`${API_BASE}/api/addresses/${providersAddressId}/guests`),
     ]);
     providersKnownPeople = peopleRes.ok ? await peopleRes.json() : [];
     providersInterventions = ivRes.ok ? await ivRes.json() : [];
+    providersGuests = guestsRes.ok ? await guestsRes.json() : [];
   } catch (e) {
-    providersKnownPeople = []; providersInterventions = [];
+    providersKnownPeople = []; providersInterventions = []; providersGuests = [];
   }
   renderKnownPeople();
   renderInterventions();
+  renderGuests();
+}
+
+function renderGuests() {
+  const container = document.getElementById('guestsListContainer');
+  if (providersGuests.length === 0) {
+    container.innerHTML = '<p style="color:var(--text-muted);font-size:12px;">Aucun invité pré-autorisé</p>';
+    return;
+  }
+  container.innerHTML = providersGuests.map(g => `
+    <div class="provider-row">
+      <div>
+        <div class="provider-row-name">${escapeHtml(g.guestName)}</div>
+        ${g.eventLabel ? `<div class="provider-row-detail">${escapeHtml(g.eventLabel)}</div>` : ''}
+        ${g.guestPhone ? `<div class="provider-row-detail">📞 ${escapeHtml(g.guestPhone)}</div>` : ''}
+        <div class="provider-row-detail">Du ${new Date(g.validFrom).toLocaleDateString('fr-FR')} au ${new Date(g.validUntil).toLocaleDateString('fr-FR')}</div>
+      </div>
+      <button class="btn btn-danger btn-sm" onclick="deleteGuest('${g.id}')">🗑️</button>
+    </div>`).join('');
+}
+
+function toggleAddGuestForm() {
+  const form = document.getElementById('addGuestForm');
+  form.style.display = form.style.display === 'none' ? 'block' : 'none';
+}
+
+async function saveGuest() {
+  const guestName = document.getElementById('guestName').value.trim();
+  const validFromVal = document.getElementById('guestValidFrom').value;
+  const validUntilVal = document.getElementById('guestValidUntil').value;
+  if (!guestName || !validFromVal || !validUntilVal) { showToast('Nom et dates requis', 'error'); return; }
+  try {
+    const res = await fetch(`${API_BASE}/api/addresses/${providersAddressId}/guests`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        guestName,
+        guestPhone: document.getElementById('guestPhone').value.trim() || undefined,
+        eventLabel: document.getElementById('guestEventLabel').value.trim() || undefined,
+        validFrom: new Date(validFromVal).getTime(),
+        validUntil: new Date(validUntilVal).getTime(),
+      }),
+    });
+    if (!res.ok) throw new Error('failed');
+    document.getElementById('guestName').value = '';
+    document.getElementById('guestPhone').value = '';
+    document.getElementById('guestEventLabel').value = '';
+    document.getElementById('guestValidFrom').value = '';
+    document.getElementById('guestValidUntil').value = '';
+    document.getElementById('addGuestForm').style.display = 'none';
+    showToast('Invité ajouté', 'success');
+    await loadProviders();
+  } catch (e) {
+    showToast('Erreur', 'error');
+  }
+}
+
+async function deleteGuest(guestId) {
+  if (!confirm('Retirer cet invité ?')) return;
+  try {
+    await fetch(`${API_BASE}/api/addresses/${providersAddressId}/guests/${guestId}`, { method: 'DELETE' });
+    showToast('Invité retiré', 'success');
+    await loadProviders();
+  } catch (e) {
+    showToast('Erreur', 'error');
+  }
 }
 
 function renderKnownPeople() {
@@ -1739,6 +1844,7 @@ function renderKnownPeople() {
           ${p.phone ? `<div class="provider-row-detail">📞 ${escapeHtml(p.phone)}</div>` : ''}
           ${p.vehiclePlate ? `<div class="provider-row-detail">🚗 ${escapeHtml(p.vehiclePlate)}</div>` : ''}
           ${p.notes ? `<div class="provider-row-detail">${escapeHtml(p.notes)}</div>` : ''}
+          <span class="stat-badge ${TalionShared.VERIFICATION_STATUS_BADGE[p.verificationStatus || 'pending']}" style="cursor:pointer;margin-top:4px;display:inline-block;" onclick="cycleVerificationStatus('${p.id}', '${p.verificationStatus || 'pending'}')">${TalionShared.VERIFICATION_STATUS_LABEL[p.verificationStatus || 'pending']}</span>
         </div>
         <button class="btn btn-danger btn-sm" onclick="deleteKnownPerson('${p.id}')">🗑️</button>
       </div>`).join('');
@@ -1808,6 +1914,21 @@ async function saveKnownPerson() {
     document.getElementById('personNotes').value = '';
     document.getElementById('addPersonForm').style.display = 'none';
     showToast('Personne ajoutée', 'success');
+    await loadProviders();
+  } catch (e) {
+    showToast('Erreur', 'error');
+  }
+}
+
+async function cycleVerificationStatus(personId, currentStatus) {
+  const nextStatus = TalionShared.VERIFICATION_STATUS_NEXT[currentStatus] || 'verified';
+  try {
+    const res = await fetch(`${API_BASE}/api/addresses/${providersAddressId}/people/${personId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ verificationStatus: nextStatus }),
+    });
+    if (!res.ok) throw new Error('failed');
     await loadProviders();
   } catch (e) {
     showToast('Erreur', 'error');
@@ -2312,7 +2433,7 @@ function renderFamilyGroups() {
               <div class="family-member-addresses" id="places-${m.id}" style="display:none;">
                 ${m.addresses.map(a => `
                   <span class="addr-chip place-chip${a.temporary ? ' place-chip-temp' : ''}" title="Cliquer pour modifier" onclick="openEditPlaceModal('${m.id}','${a.id}')">
-                    ${a.isPrimary ? '⭐ ' : ''}${getPlaceIcon(a.label)} ${escapeHtml(a.label)}${a.temporary && a.expiresAt ? ` (jusqu'au ${formatShortDate(a.expiresAt)})` : ''}
+                    ${a.isPrimary ? '⭐ ' : ''}${getPlaceIcon(a.label)} ${escapeHtml(a.label)}${a.temporary && a.expiresAt ? ` (jusqu'au ${formatShortDate(a.expiresAt)})` : ''}${a.occupancyStatus === 'unoccupied' ? ' <span style="color:#b45309;font-weight:700;" title="Résidence inoccupée">🚪 Inoccupée</span>' : ''}
                     <span class="place-chip-delete" title="Prestataires" onclick="event.stopPropagation(); openProvidersModal('${a.id}', '${escapeHtml(a.label).replace(/'/g, "\\'")}')">🔧</span>
                     <span class="place-chip-delete" title="Supprimer ce lieu" onclick="event.stopPropagation(); deletePlace('${m.id}','${a.id}')">&times;</span>
                   </span>
@@ -2392,6 +2513,7 @@ function openAddPlaceModal(userId) {
   document.getElementById('placeAddressSuggestions').style.display = 'none';
   document.getElementById('placeRadius').value = '150';
   document.getElementById('placeExpiry').value = '';
+  document.getElementById('placeOccupancy').value = '';
   selectPlaceType('Domicile principal');
   document.getElementById('addPlaceModal').style.display = 'flex';
 }
@@ -2414,6 +2536,7 @@ async function openEditPlaceModal(userId, addressId) {
     document.getElementById('placeAddressSuggestions').style.display = 'none';
     document.getElementById('placeRadius').value = addr.radiusMeters || 150;
     document.getElementById('placeExpiry').value = addr.expiresAt ? new Date(addr.expiresAt).toISOString().slice(0, 10) : '';
+    document.getElementById('placeOccupancy').value = addr.occupancyStatus || '';
     selectPlaceType(type);
     document.getElementById('addPlaceModal').style.display = 'flex';
   } catch (e) {
@@ -2487,6 +2610,7 @@ async function savePlace() {
   const address = document.getElementById('placeAddress').value.trim();
   const radiusMeters = parseInt(document.getElementById('placeRadius').value, 10) || 150;
   const expiryVal = document.getElementById('placeExpiry').value;
+  const occupancyVal = document.getElementById('placeOccupancy').value;
   if (!address) { showToast('Adresse requise', 'error'); return; }
 
   const isTemp = placeSelectedType === 'Vacances';
@@ -2499,6 +2623,7 @@ async function savePlace() {
     radiusMeters,
     temporary: isTemp,
     expiresAt: isTemp && expiryVal ? new Date(expiryVal).getTime() : null,
+    occupancyStatus: occupancyVal || null,
   };
 
   try {
@@ -4702,6 +4827,7 @@ async function openDetailModal(incidentId) {
   const severity = inc.severity || 'medium';
   const status = inc.status || 'active';
   document.getElementById('detailBadges').innerHTML = `
+    ${inc.isDuress ? '<div class="duress-banner">🔴 CODE DE CONTRAINTE — le SOS a été "annulé" sous la contrainte, menace réelle probable</div>' : ''}
     <span class="badge badge-${severity}">${sevLabel(severity)}</span>
     <span class="badge badge-${status}">${statusLabel(status)}</span>
     ${inc.type === 'sos' ? '<span class="badge badge-critical">SOS URGENCE</span>' : ''}
@@ -4775,6 +4901,16 @@ async function openDetailModal(incidentId) {
             }
           }
 
+          // Occupancy banner — surfaces if the matched residence was marked
+          // "inoccupée" (family away), a signal worth extra vigilance on scene.
+          let occupancyBadge = '';
+          if (ctx.residenceContext?.occupancyStatus === 'unoccupied') {
+            occupancyBadge = `<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:8px 12px;margin-bottom:12px;display:flex;align-items:center;gap:8px;">
+              <span style="font-size:18px;">🚪</span>
+              <div style="font-weight:700;color:#b45309;font-size:13px;">⚠️ Résidence actuellement inoccupée</div>
+            </div>`;
+          }
+
           // Client info
           const phone = u.phoneMobile || u.phone || '';
           const photoHtml = u.photoUrl 
@@ -4815,6 +4951,7 @@ async function openDetailModal(incidentId) {
 
           clientProfile.innerHTML = `
             ${locBadge}
+            ${occupancyBadge}
             <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
               ${photoHtml}
               <div style="flex:1;">

@@ -684,6 +684,12 @@
         </div>
         <div id="interventionsUpcomingList" class="interventions-upcoming-list" style="display:none;"></div>
       </div>
+      <div class="interventions-panel">
+        <div class="interventions-panel-header" onclick="toggleItinerariesPanel()">
+          ✈️ Familles en déplacement (7 jours) <span id="itinerariesCaret">▾</span>
+        </div>
+        <div id="itinerariesUpcomingList" class="interventions-upcoming-list" style="display:none;"></div>
+      </div>
       <div id="familyGroupsList" class="family-groups-list"></div>
     </section>
 
@@ -958,6 +964,14 @@
         <label>Jusqu'au (fin du séjour)</label>
         <input type="date" id="placeExpiry" class="form-control">
       </div>
+      <div class="form-group">
+        <label>Occupation</label>
+        <select id="placeOccupancy" class="form-control">
+          <option value="">Non suivi</option>
+          <option value="occupied">🏠 Occupée</option>
+          <option value="unoccupied">🚪 Inoccupée</option>
+        </select>
+      </div>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
         <button class="btn btn-secondary" onclick="closeAddPlaceModal()">Annuler</button>
         <button class="btn btn-primary" onclick="savePlace()">Enregistrer</button>
@@ -1128,6 +1142,22 @@
         <button class="btn btn-primary" style="width:100%;" onclick="saveIntervention()">Planifier</button>
       </div>
       <div id="interventionsListContainer"></div>
+
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;margin-top:16px;">
+        <span style="font-size:12px;font-weight:700;color:var(--text-muted);text-transform:uppercase;">Invités pré-autorisés</span>
+        <button class="btn btn-sm" onclick="toggleAddGuestForm()">+ Ajouter</button>
+      </div>
+      <div id="addGuestForm" class="form-group" style="display:none;background:var(--bg-panel);border-radius:8px;padding:10px;">
+        <input type="text" id="guestName" class="form-control" placeholder="Nom de l'invité" style="margin-bottom:8px;">
+        <input type="text" id="guestPhone" class="form-control" placeholder="Téléphone (optionnel)" style="margin-bottom:8px;">
+        <input type="text" id="guestEventLabel" class="form-control" placeholder="Événement (optionnel)" style="margin-bottom:8px;">
+        <div style="display:flex;gap:8px;margin-bottom:8px;">
+          <input type="date" id="guestValidFrom" class="form-control" style="flex:1;">
+          <input type="date" id="guestValidUntil" class="form-control" style="flex:1;">
+        </div>
+        <button class="btn btn-primary" style="width:100%;" onclick="saveGuest()">Enregistrer</button>
+      </div>
+      <div id="guestsListContainer"></div>
 
       <div style="display:flex;justify-content:flex-end;margin-top:16px;">
         <button class="btn btn-secondary" onclick="closeProvidersModal()">Fermer</button>

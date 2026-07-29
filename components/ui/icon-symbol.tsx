@@ -44,6 +44,7 @@ const MAPPING = {
   'doc.text.fill': 'description',
   'checkmark.seal.fill': 'verified',
   'arrow.left': 'arrow-back',
+  'airplane': 'flight',
 } as IconMapping;
 
 /**

@@ -8,6 +8,7 @@
 import { sortByScheduledStartDesc } from './visits';
 import { ENTITY_SEARCH_SOURCE_LABEL, ENTITY_SEARCH_SOURCE_BADGE, entitySearchSourceLabel } from './entity-search';
 import { haversineDistanceMeters } from './geo';
+import { VERIFICATION_STATUS_LABEL, VERIFICATION_STATUS_BADGE, VERIFICATION_STATUS_NEXT, verificationStatusLabel } from './known-people';
 
 (window as any).TalionShared = {
   sortByScheduledStartDesc,
@@ -15,4 +16,8 @@ import { haversineDistanceMeters } from './geo';
   ENTITY_SEARCH_SOURCE_BADGE,
   entitySearchSourceLabel,
   haversineDistanceMeters,
+  VERIFICATION_STATUS_LABEL,
+  VERIFICATION_STATUS_BADGE,
+  VERIFICATION_STATUS_NEXT,
+  verificationStatusLabel,
 };

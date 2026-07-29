@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,7 @@ import {
   Platform,
   Image,
   Switch,
+  Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '@/hooks/useAuth';
@@ -46,7 +47,100 @@ export default function ProfileScreen() {
   const [ghostMode, setGhostMode] = useState(user?.ghostMode || false);
   const [ghostModeSaving, setGhostModeSaving] = useState(false);
 
+  const [duressEnabled, setDuressEnabled] = useState(false);
+  const [duressLoading, setDuressLoading] = useState(true);
+  const [showDuressSetup, setShowDuressSetup] = useState(false);
+  const [setupNormalPin, setSetupNormalPin] = useState('');
+  const [setupDuressPin, setSetupDuressPin] = useState('');
+  const [duressSaving, setDuressSaving] = useState(false);
+
   const markChanged = useCallback(() => setHasChanges(true), []);
+
+  const fetchDuressSettings = useCallback(async () => {
+    if (!user) return;
+    setDuressLoading(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetchWithTimeout(`${getApiBaseUrl()}/api/users/${user.id}/duress-settings`, {
+        headers: session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {},
+        timeout: 10000,
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setDuressEnabled(Boolean(data.enabled));
+      }
+    } catch (e) {
+      console.error('[Profile] Failed to fetch duress settings:', e);
+    }
+    setDuressLoading(false);
+  }, [user]);
+
+  useEffect(() => { fetchDuressSettings(); }, [fetchDuressSettings]);
+
+  const handleSaveDuressCodes = useCallback(async () => {
+    if (!user) return;
+    if (!/^\d{4,6}$/.test(setupNormalPin) || !/^\d{4,6}$/.test(setupDuressPin)) {
+      Alert.alert('Erreur', 'Les deux codes doivent contenir entre 4 et 6 chiffres.');
+      return;
+    }
+    if (setupNormalPin === setupDuressPin) {
+      Alert.alert('Erreur', 'Les deux codes doivent être différents.');
+      return;
+    }
+    setDuressSaving(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetchWithTimeout(`${getApiBaseUrl()}/api/users/${user.id}/duress-settings`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+        },
+        body: JSON.stringify({ enabled: true, normalPin: setupNormalPin, duressPin: setupDuressPin }),
+        timeout: 10000,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+      setDuressEnabled(true);
+      setShowDuressSetup(false);
+      setSetupNormalPin('');
+      setSetupDuressPin('');
+      if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (e: any) {
+      Alert.alert('Erreur', e?.message || 'Impossible d\'enregistrer les codes.');
+    }
+    setDuressSaving(false);
+  }, [user, setupNormalPin, setupDuressPin]);
+
+  const handleDisableDuress = useCallback(() => {
+    if (!user) return;
+    Alert.alert('Désactiver', 'Désactiver le code de contrainte ?', [
+      { text: 'Annuler', style: 'cancel' },
+      {
+        text: 'Désactiver', style: 'destructive', onPress: async () => {
+          setDuressSaving(true);
+          try {
+            const { data: { session } } = await supabase.auth.getSession();
+            await fetchWithTimeout(`${getApiBaseUrl()}/api/users/${user.id}/duress-settings`, {
+              method: 'PUT',
+              headers: {
+                'Content-Type': 'application/json',
+                ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+              },
+              body: JSON.stringify({ enabled: false }),
+              timeout: 10000,
+            });
+            setDuressEnabled(false);
+          } catch (e) {
+            console.error('[Profile] Failed to disable duress code:', e);
+          }
+          setDuressSaving(false);
+        },
+      },
+    ]);
+  }, [user]);
 
   const handleToggleGhostMode = useCallback(async (value: boolean) => {
     if (!user) return;
@@ -174,6 +268,7 @@ export default function ProfileScreen() {
   const initials = `${(user.firstName || user.name || '?')[0]}${(user.lastName || '')[0] || ''}`.toUpperCase();
 
   return (
+    <>
     <SafeAreaView edges={['top', 'left', 'right']} style={styles.container}>
       <ScrollView contentContainerStyle={styles.scrollContent}>
         {/* Header */}
@@ -372,6 +467,42 @@ export default function ProfileScreen() {
           </View>
         )}
 
+        {/* Security: duress code */}
+        {user.role === 'user' && (
+          <View style={styles.formSection}>
+            <Text style={styles.sectionTitle}>Sécurité</Text>
+            <View style={styles.fieldGroup}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                <View style={{ flex: 1, marginRight: 12 }}>
+                  <Text style={styles.fieldLabel}>Code de sécurité SOS</Text>
+                  <Text style={styles.fieldHint}>
+                    Configurez un second code de désactivation du SOS qui alerte discrètement
+                    le dispatch au lieu d'annuler l'alerte.
+                  </Text>
+                </View>
+                {duressLoading ? (
+                  <ActivityIndicator size="small" color="#1e3a5f" />
+                ) : (
+                  <Text style={{ fontSize: 13, fontWeight: '700', color: duressEnabled ? '#22C55E' : '#9CA3AF' }}>
+                    {duressEnabled ? 'Activé' : 'Désactivé'}
+                  </Text>
+                )}
+              </View>
+              {!duressLoading && (
+                <Pressable
+                  onPress={() => duressEnabled ? handleDisableDuress() : setShowDuressSetup(true)}
+                  style={({ pressed }) => [styles.historyRow, { marginTop: 8 }, pressed && { opacity: 0.7 }]}
+                  disabled={duressSaving}
+                >
+                  <Text style={[styles.fieldLabel, { color: '#1e3a5f' }]}>
+                    {duressEnabled ? 'Désactiver' : 'Configurer'}
+                  </Text>
+                </Pressable>
+              )}
+            </View>
+          </View>
+        )}
+
         {/* History: archived alerts */}
         <View style={styles.formSection}>
           <Text style={styles.sectionTitle}>Historique</Text>
@@ -425,6 +556,56 @@ export default function ProfileScreen() {
         </View>
       </ScrollView>
     </SafeAreaView>
+
+    <Modal visible={showDuressSetup} transparent animationType="fade" onRequestClose={() => setShowDuressSetup(false)}>
+      <View style={styles.duressModalOverlay}>
+        <View style={styles.duressModalContent}>
+          <Text style={styles.duressModalTitle}>Code de sécurité SOS</Text>
+          <Text style={styles.fieldHint}>
+            Deux codes à 4-6 chiffres, différents l'un de l'autre. Le premier annule le SOS
+            normalement ; le second alerte discrètement le dispatch tout en affichant le même
+            écran de confirmation — utile si on vous force à "annuler" une alerte.
+          </Text>
+          <Text style={[styles.fieldLabel, { marginTop: 16 }]}>Code normal</Text>
+          <TextInput
+            style={styles.duressPinInput}
+            value={setupNormalPin}
+            onChangeText={t => setSetupNormalPin(t.replace(/\D/g, '').slice(0, 6))}
+            placeholder="4-6 chiffres"
+            placeholderTextColor="#9CA3AF"
+            keyboardType="numeric"
+            secureTextEntry
+          />
+          <Text style={styles.fieldLabel}>Code de contrainte</Text>
+          <TextInput
+            style={styles.duressPinInput}
+            value={setupDuressPin}
+            onChangeText={t => setSetupDuressPin(t.replace(/\D/g, '').slice(0, 6))}
+            placeholder="4-6 chiffres, différent du premier"
+            placeholderTextColor="#9CA3AF"
+            keyboardType="numeric"
+            secureTextEntry
+          />
+          <View style={{ flexDirection: 'row', gap: 12, marginTop: 20 }}>
+            <Pressable
+              style={[styles.duressModalBtn, { backgroundColor: '#F3F4F6' }]}
+              onPress={() => { setShowDuressSetup(false); setSetupNormalPin(''); setSetupDuressPin(''); }}
+              disabled={duressSaving}
+            >
+              <Text style={{ color: '#374151', fontWeight: '600' }}>Annuler</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.duressModalBtn, { backgroundColor: '#1e3a5f' }]}
+              onPress={handleSaveDuressCodes}
+              disabled={duressSaving}
+            >
+              {duressSaving ? <ActivityIndicator color="#fff" /> : <Text style={{ color: '#fff', fontWeight: '700' }}>Enregistrer</Text>}
+            </Pressable>
+          </View>
+        </View>
+      </View>
+    </Modal>
+    </>
   );
 }
 
@@ -441,6 +622,42 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#f8fafc',
+  },
+  duressModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 20,
+  },
+  duressModalContent: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 24,
+    width: '100%',
+    maxWidth: 380,
+  },
+  duressModalTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#1f2937',
+    marginBottom: 8,
+  },
+  duressPinInput: {
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    fontSize: 16,
+    marginBottom: 12,
+    color: '#1f2937',
+  },
+  duressModalBtn: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignItems: 'center',
   },
   centered: {
     flex: 1,

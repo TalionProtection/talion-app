@@ -16,6 +16,7 @@ import { websocketService } from '@/services/websocket';
 import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { syncPresenceGeofences, stopPresenceGeofences, isPresenceGeofencingActive } from '@/services/presence-geofence-service';
+import { VERIFICATION_STATUS_LABEL, VERIFICATION_STATUS_NEXT, type VerificationStatus } from '@/shared/known-people';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -75,6 +76,42 @@ interface CurfewCheck {
   lastResult?: 'inside' | 'outside';
 }
 
+interface ScheduledCheckIn {
+  id: string;
+  ownerId: string;
+  targetUserId: string;
+  targetUserName: string;
+  dueAt: number;
+  graceMinutes: number;
+  status: 'pending' | 'awaiting_confirmation' | 'confirmed' | 'escalated' | 'cancelled';
+  nextFireAt: number;
+  stage: 'due' | 'escalation';
+  createdAt: number;
+  confirmedAt?: number;
+  escalatedAt?: number;
+}
+
+interface TravelItinerary {
+  id: string;
+  userId: string;
+  userName: string;
+  destinationLabel: string;
+  destinationAddress?: string;
+  departureAt: number;
+  returnAt?: number;
+  notes?: string;
+}
+
+interface PreAuthorizedGuest {
+  id: string;
+  addressId: string;
+  guestName: string;
+  guestPhone?: string;
+  eventLabel?: string;
+  validFrom: number;
+  validUntil: number;
+}
+
 interface LocationHistoryEntry {
   userId: string;
   latitude: number;
@@ -93,6 +130,7 @@ interface KnownPerson {
   vehiclePlate?: string;
   vehicleDescription?: string;
   notes?: string;
+  verificationStatus?: VerificationStatus;
 }
 
 interface PlannedIntervention {
@@ -248,15 +286,46 @@ export default function FamilyScreen() {
   const [curfewAlertWhen, setCurfewAlertWhen] = useState<'exit' | 'entry' | 'both'>('exit');
   const [curfewSaving, setCurfewSaving] = useState(false);
 
+  // Scheduled check-in creation (dead-man's switch) — target + due time + grace period.
+  const [checkInsList, setCheckInsList] = useState<ScheduledCheckIn[]>([]);
+  const [showCreateCheckIn, setShowCreateCheckIn] = useState(false);
+  const [checkInTarget, setCheckInTarget] = useState<FamilyMember | null>(null);
+  const [checkInHour, setCheckInHour] = useState('23');
+  const [checkInMinute, setCheckInMinute] = useState('00');
+  const [checkInGraceMinutes, setCheckInGraceMinutes] = useState('30');
+  const [checkInSaving, setCheckInSaving] = useState(false);
+
+  // Travel itineraries — announced trips, visible to family + dispatch.
+  const [itinerariesList, setItinerariesList] = useState<TravelItinerary[]>([]);
+  const [showItineraryModal, setShowItineraryModal] = useState(false);
+  const [itineraryTarget, setItineraryTarget] = useState<FamilyMember | null>(null);
+  const [showAddItineraryForm, setShowAddItineraryForm] = useState(false);
+  const [itineraryDestLabel, setItineraryDestLabel] = useState('');
+  const [itineraryDestAddress, setItineraryDestAddress] = useState('');
+  const [itineraryDepartureDate, setItineraryDepartureDate] = useState('');
+  const [itineraryReturnDate, setItineraryReturnDate] = useState('');
+  const [itineraryNotes, setItineraryNotes] = useState('');
+  const [itinerarySaving, setItinerarySaving] = useState(false);
+
   // Providers/visitors known at a residence (gardener, plumber, etc.) + their
   // planned visits — managed per-address, reachable from a member's card.
   const [showProvidersModal, setShowProvidersModal] = useState(false);
   const [providersTarget, setProvidersTarget] = useState<FamilyMember | null>(null);
-  const [providersAddresses, setProvidersAddresses] = useState<{ id: string; label: string; address: string; isPrimary: boolean }[]>([]);
+  const [providersAddresses, setProvidersAddresses] = useState<{ id: string; label: string; address: string; isPrimary: boolean; occupancyStatus?: 'occupied' | 'unoccupied' }[]>([]);
   const [selectedProviderAddressId, setSelectedProviderAddressId] = useState<string | null>(null);
   const [knownPeopleList, setKnownPeopleList] = useState<KnownPerson[]>([]);
   const [interventionsList, setInterventionsList] = useState<PlannedIntervention[]>([]);
+  const [guestsList, setGuestsList] = useState<PreAuthorizedGuest[]>([]);
   const [providersLoading, setProvidersLoading] = useState(false);
+  const [providersSubtab, setProvidersSubtab] = useState<'people' | 'guests'>('people');
+
+  const [showAddGuestForm, setShowAddGuestForm] = useState(false);
+  const [guestName, setGuestName] = useState('');
+  const [guestPhone, setGuestPhone] = useState('');
+  const [guestEventLabel, setGuestEventLabel] = useState('');
+  const [guestValidFrom, setGuestValidFrom] = useState('');
+  const [guestValidUntil, setGuestValidUntil] = useState('');
+  const [guestSaving, setGuestSaving] = useState(false);
 
   const [showAddPersonForm, setShowAddPersonForm] = useState(false);
   const [personName, setPersonName] = useState('');
@@ -539,16 +608,19 @@ export default function FamilyScreen() {
   const loadAddressAssets = useCallback(async (addressId: string) => {
     setProvidersLoading(true);
     try {
-      const [peopleRes, ivRes] = await Promise.all([
+      const [peopleRes, ivRes, guestsRes] = await Promise.all([
         fetchWithTimeout(`${BASE}/api/addresses/${addressId}/people`, { headers: { Accept: 'application/json', ...(await authHeader()) }, timeout: 10000 }),
         fetchWithTimeout(`${BASE}/api/addresses/${addressId}/interventions`, { headers: { Accept: 'application/json', ...(await authHeader()) }, timeout: 10000 }),
+        fetchWithTimeout(`${BASE}/api/addresses/${addressId}/guests`, { headers: { Accept: 'application/json', ...(await authHeader()) }, timeout: 10000 }),
       ]);
       setKnownPeopleList(peopleRes.ok ? await peopleRes.json() : []);
       setInterventionsList(ivRes.ok ? await ivRes.json() : []);
+      setGuestsList(guestsRes.ok ? await guestsRes.json() : []);
     } catch (e) {
       console.error('[Family] Error loading address assets:', e);
       setKnownPeopleList([]);
       setInterventionsList([]);
+      setGuestsList([]);
     }
     setProvidersLoading(false);
   }, [BASE]);
@@ -559,11 +631,13 @@ export default function FamilyScreen() {
     setSelectedProviderAddressId(null);
     setKnownPeopleList([]);
     setInterventionsList([]);
+    setGuestsList([]);
+    setProvidersSubtab('people');
     setProvidersLoading(true);
     try {
       const res = await fetchWithTimeout(`${BASE}/api/users/${member.userId}/addresses`, { timeout: 10000, headers: await authHeader() });
       const data = await res.json();
-      const addrs = Array.isArray(data) ? data.map((a: any) => ({ id: a.id, label: a.label, address: a.address, isPrimary: a.isPrimary })) : [];
+      const addrs = Array.isArray(data) ? data.map((a: any) => ({ id: a.id, label: a.label, address: a.address, isPrimary: a.isPrimary, occupancyStatus: a.occupancyStatus })) : [];
       setProvidersAddresses(addrs);
       if (addrs.length === 1) {
         setSelectedProviderAddressId(addrs[0].id);
@@ -631,6 +705,97 @@ export default function FamilyScreen() {
       },
     ]);
   }, [BASE, selectedProviderAddressId, loadAddressAssets]);
+
+  const resetGuestForm = () => {
+    setGuestName(''); setGuestPhone(''); setGuestEventLabel('');
+    setGuestValidFrom(''); setGuestValidUntil(''); setShowAddGuestForm(false);
+  };
+
+  const handleAddGuest = useCallback(async () => {
+    if (!selectedProviderAddressId || !guestName.trim() || !guestValidFrom || !guestValidUntil) return;
+    const validFrom = new Date(guestValidFrom).getTime();
+    const validUntil = new Date(guestValidUntil).getTime();
+    if (isNaN(validFrom) || isNaN(validUntil)) { Alert.alert('Erreur', 'Dates invalides'); return; }
+    setGuestSaving(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/addresses/${selectedProviderAddressId}/guests`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({
+          guestName: guestName.trim(), guestPhone: guestPhone.trim() || undefined,
+          eventLabel: guestEventLabel.trim() || undefined, validFrom, validUntil,
+        }),
+        timeout: 10000,
+      });
+      if (res.ok) {
+        resetGuestForm();
+        loadAddressAssets(selectedProviderAddressId);
+      } else {
+        Alert.alert('Erreur', 'Impossible d\'ajouter cet invité');
+      }
+    } catch (e) {
+      console.error('[Family] Error adding guest:', e);
+      Alert.alert('Erreur', 'Erreur réseau');
+    }
+    setGuestSaving(false);
+  }, [BASE, selectedProviderAddressId, guestName, guestPhone, guestEventLabel, guestValidFrom, guestValidUntil, loadAddressAssets]);
+
+  const handleDeleteGuest = useCallback((guest: PreAuthorizedGuest) => {
+    if (!selectedProviderAddressId) return;
+    Alert.alert('Supprimer', `Retirer ${guest.guestName} de la liste d'invités ?`, [
+      { text: 'Annuler', style: 'cancel' },
+      {
+        text: 'Supprimer', style: 'destructive', onPress: async () => {
+          try {
+            await fetchWithTimeout(`${BASE}/api/addresses/${selectedProviderAddressId}/guests/${guest.id}`, {
+              method: 'DELETE', headers: await authHeader(), timeout: 10000,
+            });
+            loadAddressAssets(selectedProviderAddressId);
+          } catch (e) {
+            console.error('[Family] Error deleting guest:', e);
+          }
+        },
+      },
+    ]);
+  }, [BASE, selectedProviderAddressId, loadAddressAssets]);
+
+  const handleCycleVerification = useCallback(async (person: KnownPerson) => {
+    if (!selectedProviderAddressId) return;
+    const nextStatus = VERIFICATION_STATUS_NEXT[person.verificationStatus || 'pending'];
+    setKnownPeopleList(list => list.map(p => p.id === person.id ? { ...p, verificationStatus: nextStatus } : p));
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/addresses/${selectedProviderAddressId}/people/${person.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({ verificationStatus: nextStatus }),
+        timeout: 10000,
+      });
+      if (!res.ok) throw new Error('request failed');
+    } catch (e) {
+      console.error('[Family] Error updating verification status:', e);
+      setKnownPeopleList(list => list.map(p => p.id === person.id ? { ...p, verificationStatus: person.verificationStatus } : p));
+    }
+  }, [BASE, selectedProviderAddressId]);
+
+  const handleToggleOccupancy = useCallback(async () => {
+    if (!providersTarget || !selectedProviderAddressId) return;
+    const current = providersAddresses.find(a => a.id === selectedProviderAddressId);
+    const nextStatus: 'occupied' | 'unoccupied' = current?.occupancyStatus === 'unoccupied' ? 'occupied' : 'unoccupied';
+    setProvidersAddresses(list => list.map(a => a.id === selectedProviderAddressId ? { ...a, occupancyStatus: nextStatus } : a));
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/users/${providersTarget.userId}/addresses/${selectedProviderAddressId}/occupancy`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({ occupancyStatus: nextStatus }),
+        timeout: 10000,
+      });
+      if (!res.ok) throw new Error('request failed');
+    } catch (e) {
+      console.error('[Family] Error updating occupancy status:', e);
+      setProvidersAddresses(list => list.map(a => a.id === selectedProviderAddressId ? { ...a, occupancyStatus: current?.occupancyStatus } : a));
+      Alert.alert('Erreur', 'Impossible de mettre à jour le statut d\'occupation');
+    }
+  }, [BASE, providersTarget, selectedProviderAddressId, providersAddresses]);
 
   const resetInterventionForm = () => {
     setInterventionPersonId(null); setInterventionDate(''); setInterventionTime('09:00');
@@ -736,17 +901,39 @@ export default function FamilyScreen() {
     }
   }, [BASE, userId]);
 
+  const fetchCheckIns = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family/checkins?userId=${userId}`, { timeout: 10000, headers: await authHeader() });
+      const data = await res.json();
+      setCheckInsList(Array.isArray(data) ? data : []);
+    } catch (e) {
+      console.error('[Family] Error fetching scheduled check-ins:', e);
+    }
+  }, [BASE, userId]);
+
+  const fetchItineraries = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family/itineraries?userId=${userId}`, { timeout: 10000, headers: await authHeader() });
+      const data = await res.json();
+      setItinerariesList(Array.isArray(data) ? data : []);
+    } catch (e) {
+      console.error('[Family] Error fetching travel itineraries:', e);
+    }
+  }, [BASE, userId]);
+
   const loadAll = useCallback(async () => {
     setLoading(true);
-    await Promise.all([fetchMembers(), fetchPerimeters(), fetchProxAlerts(), fetchCurfewChecks(), fetchMyPresence(), fetchAllFamilyGroups()]);
+    await Promise.all([fetchMembers(), fetchPerimeters(), fetchProxAlerts(), fetchCurfewChecks(), fetchCheckIns(), fetchItineraries(), fetchMyPresence(), fetchAllFamilyGroups()]);
     setLoading(false);
-  }, [fetchMembers, fetchPerimeters, fetchProxAlerts, fetchCurfewChecks, fetchMyPresence, fetchAllFamilyGroups]);
+  }, [fetchMembers, fetchPerimeters, fetchProxAlerts, fetchCurfewChecks, fetchCheckIns, fetchItineraries, fetchMyPresence, fetchAllFamilyGroups]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await Promise.all([fetchMembers(), fetchPerimeters(), fetchProxAlerts(), fetchCurfewChecks(), fetchMyPresence(), fetchAllFamilyGroups()]);
+    await Promise.all([fetchMembers(), fetchPerimeters(), fetchProxAlerts(), fetchCurfewChecks(), fetchCheckIns(), fetchItineraries(), fetchMyPresence(), fetchAllFamilyGroups()]);
     setRefreshing(false);
-  }, [fetchMembers, fetchPerimeters, fetchProxAlerts, fetchCurfewChecks, fetchMyPresence, fetchAllFamilyGroups]);
+  }, [fetchMembers, fetchPerimeters, fetchProxAlerts, fetchCurfewChecks, fetchCheckIns, fetchItineraries, fetchMyPresence, fetchAllFamilyGroups]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
@@ -756,9 +943,10 @@ export default function FamilyScreen() {
       fetchMembers();
       fetchProxAlerts();
       fetchCurfewChecks();
+      fetchCheckIns();
     }, 30000);
     return () => clearInterval(interval);
-  }, [fetchMembers, fetchProxAlerts, fetchCurfewChecks]);
+  }, [fetchMembers, fetchProxAlerts, fetchCurfewChecks, fetchCheckIns]);
 
   // Live position updates: the server already broadcasts `familyLocationUpdate` to
   // every family member on each location ping (server/index.ts handleLocationUpdate) —
@@ -950,6 +1138,117 @@ export default function FamilyScreen() {
     }
   }, [BASE, fetchCurfewChecks]);
 
+  // ─── Scheduled Check-in CRUD ────────────────────────────────────────────
+
+  const createCheckIn = useCallback(async () => {
+    if (!checkInTarget || !userId) return;
+    const hour = parseInt(checkInHour, 10);
+    const minute = parseInt(checkInMinute, 10);
+    const grace = parseInt(checkInGraceMinutes, 10);
+    if (isNaN(hour) || hour < 0 || hour > 23 || isNaN(minute) || minute < 0 || minute > 59) {
+      Alert.alert('Erreur', 'Heure invalide');
+      return;
+    }
+    if (isNaN(grace) || grace < 5 || grace > 180) {
+      Alert.alert('Erreur', 'Le délai de grâce doit être entre 5 et 180 minutes');
+      return;
+    }
+    const due = new Date();
+    due.setHours(hour, minute, 0, 0);
+    if (due.getTime() <= Date.now()) due.setDate(due.getDate() + 1);
+    setCheckInSaving(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family/checkins`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({
+          ownerId: userId,
+          targetUserId: checkInTarget.userId,
+          dueAt: due.getTime(),
+          graceMinutes: grace,
+        }),
+        timeout: 10000,
+      });
+      if (res.ok) {
+        if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        setShowCreateCheckIn(false);
+        setCheckInTarget(null);
+        fetchCheckIns();
+      } else {
+        const err = await res.json();
+        Alert.alert('Erreur', err.error || 'Impossible de créer le check-in');
+      }
+    } catch (e) {
+      Alert.alert('Erreur', 'Erreur réseau');
+    }
+    setCheckInSaving(false);
+  }, [BASE, userId, checkInTarget, checkInHour, checkInMinute, checkInGraceMinutes, fetchCheckIns]);
+
+  const cancelCheckIn = useCallback(async (checkIn: ScheduledCheckIn) => {
+    try {
+      await fetchWithTimeout(`${BASE}/api/family/checkins/${checkIn.id}`, { method: 'DELETE', headers: await authHeader(), timeout: 10000 });
+      if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      fetchCheckIns();
+    } catch (e) {
+      console.error('[Family] Error cancelling check-in:', e);
+    }
+  }, [BASE, fetchCheckIns]);
+
+  // ─── Travel Itinerary CRUD ──────────────────────────────────────────────
+
+  const resetItineraryForm = () => {
+    setItineraryDestLabel(''); setItineraryDestAddress(''); setItineraryDepartureDate('');
+    setItineraryReturnDate(''); setItineraryNotes(''); setShowAddItineraryForm(false);
+  };
+
+  const createItinerary = useCallback(async () => {
+    if (!itineraryTarget || !itineraryDestLabel.trim() || !itineraryDepartureDate) return;
+    const departureAt = new Date(itineraryDepartureDate).getTime();
+    if (isNaN(departureAt)) { Alert.alert('Erreur', 'Date de départ invalide'); return; }
+    const returnAt = itineraryReturnDate ? new Date(itineraryReturnDate).getTime() : undefined;
+    setItinerarySaving(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family/itineraries`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({
+          userId: itineraryTarget.userId,
+          destinationLabel: itineraryDestLabel.trim(),
+          destinationAddress: itineraryDestAddress.trim() || undefined,
+          departureAt, returnAt,
+          notes: itineraryNotes.trim() || undefined,
+        }),
+        timeout: 10000,
+      });
+      if (res.ok) {
+        resetItineraryForm();
+        fetchItineraries();
+      } else {
+        const err = await res.json();
+        Alert.alert('Erreur', err.error || 'Impossible de créer l\'itinéraire');
+      }
+    } catch (e) {
+      Alert.alert('Erreur', 'Erreur réseau');
+    }
+    setItinerarySaving(false);
+  }, [BASE, itineraryTarget, itineraryDestLabel, itineraryDestAddress, itineraryDepartureDate, itineraryReturnDate, itineraryNotes, fetchItineraries]);
+
+  const deleteItinerary = useCallback((itinerary: TravelItinerary) => {
+    Alert.alert('Supprimer', `Supprimer le voyage vers ${itinerary.destinationLabel} ?`, [
+      { text: 'Annuler', style: 'cancel' },
+      {
+        text: 'Supprimer', style: 'destructive', onPress: async () => {
+          try {
+            await fetchWithTimeout(`${BASE}/api/family/itineraries/${itinerary.id}`, { method: 'DELETE', headers: await authHeader(), timeout: 10000 });
+            fetchItineraries();
+          } catch (e) {
+            console.error('[Family] Error deleting itinerary:', e);
+          }
+        },
+      },
+    ]);
+  }, [BASE, fetchItineraries]);
+
   // ─── Acknowledge Alert ──────────────────────────────────────────────────
 
   const acknowledgeAlert = useCallback(async (alertId: string) => {
@@ -1099,6 +1398,30 @@ export default function FamilyScreen() {
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.actionBtn}
+          onPress={() => {
+            setCheckInTarget(item);
+            setCheckInHour('23');
+            setCheckInMinute('00');
+            setCheckInGraceMinutes('30');
+            setShowCreateCheckIn(true);
+          }}
+        >
+          <IconSymbol name="checkmark.seal.fill" size={16} color="#1e3a5f" />
+          <Text style={styles.actionBtnText}>Check-in</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.actionBtn}
+          onPress={() => {
+            setItineraryTarget(item);
+            resetItineraryForm();
+            setShowItineraryModal(true);
+          }}
+        >
+          <IconSymbol name="airplane" size={16} color="#1e3a5f" />
+          <Text style={styles.actionBtnText}>Voyage</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.actionBtn}
           onPress={() => openProvidersModal(item)}
         >
           <IconSymbol name="person.2.fill" size={16} color="#1e3a5f" />
@@ -1213,6 +1536,44 @@ export default function FamilyScreen() {
       </View>
     );
   };
+
+  const CHECKIN_STATUS_LABEL: Record<ScheduledCheckIn['status'], string> = {
+    pending: 'En attente',
+    awaiting_confirmation: 'Relance envoyée',
+    confirmed: 'Confirmé',
+    escalated: '⚠️ Dispatch alerté',
+    cancelled: 'Annulé',
+  };
+
+  const renderActiveCheckIns = () => {
+    const active = checkInsList.filter(c => c.status === 'pending' || c.status === 'awaiting_confirmation' || c.status === 'escalated');
+    if (active.length === 0) return null;
+    return (
+      <View style={styles.curfewListSection}>
+        <Text style={styles.curfewListTitle}>Check-ins programmés</Text>
+        {active.map(c => (
+          <View key={c.id} style={styles.curfewListItem}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.curfewListName}>{c.targetUserName}</Text>
+              <Text style={styles.curfewListDetail}>
+                Prévu avant {formatDate(c.dueAt)} {'  •  '}{CHECKIN_STATUS_LABEL[c.status]}
+              </Text>
+            </View>
+            <TouchableOpacity onPress={() => cancelCheckIn(c)}>
+              <IconSymbol name="trash.fill" size={18} color="#EF4444" />
+            </TouchableOpacity>
+          </View>
+        ))}
+      </View>
+    );
+  };
+
+  const renderAlertsHeader = () => (
+    <>
+      {renderActiveCurfewChecks()}
+      {renderActiveCheckIns()}
+    </>
+  );
 
   // ─── Empty States ───────────────────────────────────────────────────────
 
@@ -1487,7 +1848,7 @@ export default function FamilyScreen() {
               renderItem={renderAlertCard}
               contentContainerStyle={styles.listContent}
               ListEmptyComponent={EmptyAlerts}
-              ListHeaderComponent={renderActiveCurfewChecks}
+              ListHeaderComponent={renderAlertsHeader}
               refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#1e3a5f" />}
             />
           )}
@@ -1562,7 +1923,76 @@ export default function FamilyScreen() {
                 <ActivityIndicator size="large" color="#1e3a5f" style={{ marginTop: 20 }} />
               ) : (
                 <>
-                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <TouchableOpacity
+                    onPress={handleToggleOccupancy}
+                    style={[
+                      styles.occupancyToggle,
+                      providersAddresses.find(a => a.id === selectedProviderAddressId)?.occupancyStatus === 'unoccupied' && styles.occupancyToggleUnoccupied,
+                    ]}
+                  >
+                    <Text style={styles.occupancyToggleText}>
+                      {providersAddresses.find(a => a.id === selectedProviderAddressId)?.occupancyStatus === 'unoccupied' ? '🚪 Résidence inoccupée' : '🏠 Résidence occupée'}
+                    </Text>
+                  </TouchableOpacity>
+
+                  <View style={styles.memberSelector}>
+                    <TouchableOpacity style={[styles.memberChip, providersSubtab === 'people' && styles.memberChipActive]} onPress={() => setProvidersSubtab('people')}>
+                      <Text style={[styles.memberChipText, providersSubtab === 'people' && styles.memberChipTextActive]}>Personnes & Visites</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={[styles.memberChip, providersSubtab === 'guests' && styles.memberChipActive]} onPress={() => setProvidersSubtab('guests')}>
+                      <Text style={[styles.memberChipText, providersSubtab === 'guests' && styles.memberChipTextActive]}>Invités</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {providersSubtab === 'guests' ? (
+                    <>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, marginTop: 12 }}>
+                        <Text style={styles.formLabel}>Invités pré-autorisés</Text>
+                        <TouchableOpacity onPress={() => setShowAddGuestForm(v => !v)}>
+                          <Text style={styles.providerAddLink}>{showAddGuestForm ? 'Annuler' : '+ Ajouter'}</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      {showAddGuestForm && (
+                        <View style={styles.providerFormCard}>
+                          <TextInput style={styles.textInput} value={guestName} onChangeText={setGuestName} placeholder="Nom de l'invité" placeholderTextColor="#9CA3AF" />
+                          <TextInput style={styles.textInput} value={guestPhone} onChangeText={setGuestPhone} placeholder="Téléphone (optionnel)" placeholderTextColor="#9CA3AF" />
+                          <TextInput style={styles.textInput} value={guestEventLabel} onChangeText={setGuestEventLabel} placeholder="Événement (optionnel, ex: Dîner du 12)" placeholderTextColor="#9CA3AF" />
+                          <Text style={styles.formLabel}>Valide du</Text>
+                          <TextInput style={styles.textInput} value={guestValidFrom} onChangeText={setGuestValidFrom} placeholder="AAAA-MM-JJ" placeholderTextColor="#9CA3AF" />
+                          <Text style={styles.formLabel}>Valide jusqu'au</Text>
+                          <TextInput style={styles.textInput} value={guestValidUntil} onChangeText={setGuestValidUntil} placeholder="AAAA-MM-JJ" placeholderTextColor="#9CA3AF" />
+                          <TouchableOpacity
+                            style={[styles.createBtn, guestSaving && { opacity: 0.6 }]}
+                            onPress={handleAddGuest}
+                            disabled={guestSaving || !guestName.trim() || !guestValidFrom || !guestValidUntil}
+                          >
+                            {guestSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.createBtnText}>Enregistrer</Text>}
+                          </TouchableOpacity>
+                        </View>
+                      )}
+
+                      {guestsList.length === 0 ? (
+                        <Text style={styles.emptySubtitle}>Aucun invité pré-autorisé pour cette résidence.</Text>
+                      ) : (
+                        guestsList.map(g => (
+                          <View key={g.id} style={styles.providerRow}>
+                            <View style={{ flex: 1 }}>
+                              <Text style={styles.providerName}>{g.guestName}</Text>
+                              {!!g.eventLabel && <Text style={styles.providerDetail}>{g.eventLabel}</Text>}
+                              {!!g.guestPhone && <Text style={styles.providerDetail}>📞 {g.guestPhone}</Text>}
+                              <Text style={styles.providerDetail}>Du {formatDate(g.validFrom)} au {formatDate(g.validUntil)}</Text>
+                            </View>
+                            <TouchableOpacity onPress={() => handleDeleteGuest(g)}>
+                              <IconSymbol name="trash.fill" size={18} color="#EF4444" />
+                            </TouchableOpacity>
+                          </View>
+                        ))
+                      )}
+                    </>
+                  ) : (
+                    <>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, marginTop: 12 }}>
                     <Text style={styles.formLabel}>Personnes connues</Text>
                     <TouchableOpacity onPress={() => setShowAddPersonForm(v => !v)}>
                       <Text style={styles.providerAddLink}>{showAddPersonForm ? 'Annuler' : '+ Ajouter'}</Text>
@@ -1600,6 +2030,9 @@ export default function FamilyScreen() {
                           {!!p.phone && <Text style={styles.providerDetail}>📞 {p.phone}</Text>}
                           {!!p.vehiclePlate && <Text style={styles.providerDetail}>🚗 {p.vehiclePlate}</Text>}
                           {!!p.notes && <Text style={styles.providerDetail}>{p.notes}</Text>}
+                          <TouchableOpacity onPress={() => handleCycleVerification(p)} style={styles.verificationPill}>
+                            <Text style={styles.verificationPillText}>{VERIFICATION_STATUS_LABEL[p.verificationStatus || 'pending']}</Text>
+                          </TouchableOpacity>
                         </View>
                         <TouchableOpacity onPress={() => handleDeletePerson(p)}>
                           <IconSymbol name="trash.fill" size={18} color="#EF4444" />
@@ -1655,6 +2088,8 @@ export default function FamilyScreen() {
                         </TouchableOpacity>
                       </View>
                     ))
+                  )}
+                    </>
                   )}
                 </>
               )}
@@ -2031,6 +2466,128 @@ export default function FamilyScreen() {
                   )}
                 </TouchableOpacity>
               </>
+            )}
+          </ScrollView>
+        </View>
+      </Modal>
+
+      <Modal visible={showCreateCheckIn} animationType="slide" presentationStyle="pageSheet">
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Check-in programmé</Text>
+            <TouchableOpacity onPress={() => { setShowCreateCheckIn(false); setCheckInTarget(null); }}>
+              <IconSymbol name="xmark.circle.fill" size={28} color="#6B7280" />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView style={{ padding: 16 }}>
+            {checkInTarget && (
+              <>
+                <Text style={styles.formHint}>
+                  Si {checkInTarget.name} n'a pas confirmé être en sécurité avant l'heure choisie, une relance est envoyée puis, sans réponse après le délai de grâce, le dispatch est alerté.
+                </Text>
+
+                <Text style={styles.formLabel}>Heure limite</Text>
+                <View style={styles.timeStepperRow}>
+                  <TextInput
+                    style={[styles.textInput, styles.timeStepperInput]}
+                    value={checkInHour}
+                    onChangeText={setCheckInHour}
+                    placeholder="23"
+                    placeholderTextColor="#9CA3AF"
+                    keyboardType="numeric"
+                    maxLength={2}
+                  />
+                  <Text style={styles.timeStepperSeparator}>:</Text>
+                  <TextInput
+                    style={[styles.textInput, styles.timeStepperInput]}
+                    value={checkInMinute}
+                    onChangeText={setCheckInMinute}
+                    placeholder="00"
+                    placeholderTextColor="#9CA3AF"
+                    keyboardType="numeric"
+                    maxLength={2}
+                  />
+                </View>
+
+                <Text style={styles.formLabel}>Délai de grâce avant escalade (minutes)</Text>
+                <TextInput
+                  style={styles.textInput}
+                  value={checkInGraceMinutes}
+                  onChangeText={setCheckInGraceMinutes}
+                  placeholder="30"
+                  placeholderTextColor="#9CA3AF"
+                  keyboardType="numeric"
+                  returnKeyType="done"
+                />
+
+                <TouchableOpacity
+                  style={[styles.createBtn, checkInSaving && { opacity: 0.6 }]}
+                  onPress={createCheckIn}
+                  disabled={checkInSaving}
+                >
+                  {checkInSaving ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={styles.createBtnText}>Créer le check-in</Text>
+                  )}
+                </TouchableOpacity>
+              </>
+            )}
+          </ScrollView>
+        </View>
+      </Modal>
+
+      <Modal visible={showItineraryModal} animationType="slide" presentationStyle="pageSheet">
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Itinéraires — {itineraryTarget?.name}</Text>
+            <TouchableOpacity onPress={() => { setShowItineraryModal(false); setItineraryTarget(null); }}>
+              <IconSymbol name="xmark.circle.fill" size={28} color="#6B7280" />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView style={{ padding: 16 }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <Text style={styles.formLabel}>Voyages annoncés</Text>
+              <TouchableOpacity onPress={() => setShowAddItineraryForm(v => !v)}>
+                <Text style={styles.providerAddLink}>{showAddItineraryForm ? 'Annuler' : '+ Ajouter'}</Text>
+              </TouchableOpacity>
+            </View>
+
+            {showAddItineraryForm && (
+              <View style={styles.providerFormCard}>
+                <TextInput style={styles.textInput} value={itineraryDestLabel} onChangeText={setItineraryDestLabel} placeholder="Destination (ex: Megève)" placeholderTextColor="#9CA3AF" />
+                <TextInput style={styles.textInput} value={itineraryDestAddress} onChangeText={setItineraryDestAddress} placeholder="Adresse (optionnel)" placeholderTextColor="#9CA3AF" />
+                <Text style={styles.formLabel}>Date de départ</Text>
+                <TextInput style={styles.textInput} value={itineraryDepartureDate} onChangeText={setItineraryDepartureDate} placeholder="AAAA-MM-JJ" placeholderTextColor="#9CA3AF" />
+                <Text style={styles.formLabel}>Date de retour (optionnel)</Text>
+                <TextInput style={styles.textInput} value={itineraryReturnDate} onChangeText={setItineraryReturnDate} placeholder="AAAA-MM-JJ" placeholderTextColor="#9CA3AF" />
+                <TextInput style={styles.textInput} value={itineraryNotes} onChangeText={setItineraryNotes} placeholder="Notes (optionnel)" placeholderTextColor="#9CA3AF" />
+                <TouchableOpacity style={[styles.createBtn, itinerarySaving && { opacity: 0.6 }]} onPress={createItinerary} disabled={itinerarySaving || !itineraryDestLabel.trim() || !itineraryDepartureDate}>
+                  {itinerarySaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.createBtnText}>Enregistrer</Text>}
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {itinerariesList.filter(it => it.userId === itineraryTarget?.userId).length === 0 ? (
+              <Text style={styles.emptySubtitle}>Aucun voyage annoncé.</Text>
+            ) : (
+              itinerariesList.filter(it => it.userId === itineraryTarget?.userId).map(it => (
+                <View key={it.id} style={styles.providerRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.providerName}>✈️ {it.destinationLabel}</Text>
+                    {!!it.destinationAddress && <Text style={styles.providerDetail}>{it.destinationAddress}</Text>}
+                    <Text style={styles.providerDetail}>
+                      Départ: {formatDate(it.departureAt)}{it.returnAt ? `  •  Retour: ${formatDate(it.returnAt)}` : ''}
+                    </Text>
+                    {!!it.notes && <Text style={styles.providerDetail}>{it.notes}</Text>}
+                  </View>
+                  <TouchableOpacity onPress={() => deleteItinerary(it)}>
+                    <IconSymbol name="trash.fill" size={18} color="#EF4444" />
+                  </TouchableOpacity>
+                </View>
+              ))
             )}
           </ScrollView>
         </View>
@@ -2635,6 +3192,17 @@ const styles = StyleSheet.create({
   providerName: { fontSize: 15, fontWeight: '600', color: '#1F2937' },
   providerCategory: { fontSize: 12, fontWeight: '500', color: '#6B7280' },
   providerDetail: { fontSize: 13, color: '#6B7280', marginTop: 2 },
+  occupancyToggle: {
+    backgroundColor: '#F0FDF4', borderRadius: 10, borderWidth: 1, borderColor: '#BBF7D0',
+    paddingVertical: 10, alignItems: 'center', marginBottom: 16,
+  },
+  occupancyToggleUnoccupied: { backgroundColor: '#FFFBEB', borderColor: '#FDE68A' },
+  occupancyToggleText: { fontSize: 14, fontWeight: '700', color: '#374151' },
+  verificationPill: {
+    alignSelf: 'flex-start', backgroundColor: '#F3F4F6', borderRadius: 6,
+    paddingHorizontal: 8, paddingVertical: 3, marginTop: 6,
+  },
+  verificationPillText: { fontSize: 11, fontWeight: '600', color: '#374151' },
   providerCheckboxRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4 },
   providerCheckboxIcon: { fontSize: 20, color: '#1e3a5f' },
   // GPS button
