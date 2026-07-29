@@ -1795,6 +1795,14 @@ function checkFamilyPerimeters(userId: string, locationData: any) {
         data: alert,
       });
 
+      // sendProximityPush already fully supports the 'entry' case (its own
+      // ternaries branch on alert.eventType) - it was just never called here,
+      // unlike the exit branch above. The WS broadcast alone only reaches an
+      // app that's open with a live connection, so this is why "retour dans
+      // le périmètre" notifications were silently missing while "sortie"
+      // ones worked fine.
+      sendProximityPush(perimeter.ownerId, alert, perimeter);
+
       console.log(`[Proximity] ${perimeter.targetUserName} RETURNED to perimeter ${pId}`);
     }
   }
