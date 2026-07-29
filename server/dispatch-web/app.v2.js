@@ -1418,8 +1418,11 @@ function renderCurrentVisitsSubtab() {
 }
 
 // ─── Global entity search: Blackbook + Personnes connues + Comptes système ──
-const GLOBAL_SEARCH_SOURCE_LABEL = { blackbook: '🕵️ Blackbook', known_person: '👥 Personne connue', system_account: '🏠 Compte système' };
-const GLOBAL_SEARCH_SOURCE_BADGE = { blackbook: 'stat-red', known_person: 'stat-blue', system_account: 'stat-green' };
+// Labels/badges shared with the mobile app via shared/entity-search.ts,
+// bundled into shared.bundle.js (see index.html) - point 5 of the "think
+// like Palantir" review (parity by construction, not by discipline).
+const GLOBAL_SEARCH_SOURCE_LABEL = TalionShared.ENTITY_SEARCH_SOURCE_LABEL;
+const GLOBAL_SEARCH_SOURCE_BADGE = TalionShared.ENTITY_SEARCH_SOURCE_BADGE;
 let globalSearchTimer = null;
 
 function renderGlobalSearch() {

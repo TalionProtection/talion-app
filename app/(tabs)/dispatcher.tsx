@@ -21,6 +21,8 @@ import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
 import { authHeader } from '@/lib/auth-fetch';
 import { formatIncidentId, formatIncidentType, formatStatusFr, formatSeverityFr, formatTimeAgoFr } from '@/lib/format-utils';
+import { sortByScheduledStartDesc } from '@/shared/visits';
+import { entitySearchSourceLabel } from '@/shared/entity-search';
 
 interface TimelineEntry {
   id: string;
@@ -594,8 +596,6 @@ export default function DispatcherScreen() {
     };
   }, [visitsSearch, visitsSubtab, loadGlobalSearch]);
 
-  const GLOBAL_SEARCH_SOURCE_LABEL: Record<string, string> = { blackbook: '🕵️ Blackbook', known_person: '👥 Personne connue', system_account: '🏠 Compte système' };
-
   const filteredVisits = useMemo(() => {
     const query = visitsSearch.trim().toLowerCase();
     const filtered = !query ? visitsData : visitsData.filter((o: any) => {
@@ -605,8 +605,8 @@ export default function DispatcherScreen() {
     });
     // Most recent/soonest first — matches the console's default sort, so a
     // past visit that took place is right at the top instead of buried under
-    // older ones.
-    return [...filtered].sort((a: any, b: any) => (b.scheduledStart ?? 0) - (a.scheduledStart ?? 0));
+    // older ones. Shared with the console via shared/visits.ts.
+    return sortByScheduledStartDesc(filtered);
   }, [visitsData, visitsSearch]);
 
   const filteredPeople = useMemo(() => {
@@ -1487,7 +1487,7 @@ export default function DispatcherScreen() {
                     <View key={`${r.source}-${r.id}`} style={{ backgroundColor: '#f9fafb', borderRadius: 10, padding: 12, marginBottom: 8 }}>
                       <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                         <Text style={{ fontSize: 14, fontWeight: '700', color: '#1f2937' }}>{r.name}</Text>
-                        <Text style={{ fontSize: 11, color: '#6b7280' }}>{GLOBAL_SEARCH_SOURCE_LABEL[r.source] || r.source}</Text>
+                        <Text style={{ fontSize: 11, color: '#6b7280' }}>{entitySearchSourceLabel(r.source)}</Text>
                       </View>
                       <Text style={{ fontSize: 12, color: '#6b7280', marginTop: 2 }}>{r.detail}</Text>
                     </View>
