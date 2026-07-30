@@ -8394,20 +8394,28 @@ function clusterResidenceAddresses(ownerIds: string[]): Array<{ entries: Array<{
     }
   }
 
+  // Group into clusters first, keyed only by proximity — the representative
+  // address (whose id/label/coordinates the cluster displays) is picked
+  // afterward, deterministically, rather than "whichever raw entry happened
+  // to be seen first". Supabase's `select('*')` has no ORDER BY, so without
+  // this, the representative — and therefore the pin's public id — could
+  // silently change across a server restart, breaking any id a client had
+  // already fetched (this is what broke the rename feature).
   const clusters: Array<{ entries: Array<{ ownerId: string; addr: UserAddress }>; addr: UserAddress }> = [];
   for (const entry of raw) {
     const existing = clusters.find(c =>
       haversineDistance(c.addr.latitude!, c.addr.longitude!, entry.addr.latitude!, entry.addr.longitude!) <= RESIDENCE_MERGE_METERS
     );
-    if (existing) {
-      existing.entries.push(entry);
-      // Prefer whichever copy carries more information (an explicit occupancy
-      // status, a larger custom radius) rather than whichever was inserted first.
-      if (!existing.addr.occupancyStatus && entry.addr.occupancyStatus) existing.addr = { ...existing.addr, occupancyStatus: entry.addr.occupancyStatus };
-      if ((entry.addr.radiusMeters || 0) > (existing.addr.radiusMeters || 0)) existing.addr = { ...existing.addr, radiusMeters: entry.addr.radiusMeters };
-    } else {
-      clusters.push({ entries: [entry], addr: { ...entry.addr } });
-    }
+    if (existing) existing.entries.push(entry);
+    else clusters.push({ entries: [entry], addr: entry.addr });
+  }
+
+  for (const cluster of clusters) {
+    const sorted = cluster.entries.slice().sort((a, b) => a.addr.id.localeCompare(b.addr.id));
+    const representative = sorted[0].addr;
+    const bestOccupancy = cluster.entries.map(e => e.addr.occupancyStatus).find(Boolean) || null;
+    const bestRadius = Math.max(0, ...cluster.entries.map(e => e.addr.radiusMeters || 0)) || undefined;
+    cluster.addr = { ...representative, occupancyStatus: bestOccupancy || representative.occupancyStatus, radiusMeters: bestRadius || representative.radiusMeters };
   }
   return clusters;
 }
