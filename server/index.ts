@@ -111,7 +111,12 @@ app.use('/alerts', requireAuth);
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 
 // ─── JSON File Persistence Layer ─────────────────────────────────────────
-const dataDir = path.join(PROJECT_ROOT, 'data');
+// DATA_DIR should point at a mounted persistent disk in production — without
+// one, this directory lives on the container's ephemeral filesystem and gets
+// wiped on every deploy/restart (confirmed: this silently erased alerts,
+// location history, curfew checks, PTT messages, etc. on Render's free/
+// starter plan, which attaches no disk by default).
+const dataDir = process.env.DATA_DIR || path.join(PROJECT_ROOT, 'data');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
 const ALERTS_FILE = path.join(dataDir, 'alerts.json');
