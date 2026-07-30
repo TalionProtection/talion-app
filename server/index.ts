@@ -8334,20 +8334,24 @@ function computeAllResidences(caller?: { id: string; role: string; assignedFamil
   return result;
 }
 
-// Per-member detail for a single residence — used by the map's house-pin
-// popup (app + dispatch). Two independent masking axes apply here, same as
-// elsewhere this session: shareLocationWithFamily gates the family-facing
-// view (GET /api/family/residences), ghostMode (+ isRevealedForActiveIncident)
+// Per-member detail for a single (already-deduplicated) residence — used by
+// the map's house-pin popup (app + dispatch). `memberIds` is the union of
+// every owner clustered into this residence plus their family, not derived
+// from a single ownerId (see computeResidenceSummaries below for why).
+// Two independent masking axes apply here, same as elsewhere this session:
+// shareLocationWithFamily gates the family-facing view
+// (GET /api/family/residences), ghostMode (+ isRevealedForActiveIncident)
 // gates the dispatch-facing view (GET /dispatch/residences-detailed) — they
 // never influence each other.
-function computeResidenceMembers(ownerId: string, addr: UserAddress, forDispatch: boolean) {
-  const groupIds = [ownerId, ...getFamilyMemberIds(ownerId)];
-  return groupIds.map(memberId => {
+function computeResidenceMembersFor(memberIds: string[], primaryOwnerId: string, addr: UserAddress, forDispatch: boolean) {
+  return memberIds.map(memberId => {
     const adminUser = adminUsers.get(memberId);
     const runtimeUser = users.get(memberId);
-    const relationship = memberId === ownerId
+    const relationship = memberId === primaryOwnerId
       ? 'self'
-      : (adminUsers.get(ownerId)?.relationships?.find(r => r.userId === memberId)?.type || 'family');
+      : (adminUsers.get(primaryOwnerId)?.relationships?.find(r => r.userId === memberId)?.type
+        || adminUser?.relationships?.find(r => r.userId === primaryOwnerId)?.type
+        || 'family');
     const visible = forDispatch
       ? !(adminUser?.ghostMode && !isRevealedForActiveIncident(memberId))
       : adminUser?.shareLocationWithFamily !== false;
@@ -8364,28 +8368,59 @@ function computeResidenceMembers(ownerId: string, addr: UserAddress, forDispatch
   });
 }
 
+// Address management is per-individual (each family member keeps their own
+// copy of "Résidence principale", "Megève", etc. in userAddresses), so the
+// same physical residence shows up once per family member who registered
+// it — same label, near-identical coordinates (small rounding differences
+// between whoever geocoded it). Cluster entries within RESIDENCE_MERGE_METERS
+// of each other into a single pin instead of showing duplicates for the
+// same house.
+const RESIDENCE_MERGE_METERS = 150;
+
 function computeResidenceSummaries(ownerIds: string[], forDispatch: boolean) {
   const now = Date.now();
-  const result: Array<{
-    id: string; ownerId: string; ownerName: string; label: string; address: string;
-    latitude: number; longitude: number; radiusMeters: number; occupancyStatus: string | null;
-    members: ReturnType<typeof computeResidenceMembers>;
-  }> = [];
+  const raw: Array<{ ownerId: string; addr: UserAddress }> = [];
   for (const ownerId of ownerIds) {
-    const owner = adminUsers.get(ownerId);
-    if (!owner) continue;
+    if (!adminUsers.get(ownerId)) continue;
     for (const a of (userAddresses.get(ownerId) || [])) {
       if (a.latitude == null || a.longitude == null) continue;
       if (a.temporary && a.expiresAt && a.expiresAt <= now) continue;
-      result.push({
-        id: a.id, ownerId, ownerName: owner.name, label: a.label, address: a.address,
-        latitude: a.latitude, longitude: a.longitude, radiusMeters: a.radiusMeters || 150,
-        occupancyStatus: a.occupancyStatus || null,
-        members: computeResidenceMembers(ownerId, a, forDispatch),
-      });
+      raw.push({ ownerId, addr: a });
     }
   }
-  return result;
+
+  const clusters: Array<{ ownerIds: Set<string>; addr: UserAddress }> = [];
+  for (const entry of raw) {
+    const existing = clusters.find(c =>
+      haversineDistance(c.addr.latitude!, c.addr.longitude!, entry.addr.latitude!, entry.addr.longitude!) <= RESIDENCE_MERGE_METERS
+    );
+    if (existing) {
+      existing.ownerIds.add(entry.ownerId);
+      // Prefer whichever copy carries more information (an explicit occupancy
+      // status, a larger custom radius) rather than whichever was inserted first.
+      if (!existing.addr.occupancyStatus && entry.addr.occupancyStatus) existing.addr = { ...existing.addr, occupancyStatus: entry.addr.occupancyStatus };
+      if ((entry.addr.radiusMeters || 0) > (existing.addr.radiusMeters || 0)) existing.addr = { ...existing.addr, radiusMeters: entry.addr.radiusMeters };
+    } else {
+      clusters.push({ ownerIds: new Set([entry.ownerId]), addr: { ...entry.addr } });
+    }
+  }
+
+  return clusters.map(cluster => {
+    const memberIds = new Set<string>();
+    for (const ownerId of cluster.ownerIds) {
+      memberIds.add(ownerId);
+      for (const fid of getFamilyMemberIds(ownerId)) memberIds.add(fid);
+    }
+    const primaryOwnerId = Array.from(cluster.ownerIds).sort()[0];
+    const a = cluster.addr;
+    return {
+      id: a.id, ownerId: primaryOwnerId, ownerName: adminUsers.get(primaryOwnerId)?.name || primaryOwnerId,
+      label: a.label, address: a.address,
+      latitude: a.latitude!, longitude: a.longitude!, radiusMeters: a.radiusMeters || 150,
+      occupancyStatus: a.occupancyStatus || null,
+      members: computeResidenceMembersFor(Array.from(memberIds), primaryOwnerId, a, forDispatch),
+    };
+  });
 }
 
 // GET /api/family/residences?userId= - residences for the caller's own family
