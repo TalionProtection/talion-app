@@ -373,6 +373,10 @@
             <input type="checkbox" id="filterUsers" checked onchange="updateMapFilters()">
             <span class="filter-chip filter-users">&#x1F464; Users</span>
           </label>
+          <label class="map-filter-label">
+            <input type="checkbox" id="filterResidences" checked onchange="updateMapFilters()">
+            <span class="filter-chip filter-users">&#x1F3E0; Résidences</span>
+          </label>
         </div>
         <div class="incident-type-filters" id="incidentTypeFilters">
           <span style="font-size:11px;color:var(--text-muted);margin-right:4px;">Type:</span>
@@ -676,6 +680,7 @@
         <div class="toolbar-stats">
           <span class="stat-badge stat-blue" id="familyGroupsCount">0 famille(s)</span>
           <button class="btn btn-sm" onclick="loadFamilyGroups()">&#x21BB; Rafraîchir</button>
+          <button class="btn btn-primary btn-sm" onclick="openCheckInRequestModal()">&#x2705; Demander un check-in</button>
         </div>
       </div>
       <div class="interventions-panel">
@@ -975,6 +980,42 @@
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
         <button class="btn btn-secondary" onclick="closeAddPlaceModal()">Annuler</button>
         <button class="btn btn-primary" onclick="savePlace()">Enregistrer</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dispatch-initiated check-in request (any user, spontaneous or recurring) -->
+  <div class="modal-overlay" id="checkinRequestModal" style="display:none;">
+    <div class="modal" style="max-width:440px;">
+      <h3 class="modal-title">Demander un check-in</h3>
+      <div class="form-group">
+        <label>Utilisateur</label>
+        <select id="checkinRequestUserId" class="form-control"></select>
+      </div>
+      <div class="form-group">
+        <label>Type</label>
+        <select id="checkinRequestType" class="form-control" onchange="onCheckInRequestTypeChange()">
+          <option value="spontaneous">Maintenant (spontané)</option>
+          <option value="daily">Récurrent (quotidien)</option>
+        </select>
+      </div>
+      <div id="checkinRequestDailyFields" style="display:none;">
+        <div class="form-group">
+          <label>Heure limite quotidienne</label>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <input type="number" id="checkinRequestHour" class="form-control" min="0" max="23" value="21" style="width:80px;">
+            <span>:</span>
+            <input type="number" id="checkinRequestMinute" class="form-control" min="0" max="59" value="0" style="width:80px;">
+          </div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Délai de grâce avant escalade (minutes)</label>
+        <input type="number" id="checkinRequestGrace" class="form-control" value="30" min="5" max="180">
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+        <button class="btn btn-secondary" onclick="closeCheckInRequestModal()">Annuler</button>
+        <button class="btn btn-primary" onclick="submitCheckInRequest()">Envoyer la demande</button>
       </div>
     </div>
   </div>

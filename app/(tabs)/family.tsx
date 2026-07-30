@@ -1185,6 +1185,36 @@ export default function FamilyScreen() {
     setCheckInSaving(false);
   }, [BASE, userId, checkInTarget, checkInHour, checkInMinute, checkInGraceMinutes, fetchCheckIns]);
 
+  const createSpontaneousCheckIn = useCallback(async () => {
+    if (!checkInTarget || !userId) return;
+    setCheckInSaving(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family/checkins`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({
+          ownerId: userId,
+          targetUserId: checkInTarget.userId,
+          dueAt: Date.now() + 30000,
+          graceMinutes: 15,
+        }),
+        timeout: 10000,
+      });
+      if (res.ok) {
+        if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        setShowCreateCheckIn(false);
+        setCheckInTarget(null);
+        fetchCheckIns();
+      } else {
+        const err = await res.json();
+        Alert.alert('Erreur', err.error || 'Impossible de créer le check-in');
+      }
+    } catch (e) {
+      Alert.alert('Erreur', 'Erreur réseau');
+    }
+    setCheckInSaving(false);
+  }, [BASE, userId, checkInTarget, fetchCheckIns]);
+
   const cancelCheckIn = useCallback(async (checkIn: ScheduledCheckIn) => {
     try {
       await fetchWithTimeout(`${BASE}/api/family/checkins/${checkIn.id}`, { method: 'DELETE', headers: await authHeader(), timeout: 10000 });
@@ -2540,6 +2570,20 @@ export default function FamilyScreen() {
                 <Text style={styles.formHint}>
                   Si {checkInTarget.name} n'a pas confirmé être en sécurité avant l'heure choisie, une relance est envoyée puis, sans réponse après le délai de grâce, le dispatch est alerté.
                 </Text>
+
+                <TouchableOpacity
+                  style={[styles.createBtn, { backgroundColor: '#B45309', marginBottom: 20 }, checkInSaving && { opacity: 0.6 }]}
+                  onPress={createSpontaneousCheckIn}
+                  disabled={checkInSaving}
+                >
+                  {checkInSaving ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={styles.createBtnText}>Demander une confirmation maintenant</Text>
+                  )}
+                </TouchableOpacity>
+
+                <Text style={[styles.formLabel, { marginTop: 4 }]}>— ou programmer pour plus tard —</Text>
 
                 <Text style={styles.formLabel}>Heure limite</Text>
                 <View style={styles.timeStepperRow}>

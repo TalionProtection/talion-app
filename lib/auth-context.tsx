@@ -33,6 +33,7 @@ export interface User {
   avatar?: string;
   tags?: string[];
   ghostMode?: boolean;
+  shareLocationWithFamily?: boolean;
 }
 
 export interface AuthContextType {
@@ -93,6 +94,7 @@ async function fetchUserProfile(userId: string): Promise<User | null> {
       tags: adminUser.tags ?? [],
       avatar: adminUser.photo_url ?? undefined,
       ghostMode: adminUser.ghost_mode ?? false,
+      shareLocationWithFamily: adminUser.share_location_with_family !== false,
     };
   }
 

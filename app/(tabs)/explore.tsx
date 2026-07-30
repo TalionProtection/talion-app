@@ -1,5 +1,6 @@
-import { StyleSheet, View, Text, TouchableOpacity, TextInput, Platform, Modal, ScrollView, Alert as RNAlert } from 'react-native';
+import { StyleSheet, View, Text, TouchableOpacity, TextInput, Platform, Modal, ScrollView, Image, Alert as RNAlert } from 'react-native';
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useRouter } from 'expo-router';
 import { TalionScreen } from '@/components/talion-banner';
 import { useAuth } from '@/hooks/useAuth';
 import { useLocation } from '@/lib/location-context';
@@ -36,6 +37,28 @@ interface FamilyMemberLocation {
   latitude: number;
   longitude: number;
   lastSeen: number;
+}
+
+interface ResidenceMember {
+  userId: string;
+  name: string;
+  relationship: string;
+  photoUrl: string | null;
+  isPresent: boolean;
+  lastSeen: number | null;
+}
+
+interface Residence {
+  id: string;
+  ownerId: string;
+  ownerName: string;
+  label: string;
+  address: string;
+  latitude: number;
+  longitude: number;
+  radiusMeters: number;
+  occupancyStatus: string | null;
+  members: ResidenceMember[];
 }
 
 interface IncidentZone {
@@ -224,10 +247,12 @@ function timeAgo(timestamp: number): string {
 }
 
 // ─── Web Map Fallback ───────────────────────────────────────────────────────
-function WebMapView({ responders, incidents, familyMembers, filter, selectedIncident, onSelectIncident, userLat, userLng, gpsAccuracy }: {
+function WebMapView({ responders, incidents, familyMembers, residences, onSelectResidence, filter, selectedIncident, onSelectIncident, userLat, userLng, gpsAccuracy }: {
   responders: ResponderLocation[];
   incidents: IncidentZone[];
   familyMembers: FamilyMemberLocation[];
+  residences: Residence[];
+  onSelectResidence: (residence: Residence | null) => void;
   filter: MapFilter;
   selectedIncident: IncidentZone | null;
   onSelectIncident: (incident: IncidentZone | null) => void;
@@ -334,6 +359,23 @@ function WebMapView({ responders, incidents, familyMembers, filter, selectedInci
           );
         })}
 
+        {/* Residence markers (always shown, independent of filter) */}
+        {residences.map((res) => {
+          const pos = toMapPos(res.latitude, res.longitude);
+          return (
+            <TouchableOpacity
+              key={`residence-${res.id}`}
+              style={[webStyles.responderMarker, { top: pos.top, left: pos.left } as any]}
+              onPress={() => onSelectResidence(res)}
+            >
+              <View style={[webStyles.responderDot, { backgroundColor: '#fef3c7', borderColor: '#92400e' }]}>
+                <Text style={webStyles.responderEmoji}>🏠</Text>
+              </View>
+              <Text style={webStyles.responderLabel}>{res.label}</Text>
+            </TouchableOpacity>
+          );
+        })}
+
         {/* User location (real GPS) */}
         <View style={[webStyles.userMarker, { top: userPos.top, left: userPos.left } as any]}>
           {gpsAccuracy && (
@@ -377,6 +419,7 @@ function WebMapView({ responders, incidents, familyMembers, filter, selectedInci
 // ─── Main Component ─────────────────────────────────────────────────────────
 export default function MapScreen() {
   const { user } = useAuth();
+  const router = useRouter();
   const { location, state: locationState } = useLocation();
   const isPrivileged = user?.role === 'responder' || user?.role === 'dispatcher' || user?.role === 'admin';
   const [mapFilter, setMapFilter] = useState<MapFilter>('all');
@@ -385,6 +428,8 @@ export default function MapScreen() {
   const [incidents, setIncidents] = useState<IncidentZone[]>([]);
   const [incidentsLoaded, setIncidentsLoaded] = useState(false);
   const [familyLocations, setFamilyLocations] = useState<FamilyMemberLocation[]>([]);
+  const [residences, setResidences] = useState<Residence[]>([]);
+  const [selectedResidence, setSelectedResidence] = useState<Residence | null>(null);
   const [selectedIncident, setSelectedIncident] = useState<IncidentZone | null>(null);
   const [address, setAddress] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -630,6 +675,22 @@ export default function MapScreen() {
     const interval = setInterval(fetchFamilyLocations, 15000);
     return () => clearInterval(interval);
   }, [user?.id]);
+
+  // Fetch registered residences (house pins, always shown regardless of mapFilter)
+  useEffect(() => {
+    if (!user?.id || isPrivileged) return;
+    const fetchResidences = async () => {
+      try {
+        const res = await fetchWithTimeout(`${getApiBaseUrl()}/api/family/residences?userId=${user.id}`, { timeout: 10000, headers: await authHeader() });
+        if (res.ok) setResidences(await res.json());
+      } catch (e) {
+        // silently fail
+      }
+    };
+    fetchResidences();
+    const interval = setInterval(fetchResidences, 15000);
+    return () => clearInterval(interval);
+  }, [user?.id, isPrivileged]);
 
   // WebSocket real-time location updates
   useEffect(() => {
@@ -1183,6 +1244,24 @@ export default function MapScreen() {
                 </Callout>
               </Marker>
             ))}
+            {residences.map((res) => (
+              <Marker
+                key={`residence-${res.id}`}
+                coordinate={{ latitude: res.latitude, longitude: res.longitude }}
+                title={res.label}
+                description={res.address}
+                onPress={() => setSelectedResidence(res)}
+              >
+                <View style={styles.markerWithLabel}>
+                  <View style={[styles.responderPin, { borderColor: '#92400e', backgroundColor: '#fef3c7' }]}>
+                    <Text style={{ fontSize: 16 }}>🏠</Text>
+                  </View>
+                  <View style={[styles.markerNameBadge, { backgroundColor: '#92400e' }]}>
+                    <Text style={styles.markerNameText} numberOfLines={1}>{res.label}</Text>
+                  </View>
+                </View>
+              </Marker>
+            ))}
             {showGeofences && geofences.map((gf) => (
               <Circle
                 key={`gf-circle-${gf.id}`}
@@ -1216,6 +1295,8 @@ export default function MapScreen() {
             responders={filteredResponders}
             incidents={filteredIncidents}
             familyMembers={filteredFamily}
+            residences={residences}
+            onSelectResidence={setSelectedResidence}
             filter={mapFilter}
             selectedIncident={selectedIncident}
             onSelectIncident={setSelectedIncident}
@@ -1404,6 +1485,61 @@ export default function MapScreen() {
                     <Text style={gfStyles.deleteBtnText}>🗑️ Delete</Text>
                   </TouchableOpacity>
                 </View>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Residence Detail Modal */}
+      <Modal visible={!!selectedResidence} transparent animationType="slide">
+        <View style={gfStyles.overlay}>
+          <View style={gfStyles.card}>
+            <View style={gfStyles.header}>
+              <Text style={gfStyles.title}>🏠 {selectedResidence?.label}</Text>
+              <TouchableOpacity onPress={() => setSelectedResidence(null)}>
+                <Text style={gfStyles.closeBtn}>✕</Text>
+              </TouchableOpacity>
+            </View>
+            {selectedResidence && (
+              <>
+                <Text style={gfStyles.message}>{selectedResidence.address}</Text>
+                {selectedResidence.occupancyStatus && (
+                  <Text style={gfStyles.meta}>
+                    {selectedResidence.occupancyStatus === 'occupied' ? '🏠 Occupée' : '🚪 Inoccupée'}
+                  </Text>
+                )}
+                <ScrollView style={{ maxHeight: 320, marginTop: 8 }}>
+                  {selectedResidence.members.map((m) => (
+                    <TouchableOpacity
+                      key={m.userId}
+                      style={residenceStyles.memberRow}
+                      onPress={() => { setSelectedResidence(null); router.push('/(tabs)/family'); }}
+                    >
+                      {m.photoUrl ? (
+                        <Image
+                          source={{ uri: m.photoUrl.startsWith('/') ? `${getApiBaseUrl()}${m.photoUrl}` : m.photoUrl }}
+                          style={residenceStyles.memberPhoto}
+                        />
+                      ) : (
+                        <View style={residenceStyles.memberInitial}>
+                          <Text style={residenceStyles.memberInitialText}>{m.name.charAt(0).toUpperCase()}</Text>
+                        </View>
+                      )}
+                      <View style={{ flex: 1 }}>
+                        <Text style={residenceStyles.memberName}>{m.name}</Text>
+                        <Text style={residenceStyles.memberRelationship}>
+                          {m.relationship === 'self' ? 'Vous' : getRelationshipLabel(m.relationship)}
+                        </Text>
+                      </View>
+                      <View style={[residenceStyles.presencePill, { backgroundColor: m.isPresent ? '#dcfce7' : '#f3f4f6' }]}>
+                        <Text style={[residenceStyles.presenceText, { color: m.isPresent ? '#15803d' : '#6b7280' }]}>
+                          {m.isPresent ? '● Présent' : '○ Sorti'}
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
               </>
             )}
           </View>
@@ -1745,6 +1881,17 @@ const idStyles = StyleSheet.create({
 });
 
 // ─── Geofence Modal Styles ─────────────────────────────────────────────────────────────
+const residenceStyles = StyleSheet.create({
+  memberRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' },
+  memberPhoto: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#e5e7eb' },
+  memberInitial: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#92400e', alignItems: 'center', justifyContent: 'center' },
+  memberInitialText: { color: '#ffffff', fontSize: 16, fontWeight: '700' },
+  memberName: { fontSize: 15, fontWeight: '600', color: '#1f2937' },
+  memberRelationship: { fontSize: 12, color: '#6b7280' },
+  presencePill: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10 },
+  presenceText: { fontSize: 11, fontWeight: '700' },
+});
+
 const gfStyles = StyleSheet.create({
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
   card: { backgroundColor: '#ffffff', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, maxHeight: '70%' },

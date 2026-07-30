@@ -46,6 +46,9 @@ export default function ProfileScreen() {
   const [hasChanges, setHasChanges] = useState(false);
   const [ghostMode, setGhostMode] = useState(user?.ghostMode || false);
   const [ghostModeSaving, setGhostModeSaving] = useState(false);
+  const [shareLocation, setShareLocation] = useState(user?.shareLocationWithFamily !== false);
+  const [shareLocationSaving, setShareLocationSaving] = useState(false);
+  const [familyNames, setFamilyNames] = useState<string[]>([]);
 
   const [duressEnabled, setDuressEnabled] = useState(false);
   const [duressLoading, setDuressLoading] = useState(true);
@@ -167,6 +170,48 @@ export default function ProfileScreen() {
     }
     setGhostModeSaving(false);
   }, [user, ghostMode]);
+
+  const fetchFamilyNames = useCallback(async () => {
+    if (!user) return;
+    try {
+      const res = await fetchWithTimeout(`${getApiBaseUrl()}/api/family/members?userId=${user.id}`, { timeout: 10000 });
+      if (!res.ok) return;
+      const members = await res.json();
+      setFamilyNames((members || []).map((m: any) => m.name).filter(Boolean));
+    } catch (e) {
+      console.error('[Profile] Failed to fetch family members:', e);
+    }
+  }, [user]);
+
+  useEffect(() => {
+    fetchFamilyNames();
+  }, [fetchFamilyNames]);
+
+  const handleToggleShareLocation = useCallback(async (value: boolean) => {
+    if (!user) return;
+    const previous = shareLocation;
+    setShareLocation(value); // optimistic
+    setShareLocationSaving(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetchWithTimeout(`${getApiBaseUrl()}/api/users/${user.id}/location-sharing`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+        },
+        body: JSON.stringify({ shareLocationWithFamily: value }),
+        timeout: 10000,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } catch (e) {
+      console.error('[Profile] Failed to update location sharing:', e);
+      setShareLocation(previous); // revert on failure
+      Alert.alert('Erreur', 'Impossible de mettre à jour le partage de position. Réessayez.');
+    }
+    setShareLocationSaving(false);
+  }, [user, shareLocation]);
 
   const handlePickPhoto = async () => {
     try {
@@ -461,6 +506,25 @@ export default function ProfileScreen() {
                   <ActivityIndicator size="small" color="#1e3a5f" />
                 ) : (
                   <Switch value={ghostMode} onValueChange={handleToggleGhostMode} />
+                )}
+              </View>
+            </View>
+            <View style={[styles.fieldGroup, { marginTop: 4 }]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                <View style={{ flex: 1, marginRight: 12 }}>
+                  <Text style={styles.fieldLabel}>Partager ma position avec ma famille</Text>
+                  <Text style={styles.fieldHint}>
+                    {shareLocation
+                      ? familyNames.length > 0
+                        ? `Visible par : ${familyNames.join(', ')}`
+                        : 'Visible par les membres de votre famille.'
+                      : 'Votre position et votre statut sont masqués pour votre famille.'}
+                  </Text>
+                </View>
+                {shareLocationSaving ? (
+                  <ActivityIndicator size="small" color="#1e3a5f" />
+                ) : (
+                  <Switch value={shareLocation} onValueChange={handleToggleShareLocation} />
                 )}
               </View>
             </View>

@@ -422,6 +422,11 @@ interface AdminUser {
   relationships?: { userId: string; type: string }[]; // type: 'parent', 'child', 'spouse', 'sibling', 'cohabitant', 'other'
   passwordHash?: string; // bcrypt-hashed password for email+password auth
   ghostMode?: boolean; // hides this user from dispatch's live location view until revealed for an active incident, or the user turns it off themselves
+  // Independent of ghostMode (which is dispatch-only, see GET /api/family/members
+  // below) — controls whether this user's live position/presence is shown to
+  // their OWN family. undefined/true = shared (today's behavior, non-regressive);
+  // false = masked from family the same way a member with no known location is.
+  shareLocationWithFamily?: boolean;
   // Duress code: an opt-in alternate SOS-deactivation PIN. Entering the normal
   // PIN cancels SOS exactly as before; entering the duress PIN shows the
   // identical "SOS Désactivé" confirmation but silently raises a real alert to
@@ -700,7 +705,7 @@ interface CurfewCheck {
 // rehydration-on-boot mechanism as CurfewCheck (see scheduleCurfewCheck).
 interface ScheduledCheckIn {
   id: string;
-  ownerId: string; // who created it (self or a parent)
+  ownerId: string; // who created it (self, a parent, or dispatch/admin staff)
   targetUserId: string;
   targetUserName: string;
   dueAt: number; // epoch ms — when confirmation is due
@@ -711,6 +716,13 @@ interface ScheduledCheckIn {
   createdAt: number;
   confirmedAt?: number;
   escalatedAt?: number;
+  // 'daily' check-ins reschedule themselves for the same wall-clock time the
+  // next day once a cycle completes (confirmed or escalated), same pattern as
+  // CurfewCheck.recurrence — hour/minute are required whenever recurrence is
+  // 'daily' since dueAt alone doesn't say how to compute the next occurrence.
+  recurrence?: 'once' | 'daily';
+  hour?: number;
+  minute?: number;
 }
 
 // ─── Patrol Report types ──────────────────────────────────────────────
@@ -1975,6 +1987,23 @@ function scheduleCheckIn(checkIn: ScheduledCheckIn) {
   checkInTimers.set(checkIn.id, setTimeout(() => handler(checkIn.id), delay));
 }
 
+// Called once a 'daily' check-in's cycle completes (confirmed or escalated) to
+// reset it for the next occurrence, same wall-clock time tomorrow — mirrors
+// CurfewCheck's always-recurring behavior, but here confirmation state must be
+// explicitly reset too since (unlike CurfewCheck) each cycle carries a status.
+function rescheduleIfRecurring(checkIn: ScheduledCheckIn) {
+  if (checkIn.recurrence !== 'daily' || checkIn.hour == null || checkIn.minute == null) return;
+  checkIn.dueAt = computeNextOccurrence(checkIn.hour, checkIn.minute);
+  checkIn.status = 'pending';
+  checkIn.stage = 'due';
+  checkIn.nextFireAt = checkIn.dueAt;
+  checkIn.confirmedAt = undefined;
+  checkIn.escalatedAt = undefined;
+  scheduledCheckIns.set(checkIn.id, checkIn);
+  persistCheckIns();
+  scheduleCheckIn(checkIn);
+}
+
 async function fireCheckInDue(id: string) {
   const checkIn = scheduledCheckIns.get(id);
   if (!checkIn || checkIn.status !== 'pending') return;
@@ -2029,6 +2058,7 @@ async function fireCheckInEscalation(id: string) {
   addAuditEntry('incident', 'Check-in manqué', checkIn.ownerId, `Check-in ${checkIn.id}: ${checkIn.targetUserName}`);
   broadcastMessage({ type: 'newAlert', data: alert });
   sendPushToDispatchersAndResponders(alert, checkIn.targetUserName).catch(() => {});
+  rescheduleIfRecurring(checkIn);
 }
 
 // Location update handler
@@ -3248,6 +3278,7 @@ app.get('/api/family/locations', (req, res) => {
       const adminUser = adminUsers.get(fid);
       const rel = adminUsers.get(userId)?.relationships?.find(r => r.userId === fid);
       if (!u || !u.location) return null;
+      if (adminUser?.shareLocationWithFamily === false) return null;
       return {
         userId: fid,
         userName: adminUser?.name || fid,
@@ -3276,17 +3307,21 @@ app.get('/api/family/members', (req, res) => {
       const runtimeUser = users.get(r.userId);
       // Family always sees the live automatic status regardless of Ghost mode
       // — Ghost only hides a user from dispatch's live map, never from family.
-      const presence = computeEffectivePresence(r.userId, false);
+      // shareLocationWithFamily is the separate, family-facing consent switch:
+      // when explicitly off, mask location/presence the same way an unknown
+      // location renders today (member still listed, just no position/status).
+      const sharesLocation = relUser?.shareLocationWithFamily !== false;
+      const presence = sharesLocation ? computeEffectivePresence(r.userId, false) : null;
       return {
         userId: r.userId,
         name: relUser?.name || 'Unknown',
         relationship: r.type,
         isSharing,
-        lastSeen: runtimeUser?.lastSeen || null,
-        location: runtimeUser?.location || null,
-        presenceStatus: presence.status,
-        presenceLabel: presence.matchedLabel,
-        presenceSetAt: presence.setAt,
+        lastSeen: sharesLocation ? (runtimeUser?.lastSeen || null) : null,
+        location: sharesLocation ? (runtimeUser?.location || null) : null,
+        presenceStatus: presence?.status || 'unknown',
+        presenceLabel: presence?.matchedLabel,
+        presenceSetAt: presence?.setAt,
       };
     });
   res.json(members);
@@ -3529,13 +3564,25 @@ app.get('/api/family/checkins', requireAuth, (req, res) => {
 
 // POST /api/family/checkins - create a scheduled check-in (dead-man's switch)
 app.post('/api/family/checkins', requireAuth, (req, res) => {
-  const { ownerId, targetUserId, dueAt, graceMinutes } = req.body;
-  if (!ownerId || !targetUserId || !dueAt) {
-    return res.status(400).json({ error: 'ownerId, targetUserId, and dueAt required' });
+  // ownerId always comes from the authenticated caller, never the request body
+  // — this both closes a pre-existing gap (any caller could previously name
+  // an arbitrary ownerId as long as targetUserId was in THAT owner's family)
+  // and lets dispatch/admin staff request a check-in from any user without
+  // needing to know or spoof a family relationship.
+  const caller = req.supabaseUser!;
+  const ownerId = caller.id;
+  const { targetUserId, dueAt, graceMinutes, recurrence, hour, minute } = req.body;
+  if (!targetUserId || !dueAt) {
+    return res.status(400).json({ error: 'targetUserId and dueAt required' });
   }
+  const isDispatchStaff = caller.role === 'dispatcher' || caller.role === 'admin';
   const familyIds = getFamilyMemberIds(ownerId);
-  if (!familyIds.includes(targetUserId)) {
+  if (!isDispatchStaff && !familyIds.includes(targetUserId)) {
     return res.status(403).json({ error: 'Target user is not a family member' });
+  }
+  const isRecurring = recurrence === 'daily';
+  if (isRecurring && (hour == null || minute == null)) {
+    return res.status(400).json({ error: 'hour and minute required for a recurring check-in' });
   }
   const targetAdmin = adminUsers.get(targetUserId);
   const checkIn: ScheduledCheckIn = {
@@ -3549,6 +3596,8 @@ app.post('/api/family/checkins', requireAuth, (req, res) => {
     nextFireAt: Number(dueAt),
     stage: 'due',
     createdAt: Date.now(),
+    recurrence: isRecurring ? 'daily' : 'once',
+    ...(isRecurring ? { hour: Number(hour), minute: Number(minute) } : {}),
   };
   scheduledCheckIns.set(checkIn.id, checkIn);
   persistCheckIns();
@@ -3569,6 +3618,7 @@ app.post('/api/family/checkins/:id/confirm', requireAuth, (req, res) => {
   checkIn.confirmedAt = Date.now();
   scheduledCheckIns.set(checkIn.id, checkIn);
   persistCheckIns();
+  rescheduleIfRecurring(checkIn);
   res.json(checkIn);
 });
 
@@ -4967,6 +5017,24 @@ app.put('/api/users/:id/ghost-mode', requireAuth, (req, res) => {
   }
 
   res.json({ success: true, ghostMode: user.ghostMode });
+});
+
+// PUT /api/users/:id/location-sharing - self only. Independent of Ghost mode
+// (which only ever affects dispatch's live map). This one controls whether the
+// user's live position/presence is shown to their own family in
+// GET /api/family/members.
+app.put('/api/users/:id/location-sharing', requireAuth, (req, res) => {
+  const targetId = req.params.id as string;
+  const caller = req.supabaseUser!;
+  if (caller.id !== targetId) {
+    return res.status(403).json({ error: 'Not authorized to change this user\'s location sharing' });
+  }
+  const user = adminUsers.get(targetId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  user.shareLocationWithFamily = Boolean(req.body.shareLocationWithFamily);
+  adminUsers.set(user.id, user);
+  saveAdminUserToSupabase(user).catch(e => console.error('[LocationSharing] Supabase save error:', e));
+  res.json({ success: true, shareLocationWithFamily: user.shareLocationWithFamily });
 });
 
 // GET /api/users/:id/duress-settings — self only, never exposes the hashes,
@@ -6502,6 +6570,7 @@ async function loadAdminUsersFromSupabase(): Promise<void> {
           comments: u.comments || '', photoUrl: u.photo_url || '',
           relationships: u.relationships || [], passwordHash: u.password_hash || undefined,
           ghostMode: u.ghost_mode || false,
+          shareLocationWithFamily: u.share_location_with_family !== false,
           duressCodeEnabled: u.duress_code_enabled || false,
           normalPinHash: u.normal_pin_hash || undefined,
           duressPinHash: u.duress_pin_hash || undefined,
@@ -6524,6 +6593,7 @@ async function saveAdminUserToSupabase(user: AdminUser): Promise<void> {
       comments: user.comments || '', photo_url: user.photoUrl || '',
       relationships: user.relationships || [], password_hash: user.passwordHash || null,
       ghost_mode: user.ghostMode || false,
+      share_location_with_family: user.shareLocationWithFamily !== false,
       duress_code_enabled: user.duressCodeEnabled || false,
       normal_pin_hash: user.normalPinHash || null,
       duress_pin_hash: user.duressPinHash || null,
@@ -8263,6 +8333,84 @@ function computeAllResidences(caller?: { id: string; role: string; assignedFamil
   }
   return result;
 }
+
+// Per-member detail for a single residence — used by the map's house-pin
+// popup (app + dispatch). Two independent masking axes apply here, same as
+// elsewhere this session: shareLocationWithFamily gates the family-facing
+// view (GET /api/family/residences), ghostMode (+ isRevealedForActiveIncident)
+// gates the dispatch-facing view (GET /dispatch/residences-detailed) — they
+// never influence each other.
+function computeResidenceMembers(ownerId: string, addr: UserAddress, forDispatch: boolean) {
+  const groupIds = [ownerId, ...getFamilyMemberIds(ownerId)];
+  return groupIds.map(memberId => {
+    const adminUser = adminUsers.get(memberId);
+    const runtimeUser = users.get(memberId);
+    const relationship = memberId === ownerId
+      ? 'self'
+      : (adminUsers.get(ownerId)?.relationships?.find(r => r.userId === memberId)?.type || 'family');
+    const visible = forDispatch
+      ? !(adminUser?.ghostMode && !isRevealedForActiveIncident(memberId))
+      : adminUser?.shareLocationWithFamily !== false;
+    const isPresent = visible && !!runtimeUser?.location && addr.latitude != null && addr.longitude != null &&
+      haversineDistance(runtimeUser.location.latitude, runtimeUser.location.longitude, addr.latitude, addr.longitude) <= (addr.radiusMeters || 150);
+    return {
+      userId: memberId,
+      name: adminUser?.name || memberId,
+      relationship,
+      photoUrl: adminUser?.photoUrl || null,
+      isPresent: visible ? isPresent : false,
+      lastSeen: visible ? (runtimeUser?.lastSeen || null) : null,
+    };
+  });
+}
+
+function computeResidenceSummaries(ownerIds: string[], forDispatch: boolean) {
+  const now = Date.now();
+  const result: Array<{
+    id: string; ownerId: string; ownerName: string; label: string; address: string;
+    latitude: number; longitude: number; radiusMeters: number; occupancyStatus: string | null;
+    members: ReturnType<typeof computeResidenceMembers>;
+  }> = [];
+  for (const ownerId of ownerIds) {
+    const owner = adminUsers.get(ownerId);
+    if (!owner) continue;
+    for (const a of (userAddresses.get(ownerId) || [])) {
+      if (a.latitude == null || a.longitude == null) continue;
+      if (a.temporary && a.expiresAt && a.expiresAt <= now) continue;
+      result.push({
+        id: a.id, ownerId, ownerName: owner.name, label: a.label, address: a.address,
+        latitude: a.latitude, longitude: a.longitude, radiusMeters: a.radiusMeters || 150,
+        occupancyStatus: a.occupancyStatus || null,
+        members: computeResidenceMembers(ownerId, a, forDispatch),
+      });
+    }
+  }
+  return result;
+}
+
+// GET /api/family/residences?userId= - residences for the caller's own family
+// group (self + every family member's own address entries), with per-member
+// presence AT THAT ADDRESS — the house-pin detail view on the app's map tab.
+app.get('/api/family/residences', requireAuth, (req, res) => {
+  const userId = req.query.userId as string;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  const caller = req.supabaseUser!;
+  const isSelf = caller.id === userId;
+  const isFamilyMember = getFamilyMemberIds(userId).includes(caller.id);
+  if (!isSelf && !isFamilyMember) return res.status(403).json({ error: 'Not authorized' });
+  const ownerIds = Array.from(new Set([userId, ...getFamilyMemberIds(userId)]));
+  res.json(computeResidenceSummaries(ownerIds, false));
+});
+
+// GET /dispatch/residences-detailed - every residence across every family
+// unit the caller can access, with composition + dispatch-facing presence —
+// the house-pin detail view on the dispatch console's map tab.
+app.get('/dispatch/residences-detailed', (req, res) => {
+  const caller = req.supabaseUser!;
+  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  const ownerIds = Array.from(userAddresses.keys()).filter(ownerId => canAccessFamily(callerAccess, ownerId));
+  res.json(computeResidenceSummaries(ownerIds, true));
+});
 
 // GET /api/all-residences — same data as /dispatch/all-residences, but reachable
 // by responders too (the /dispatch prefix requires dispatcher+, which blocks them) —

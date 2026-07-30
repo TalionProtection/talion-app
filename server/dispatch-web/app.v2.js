@@ -2171,6 +2171,70 @@ function populateBlackbookLinkedUserSelect(selectedId) {
   select.value = selectedId || '';
 }
 
+// ─── Dispatch-initiated check-in request (any user, spontaneous or recurring) ──
+async function openCheckInRequestModal() {
+  await ensureAllUsersLoaded();
+  const select = document.getElementById('checkinRequestUserId');
+  select.innerHTML = (allUsersCache || [])
+    .filter(u => u.role === 'user')
+    .map(u => `<option value="${u.id}">${escapeHtml(u.name)}</option>`).join('');
+  document.getElementById('checkinRequestType').value = 'spontaneous';
+  document.getElementById('checkinRequestGrace').value = '30';
+  onCheckInRequestTypeChange();
+  document.getElementById('checkinRequestModal').style.display = 'flex';
+}
+
+function closeCheckInRequestModal() {
+  document.getElementById('checkinRequestModal').style.display = 'none';
+}
+
+function onCheckInRequestTypeChange() {
+  const isDaily = document.getElementById('checkinRequestType').value === 'daily';
+  document.getElementById('checkinRequestDailyFields').style.display = isDaily ? 'block' : 'none';
+}
+
+async function submitCheckInRequest() {
+  const targetUserId = document.getElementById('checkinRequestUserId').value;
+  if (!targetUserId) { alert('Sélectionnez un utilisateur'); return; }
+  const type = document.getElementById('checkinRequestType').value;
+  const grace = parseInt(document.getElementById('checkinRequestGrace').value, 10) || 30;
+  const body = { targetUserId, graceMinutes: grace };
+
+  if (type === 'daily') {
+    const hour = parseInt(document.getElementById('checkinRequestHour').value, 10);
+    const minute = parseInt(document.getElementById('checkinRequestMinute').value, 10);
+    if (isNaN(hour) || hour < 0 || hour > 23 || isNaN(minute) || minute < 0 || minute > 59) {
+      alert('Heure invalide');
+      return;
+    }
+    const due = new Date();
+    due.setHours(hour, minute, 0, 0);
+    if (due.getTime() <= Date.now()) due.setDate(due.getDate() + 1);
+    body.dueAt = due.getTime();
+    body.recurrence = 'daily';
+    body.hour = hour;
+    body.minute = minute;
+  } else {
+    body.dueAt = Date.now() + 30000;
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/api/family/checkins`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(err.error || 'Impossible de créer le check-in');
+      return;
+    }
+    closeCheckInRequestModal();
+  } catch (e) {
+    alert('Erreur réseau');
+  }
+}
+
 async function populateSightingResidenceSelect() {
   if (!allResidencesCache) {
     try {
@@ -3279,7 +3343,8 @@ let mapIncidentMarkers = [];
 let mapResponderMarkers = [];
 let mapUserMarkers = [];
 let mapUsers = [];
-let mapFilters = { incidents: true, responders: true, users: true };
+let mapResidenceMarkers = [];
+let mapFilters = { incidents: true, responders: true, users: true, residences: true };
 let mapIncidentTypeFilter = 'all';
 
 function filterMapByType(type) {
@@ -3399,10 +3464,20 @@ async function refreshMapData() {
     window._cachedMapUsers = mapUsers;
     window._cachedMapResponders = respData;
 
+    // Fetch residences (house pins + family composition/presence)
+    let residenceData = [];
+    try {
+      const resRes = await fetch(`${API_BASE}/dispatch/residences-detailed`);
+      residenceData = await resRes.json();
+    } catch (e) {
+      residenceData = [];
+    }
+
     // Update markers
     updateIncidentMarkers(incData);
     updateResponderMarkers(respData);
     updateUserMarkers(mapUsers);
+    updateResidenceMarkers(residenceData);
   } catch (err) {
     console.error('[Map] Failed to refresh data:', err);
   }
@@ -3669,6 +3744,48 @@ function updateUserMarkers(userData) {
   updateLiveUsersCounter();
 }
 
+function updateResidenceMarkers(residenceData) {
+  mapResidenceMarkers.forEach(m => dispatchMap.removeLayer(m));
+  mapResidenceMarkers = [];
+
+  if (!mapFilters.residences) return;
+
+  residenceData.forEach(res => {
+    const marker = L.marker([res.latitude, res.longitude], {
+      icon: createCircleIcon('#92400e', 22, '🏠', res.label),
+      zIndexOffset: 50,
+    });
+
+    const occupancyHtml = res.occupancyStatus
+      ? `<div style="font-size:11px;color:#94a3b8;margin-bottom:4px;">${res.occupancyStatus === 'occupied' ? '🏠 Occupée' : '🚪 Inoccupée'}</div>`
+      : '';
+    const membersHtml = (res.members || []).map(m => `
+      <div style="display:flex;align-items:center;gap:6px;padding:4px 0;border-top:1px solid rgba(148,163,184,0.2);cursor:pointer;"
+           onclick="openUserProfile('${m.userId}', '${escapeHtml(m.name).replace(/'/g, "\\'")}')">
+        ${m.photoUrl
+          ? `<img src="${m.photoUrl.startsWith('/') ? API_BASE + m.photoUrl : m.photoUrl}" style="width:28px;height:28px;border-radius:50%;object-fit:cover;">`
+          : `<div style="width:28px;height:28px;border-radius:50%;background:#92400e;color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;">${escapeHtml((m.name || '?').charAt(0).toUpperCase())}</div>`}
+        <div style="flex:1;">
+          <div style="font-size:12px;font-weight:600;color:#e2e8f0;">${escapeHtml(m.name)}</div>
+          <div style="font-size:10px;color:#94a3b8;">${m.relationship === 'self' ? 'Titulaire' : escapeHtml(m.relationship)}</div>
+        </div>
+        <div style="font-size:10px;font-weight:700;color:${m.isPresent ? '#4ade80' : '#6b7280'};">${m.isPresent ? '● Présent' : '○ Sorti'}</div>
+      </div>`).join('');
+
+    const popupHtml = `
+      <div style="min-width:220px;">
+        <div style="font-size:13px;font-weight:700;color:#f1f5f9;margin-bottom:2px;">🏠 ${escapeHtml(res.label)}</div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:4px;">${escapeHtml(res.address || '')}</div>
+        ${occupancyHtml}
+        ${membersHtml}
+      </div>`;
+
+    marker.bindPopup(popupHtml, { maxWidth: 280 });
+    marker.addTo(dispatchMap);
+    mapResidenceMarkers.push(marker);
+  });
+}
+
 function updateLiveUsersCounter() {
   const liveCount = (mapUsers || []).filter(u => u.location).length;
   const countEl = document.getElementById('liveUsersCount');
@@ -3687,6 +3804,7 @@ function updateMapFilters() {
   mapFilters.incidents = document.getElementById('filterIncidents')?.checked ?? true;
   mapFilters.responders = document.getElementById('filterResponders')?.checked ?? true;
   mapFilters.users = document.getElementById('filterUsers')?.checked ?? true;
+  mapFilters.residences = document.getElementById('filterResidences')?.checked ?? true;
   if (dispatchMap) refreshMapData();
 }
 
