@@ -8377,7 +8377,12 @@ function computeResidenceMembersFor(memberIds: string[], primaryOwnerId: string,
 // same house.
 const RESIDENCE_MERGE_METERS = 150;
 
-function computeResidenceSummaries(ownerIds: string[], forDispatch: boolean) {
+// Shared clustering step — kept separate from computeResidenceSummaries so the
+// rename endpoint below can locate every underlying address row (across every
+// owner) that a given pin represents, not just the merged/display view of it.
+// `entries` hold direct references into the userAddresses arrays, so mutating
+// `entry.addr` here is visible everywhere else that reads userAddresses.
+function clusterResidenceAddresses(ownerIds: string[]): Array<{ entries: Array<{ ownerId: string; addr: UserAddress }>; addr: UserAddress }> {
   const now = Date.now();
   const raw: Array<{ ownerId: string; addr: UserAddress }> = [];
   for (const ownerId of ownerIds) {
@@ -8389,29 +8394,33 @@ function computeResidenceSummaries(ownerIds: string[], forDispatch: boolean) {
     }
   }
 
-  const clusters: Array<{ ownerIds: Set<string>; addr: UserAddress }> = [];
+  const clusters: Array<{ entries: Array<{ ownerId: string; addr: UserAddress }>; addr: UserAddress }> = [];
   for (const entry of raw) {
     const existing = clusters.find(c =>
       haversineDistance(c.addr.latitude!, c.addr.longitude!, entry.addr.latitude!, entry.addr.longitude!) <= RESIDENCE_MERGE_METERS
     );
     if (existing) {
-      existing.ownerIds.add(entry.ownerId);
+      existing.entries.push(entry);
       // Prefer whichever copy carries more information (an explicit occupancy
       // status, a larger custom radius) rather than whichever was inserted first.
       if (!existing.addr.occupancyStatus && entry.addr.occupancyStatus) existing.addr = { ...existing.addr, occupancyStatus: entry.addr.occupancyStatus };
       if ((entry.addr.radiusMeters || 0) > (existing.addr.radiusMeters || 0)) existing.addr = { ...existing.addr, radiusMeters: entry.addr.radiusMeters };
     } else {
-      clusters.push({ ownerIds: new Set([entry.ownerId]), addr: { ...entry.addr } });
+      clusters.push({ entries: [entry], addr: { ...entry.addr } });
     }
   }
+  return clusters;
+}
 
-  return clusters.map(cluster => {
+function computeResidenceSummaries(ownerIds: string[], forDispatch: boolean) {
+  return clusterResidenceAddresses(ownerIds).map(cluster => {
+    const clusterOwnerIds = Array.from(new Set(cluster.entries.map(e => e.ownerId)));
     const memberIds = new Set<string>();
-    for (const ownerId of cluster.ownerIds) {
+    for (const ownerId of clusterOwnerIds) {
       memberIds.add(ownerId);
       for (const fid of getFamilyMemberIds(ownerId)) memberIds.add(fid);
     }
-    const primaryOwnerId = Array.from(cluster.ownerIds).sort()[0];
+    const primaryOwnerId = clusterOwnerIds.sort()[0];
     const a = cluster.addr;
     return {
       id: a.id, ownerId: primaryOwnerId, ownerName: adminUsers.get(primaryOwnerId)?.name || primaryOwnerId,
@@ -8422,6 +8431,37 @@ function computeResidenceSummaries(ownerIds: string[], forDispatch: boolean) {
     };
   });
 }
+
+// PATCH /api/family/residences/:id/label - rename a residence pin. The same
+// physical address is duplicated across every family member's own address
+// list (see clusterResidenceAddresses above), so this updates the label on
+// every underlying copy — otherwise the pin would read differently depending
+// on whose account happened to be picked as the cluster's representative.
+// Self, family members, and dispatch/admin staff (who already edit these
+// labels through the residence/place management UI) may rename.
+app.patch('/api/family/residences/:id/label', requireAuth, async (req, res) => {
+  const { userId, label } = req.body;
+  if (!userId || !label || !String(label).trim()) return res.status(400).json({ error: 'userId and label required' });
+  const caller = req.supabaseUser!;
+  const isSelf = caller.id === userId;
+  const isFamilyMember = getFamilyMemberIds(userId).includes(caller.id);
+  const isDispatchStaff = caller.role === 'dispatcher' || caller.role === 'admin';
+  if (!isSelf && !isFamilyMember && !isDispatchStaff) return res.status(403).json({ error: 'Not authorized' });
+
+  const ownerIds = Array.from(new Set([userId, ...getFamilyMemberIds(userId)]));
+  const cluster = clusterResidenceAddresses(ownerIds).find(c => c.addr.id === req.params.id);
+  if (!cluster) return res.status(404).json({ error: 'Residence not found' });
+
+  const trimmed = String(label).trim();
+  const now = Date.now();
+  for (const { addr } of cluster.entries) {
+    addr.label = trimmed;
+    addr.updatedAt = now;
+    const { error } = await supabaseAdmin.from('user_addresses').update({ label: trimmed, updated_at: now }).eq('id', addr.id);
+    if (error) console.error('[Supabase] Failed to persist residence label rename:', error.message);
+  }
+  res.json({ success: true, label: trimmed, updatedCount: cluster.entries.length });
+});
 
 // GET /api/family/residences?userId= - residences for the caller's own family
 // group (self + every family member's own address entries), with per-member

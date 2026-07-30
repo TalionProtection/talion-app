@@ -3774,7 +3774,10 @@ function updateResidenceMarkers(residenceData) {
 
     const popupHtml = `
       <div style="min-width:220px;">
-        <div style="font-size:13px;font-weight:700;color:#f1f5f9;margin-bottom:2px;">🏠 ${escapeHtml(res.label)}</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;">
+          <div style="font-size:13px;font-weight:700;color:#f1f5f9;">🏠 ${escapeHtml(res.label)}</div>
+          <span style="cursor:pointer;font-size:12px;" title="Renommer" onclick="renameResidence('${res.id}','${res.ownerId}')">✏️</span>
+        </div>
         <div style="font-size:11px;color:#94a3b8;margin-bottom:4px;">${escapeHtml(res.address || '')}</div>
         ${occupancyHtml}
         ${membersHtml}
@@ -3784,6 +3787,22 @@ function updateResidenceMarkers(residenceData) {
     marker.addTo(dispatchMap);
     mapResidenceMarkers.push(marker);
   });
+}
+
+async function renameResidence(id, ownerId) {
+  const newLabel = window.prompt('Nouveau nom de la résidence :');
+  if (!newLabel || !newLabel.trim()) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/family/residences/${id}/label`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: ownerId, label: newLabel.trim() }),
+    });
+    if (!res.ok) { alert('Impossible de renommer cette résidence'); return; }
+    refreshMapData();
+  } catch (e) {
+    alert('Erreur réseau');
+  }
 }
 
 function updateLiveUsersCounter() {

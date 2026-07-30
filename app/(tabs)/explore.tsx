@@ -1,4 +1,4 @@
-import { StyleSheet, View, Text, TouchableOpacity, TextInput, Platform, Modal, ScrollView, Image, Alert as RNAlert } from 'react-native';
+import { StyleSheet, View, Text, TouchableOpacity, TextInput, Platform, Modal, ScrollView, Image, ActivityIndicator, Alert as RNAlert } from 'react-native';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'expo-router';
 import { TalionScreen } from '@/components/talion-banner';
@@ -430,6 +430,9 @@ export default function MapScreen() {
   const [familyLocations, setFamilyLocations] = useState<FamilyMemberLocation[]>([]);
   const [residences, setResidences] = useState<Residence[]>([]);
   const [selectedResidence, setSelectedResidence] = useState<Residence | null>(null);
+  const [editingResidenceLabel, setEditingResidenceLabel] = useState(false);
+  const [residenceLabelInput, setResidenceLabelInput] = useState('');
+  const [savingResidenceLabel, setSavingResidenceLabel] = useState(false);
   const [selectedIncident, setSelectedIncident] = useState<IncidentZone | null>(null);
   const [address, setAddress] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -691,6 +694,31 @@ export default function MapScreen() {
     const interval = setInterval(fetchResidences, 15000);
     return () => clearInterval(interval);
   }, [user?.id, isPrivileged]);
+
+  const saveResidenceLabel = useCallback(async () => {
+    if (!user?.id || !selectedResidence || !residenceLabelInput.trim()) return;
+    setSavingResidenceLabel(true);
+    try {
+      const res = await fetchWithTimeout(`${getApiBaseUrl()}/api/family/residences/${selectedResidence.id}/label`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({ userId: user.id, label: residenceLabelInput.trim() }),
+        timeout: 10000,
+      });
+      if (res.ok) {
+        const newLabel = residenceLabelInput.trim();
+        setResidences((prev) => prev.map((r) => (r.id === selectedResidence.id ? { ...r, label: newLabel } : r)));
+        setSelectedResidence((prev) => (prev ? { ...prev, label: newLabel } : prev));
+        setEditingResidenceLabel(false);
+        if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      } else {
+        RNAlert.alert('Erreur', 'Impossible de renommer cette résidence');
+      }
+    } catch (e) {
+      RNAlert.alert('Erreur', 'Erreur réseau');
+    }
+    setSavingResidenceLabel(false);
+  }, [user?.id, selectedResidence, residenceLabelInput]);
 
   // WebSocket real-time location updates
   useEffect(() => {
@@ -1492,14 +1520,47 @@ export default function MapScreen() {
       </Modal>
 
       {/* Residence Detail Modal */}
-      <Modal visible={!!selectedResidence} transparent animationType="slide">
+      <Modal
+        visible={!!selectedResidence}
+        transparent
+        animationType="slide"
+        onRequestClose={() => { setSelectedResidence(null); setEditingResidenceLabel(false); }}
+      >
         <View style={gfStyles.overlay}>
           <View style={gfStyles.card}>
             <View style={gfStyles.header}>
-              <Text style={gfStyles.title}>🏠 {selectedResidence?.label}</Text>
-              <TouchableOpacity onPress={() => setSelectedResidence(null)}>
-                <Text style={gfStyles.closeBtn}>✕</Text>
-              </TouchableOpacity>
+              {editingResidenceLabel ? (
+                <TextInput
+                  style={residenceStyles.labelInput}
+                  value={residenceLabelInput}
+                  onChangeText={setResidenceLabelInput}
+                  placeholder="Nom de la résidence"
+                  placeholderTextColor="#9ca3af"
+                  autoFocus
+                  returnKeyType="done"
+                  onSubmitEditing={saveResidenceLabel}
+                />
+              ) : (
+                <Text style={gfStyles.title}>🏠 {selectedResidence?.label}</Text>
+              )}
+              <View style={{ flexDirection: 'row', gap: 14, alignItems: 'center' }}>
+                {editingResidenceLabel ? (
+                  savingResidenceLabel ? (
+                    <ActivityIndicator size="small" color="#1e3a5f" />
+                  ) : (
+                    <TouchableOpacity onPress={saveResidenceLabel}>
+                      <Text style={residenceStyles.saveLabelBtn}>✓</Text>
+                    </TouchableOpacity>
+                  )
+                ) : (
+                  <TouchableOpacity onPress={() => { setResidenceLabelInput(selectedResidence?.label || ''); setEditingResidenceLabel(true); }}>
+                    <Text style={{ fontSize: 16 }}>✏️</Text>
+                  </TouchableOpacity>
+                )}
+                <TouchableOpacity onPress={() => { setSelectedResidence(null); setEditingResidenceLabel(false); }}>
+                  <Text style={gfStyles.closeBtn}>✕</Text>
+                </TouchableOpacity>
+              </View>
             </View>
             {selectedResidence && (
               <>
@@ -1882,6 +1943,8 @@ const idStyles = StyleSheet.create({
 
 // ─── Geofence Modal Styles ─────────────────────────────────────────────────────────────
 const residenceStyles = StyleSheet.create({
+  labelInput: { flex: 1, fontSize: 17, fontWeight: '700', color: '#1f2937', borderBottomWidth: 1, borderBottomColor: '#92400e', paddingVertical: 2, marginRight: 10 },
+  saveLabelBtn: { fontSize: 20, fontWeight: '700', color: '#15803d' },
   memberRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' },
   memberPhoto: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#e5e7eb' },
   memberInitial: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#92400e', alignItems: 'center', justifyContent: 'center' },
