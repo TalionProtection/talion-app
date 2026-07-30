@@ -574,6 +574,7 @@ interface AdminIncident {
   origin?: 'dispatch' | 'mobile';
   archived?: boolean;
   archivedAt?: number;
+  isDuress?: boolean;
 }
 
 interface AuditEntry {
@@ -2963,21 +2964,30 @@ async function sendPushToDispatchersAndResponders(alert: Alert, senderName: stri
   }
   
   console.log(`[Push] Sending SOS push to ${targetTokens.length} dispatcher/responder devices`);
-  
+
+  // Duress gets its own, unmistakably different push content and channel —
+  // a dispatcher glancing at a lock-screen notification needs to tell this
+  // apart from an ordinary SOS at a glance, not just once they open the app.
+  const isDuress = alert.isDuress === true;
+
   // Build Expo push messages
   const messages = targetTokens.map((token) => ({
     to: token,
     sound: 'default',
-    title: `\u{1F6A8} SOS ALERT - ${alert.type.toUpperCase()}`,
-    body: `${senderName} triggered an emergency alert. ${alert.location?.address || 'Location shared'}`,
+    title: isDuress
+      ? `\u{1F534} CODE DE CONTRAINTE — ${senderName}`
+      : `\u{1F6A8} SOS ALERT - ${alert.type.toUpperCase()}`,
+    body: isDuress
+      ? `SOS "annulé" sous la contrainte — menace réelle probable. ${alert.location?.address || 'Position partagée'}`
+      : `${senderName} triggered an emergency alert. ${alert.location?.address || 'Location shared'}`,
     data: {
-      type: 'sos',
+      type: isDuress ? 'duress' : 'sos',
       alertId: alert.id,
       severity: alert.severity,
       alertType: alert.type,
     },
     priority: 'high',
-    channelId: 'sos-alerts',
+    channelId: isDuress ? 'duress-alerts' : 'sos-alerts',
   }));
   
   // Send via Expo Push API (batch of up to 100)
@@ -4063,6 +4073,7 @@ app.get('/admin/incidents', (req, res) => {
     origin: a.origin || (a.reporterId ? 'mobile' : 'dispatch'),
     archived: a.archived || false,
     archivedAt: a.archivedAt,
+    isDuress: a.isDuress || false,
   }));
   res.json(incidents);
 });

@@ -194,6 +194,7 @@ function handleWsMessage(msg) {
         origin: alert.origin || 'dispatch',
         archived: alert.archived || false,
         archivedAt: alert.archivedAt,
+        isDuress: alert.isDuress || false,
       };
       if (existing >= 0) { incidents[existing] = formatted; } else { incidents.unshift(formatted); }
       showToast(`🚨 New Incident: ${alert.type.toUpperCase()} - ${alert.location?.address || 'Unknown'}`, 'error');
@@ -205,7 +206,11 @@ function handleWsMessage(msg) {
       );
       // Play alert sound based on type and severity
       showCriticalAlertBanner({ ...formatted, createdBy: alert.createdBy });
+      if (formatted.isDuress) {
+        if (typeof getAudioContext === 'function') { const ctx = getAudioContext(); if (ctx && ctx.state === 'suspended') ctx.resume().then(playDuressAlertSound); else playDuressAlertSound(); } else { playDuressAlertSound(); }
+      } else {
         if (typeof getAudioContext === 'function') { const ctx = getAudioContext(); if (ctx && ctx.state === 'suspended') ctx.resume().then(() => playNewAlertSound(alert.type, alert.severity)); else playNewAlertSound(alert.type, alert.severity); } else { playNewAlertSound(alert.type, alert.severity); }
+      }
       updateAll();
       break;
     }
@@ -223,6 +228,7 @@ function handleWsMessage(msg) {
     case 'alertUpdate': {
       const alert = msg.data;
       const idx = incidents.findIndex(i => i.id === alert.id);
+      const wasDuress = idx >= 0 && incidents[idx].isDuress;
       const formatted = {
         id: alert.id, type: alert.type, severity: alert.severity, status: alert.status,
         reportedBy: alert.createdBy, address: alert.location?.address || 'Unknown',
@@ -240,8 +246,16 @@ function handleWsMessage(msg) {
         origin: alert.origin || 'dispatch',
         archived: alert.archived || false,
         archivedAt: alert.archivedAt,
+        isDuress: alert.isDuress || false,
       };
       if (idx >= 0) { incidents[idx] = formatted; } else { incidents.unshift(formatted); }
+      // Newly became a duress case (not just any update to an already-known one) —
+      // this is the common real-world path: SOS was already active, then "cancelled"
+      // under coercion, which arrives here as an update, not a newAlert.
+      if (formatted.isDuress && !wasDuress) {
+        showCriticalAlertBanner({ ...formatted, createdBy: alert.createdBy });
+        if (typeof getAudioContext === 'function') { const ctx = getAudioContext(); if (ctx && ctx.state === 'suspended') ctx.resume().then(playDuressAlertSound); else playDuressAlertSound(); } else { playDuressAlertSound(); }
+      }
       showToast(`\ud83d\udccb Incident ${formatIncidentId(alert.id)} mis \u00e0 jour`, 'info');
       updateAll();
       break;
@@ -4455,6 +4469,27 @@ function toggleGeofenceSounds() {
  * High: double beep
  * Medium/Low: single notification tone
  */
+// Duress: the single most critical signal this console can raise — someone
+// "cancelled" their own SOS under coercion. Deliberately NOT the same sound
+// as a normal SOS (square-wave siren, wider pitch swing, more repeats) so a
+// dispatcher can tell it apart by ear alone. Repetition and dismissal reuse
+// the existing critical-alert-banner machinery below (it already re-sounds
+// every 10s until acknowledged) rather than a second, competing timer — it's
+// just told which sound and styling to use for a duress incident.
+function playDuressAlertSound() {
+  try {
+    const audioEl = document.getElementById("sosAlertAudio");
+    if (audioEl) { audioEl.currentTime = 0; audioEl.play().catch(() => {}); }
+  } catch (e) {}
+  if (!geofenceSoundsEnabled) return;
+  const notes = [];
+  for (let i = 0; i < 6; i++) {
+    notes.push({ freq: 660, freqEnd: 1760, duration: 0.15, type: 'square', gain: 0.4 });
+    notes.push({ freq: 1760, freqEnd: 660, duration: 0.15, type: 'square', gain: 0.4 });
+  }
+  playToneSequence(notes);
+}
+
 function playNewAlertSound(type, severity) {
   // Try HTML Audio element first (fewer browser restrictions)
   try {
@@ -7377,21 +7412,27 @@ function showCriticalAlertBanner(alert) {
         0%, 100% { background: linear-gradient(135deg, #dc2626, #991b1b); }
         50% { background: linear-gradient(135deg, #ef4444, #b91c1c); }
       }
+      @keyframes duressBannerPulse {
+        0%, 100% { background: repeating-linear-gradient(135deg, #000 0px, #000 20px, #b91c1c 20px, #b91c1c 40px); }
+        50% { background: repeating-linear-gradient(135deg, #1a0000 0px, #1a0000 20px, #ef4444 20px, #ef4444 40px); }
+      }
     `;
     document.head.appendChild(style);
   }
 
   const latestAlert = alertBannerQueue[alertBannerQueue.length - 1];
   const count = alertBannerQueue.length;
+  const isDuress = !!latestAlert.isDuress;
+  banner.style.animation = isDuress ? 'duressBannerPulse 0.6s ease-in-out infinite' : 'bannerPulse 1s ease-in-out infinite';
   banner.innerHTML = `
     <div style="display:flex; align-items:center; gap:12px; flex:1;">
-      <span style="font-size:24px;">🚨</span>
+      <span style="font-size:24px;">${isDuress ? '🔴' : '🚨'}</span>
       <div>
         <div style="font-size:16px; font-weight:800; letter-spacing:0.5px;">
-          ${count > 1 ? count + ' ALERTES ACTIVES' : latestAlert.id || 'NOUVELLE ALERTE'}
+          ${isDuress ? 'CODE DE CONTRAINTE — SOS "ANNULÉ" SOUS LA CONTRAINTE' : (count > 1 ? count + ' ALERTES ACTIVES' : latestAlert.id || 'NOUVELLE ALERTE')}
         </div>
         <div style="font-size:13px; opacity:0.9;">
-          ${latestAlert.location?.address || latestAlert.address || 'Position en cours...'} 
+          ${latestAlert.location?.address || latestAlert.address || 'Position en cours...'}
           · Signalé par: ${latestAlert.createdBy || latestAlert.reportedBy || 'Inconnu'}
         </div>
       </div>
@@ -7401,21 +7442,25 @@ function showCriticalAlertBanner(alert) {
         background:white; color:#dc2626; border:none; border-radius:6px;
         padding:8px 16px; font-weight:700; cursor:pointer; font-size:13px;
       ">✓ ACQUITTER</button>
+      ${isDuress ? '' : `
       <button onclick="dismissAlertBanner()" style="
         background:rgba(255,255,255,0.2); color:white; border:none; border-radius:6px;
         padding:8px 12px; font-weight:700; cursor:pointer; font-size:13px;
-      ">✕</button>
+      ">✕</button>`}
     </div>
   `;
 
   // Blink page title
   startTitleBlink(latestAlert);
 
-  // Repeat siren every 10s until dismissed
+  // Repeat siren every 10s until dismissed — the "✕" silence-only option is
+  // hidden above for duress, so only a real acknowledgement (which calls the
+  // server) can stop this, not a casual click to make the noise go away.
   if (alertBannerInterval) clearInterval(alertBannerInterval);
   alertBannerInterval = setInterval(() => {
     if (document.getElementById('criticalAlertBanner')) {
-      playNewAlertSound(latestAlert.type, latestAlert.severity);
+      if (latestAlert.isDuress) playDuressAlertSound();
+      else playNewAlertSound(latestAlert.type, latestAlert.severity);
     } else {
       clearInterval(alertBannerInterval);
     }

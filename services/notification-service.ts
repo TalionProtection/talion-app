@@ -41,6 +41,7 @@ const PREFS_KEY = '@talion_notification_prefs';
 // ─── Notification Channels (Android) ────────────────────────────────────────
 const CHANNELS = {
   SOS: 'sos-alerts',
+  DURESS: 'duress-alerts',
   BROADCAST: 'broadcast-alerts',
   STATUS: 'status-updates',
   MESSAGES: 'messages',
@@ -334,6 +335,21 @@ class NotificationService {
       description: 'Critical emergency SOS alerts',
       importance: Notifications.AndroidImportance.MAX,
       vibrationPattern: [0, 500, 200, 500, 200, 500],
+      lightColor: '#FF0000',
+      sound: 'default',
+      enableVibrate: true,
+      enableLights: true,
+      bypassDnd: true,
+    });
+
+    // Duress: same MAX/bypassDnd as SOS, but a distinct rapid-triple-pulse
+    // pattern — a dispatcher should be able to tell this apart from a normal
+    // SOS by feel alone, not just by reading the notification text.
+    await Notifications.setNotificationChannelAsync(CHANNELS.DURESS, {
+      name: 'Code de contrainte',
+      description: 'Alerte de code de contrainte — priorité absolue',
+      importance: Notifications.AndroidImportance.MAX,
+      vibrationPattern: [0, 300, 100, 300, 100, 300, 300, 300, 100, 300, 100, 300],
       lightColor: '#FF0000',
       sound: 'default',
       enableVibrate: true,
