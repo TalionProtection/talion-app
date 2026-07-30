@@ -712,7 +712,8 @@ export default function MapScreen() {
         setEditingResidenceLabel(false);
         if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       } else {
-        RNAlert.alert('Erreur', 'Impossible de renommer cette résidence');
+        const err = await res.json().catch(() => ({}));
+        RNAlert.alert('Erreur', `Impossible de renommer cette résidence (HTTP ${res.status}: ${err.error || 'unknown'})`);
       }
     } catch (e) {
       RNAlert.alert('Erreur', 'Erreur réseau');

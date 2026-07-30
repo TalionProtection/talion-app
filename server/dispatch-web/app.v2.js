@@ -3798,7 +3798,11 @@ async function renameResidence(id, ownerId) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: ownerId, label: newLabel.trim() }),
     });
-    if (!res.ok) { alert('Impossible de renommer cette résidence'); return; }
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(`Impossible de renommer cette résidence (HTTP ${res.status}: ${err.error || 'unknown'})`);
+      return;
+    }
     refreshMapData();
   } catch (e) {
     alert('Erreur réseau');
