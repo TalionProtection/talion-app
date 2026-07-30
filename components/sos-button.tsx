@@ -98,9 +98,30 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
     Alert.alert('SOS Désactivé', 'Le partage de position a été arrêté.');
   };
 
-  const handlePress = () => {
+  // Re-checked live on every deactivation attempt rather than trusting the
+  // value fetched at mount — the Home screen (and this button) stays mounted
+  // while navigating to Profile, so a stale cached value would silently skip
+  // the PIN prompt right after someone enables their duress code, exactly
+  // when correctness matters most. Falls back to the last known value only
+  // if the live check itself fails (e.g. no network), rather than assuming
+  // either way.
+  const checkDuressEnabled = async (): Promise<boolean> => {
+    if (!userId) return duressEnabled;
+    try {
+      const res = await fetch(`${getApiBaseUrl()}/api/users/${userId}/duress-settings`, { headers: await authHeader() });
+      if (res.ok) {
+        const data = await res.json();
+        return Boolean(data.enabled);
+      }
+    } catch {}
+    return duressEnabled;
+  };
+
+  const handlePress = async () => {
     if (isActive) {
-      if (duressEnabled) {
+      const enabled = await checkDuressEnabled();
+      setDuressEnabled(enabled);
+      if (enabled) {
         setDuressPin('');
         setDuressError(false);
         setShowDuressPad(true);
