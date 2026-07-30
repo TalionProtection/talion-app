@@ -1251,6 +1251,7 @@ async function handleCreateAlert(ws: any, userId: string, userRole: string, aler
   alerts.set(alert.id, alert);
   linkPossibleDuplicates(alert);
   persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[WS CreateAlert] Supabase save error:', e));
   console.log(`New alert created: ${alert.id} by ${userId}`);
 
   addAuditEntry('incident', 'Incident Created', userId, `Created ${alert.id}: ${alert.type} at ${alert.location.address}`);
@@ -1730,6 +1731,7 @@ function linkPossibleDuplicates(alert: Alert): void {
     if (!other.possibleDuplicates.some(d => d.id === alert.id)) {
       other.possibleDuplicates.push({ id: alert.id, confidence: match.confidence });
       alerts.set(other.id, other);
+      saveAlertToSupabase(other).catch(e => console.error('[LinkDuplicates] Supabase save error:', e));
       broadcastMessage({ type: 'alertUpdate', data: { ...other, respondingNames: (other.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
     }
   }
@@ -2022,6 +2024,7 @@ async function fireCheckInEscalation(id: string) {
   alerts.set(alert.id, alert);
   linkPossibleDuplicates(alert);
   persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[CheckIn] Supabase save error:', e));
   addAuditEntry('incident', 'Check-in manqué', checkIn.ownerId, `Check-in ${checkIn.id}: ${checkIn.targetUserName}`);
   broadcastMessage({ type: 'newAlert', data: alert });
   sendPushToDispatchersAndResponders(alert, checkIn.targetUserName).catch(() => {});
@@ -2142,6 +2145,7 @@ function handleAcknowledgeAlert(ws: any, userId: string, alertData: any) {
     if (!alert.acknowledgedAt) alert.acknowledgedAt = Date.now();
     alerts.set(alert.id, alert);
     persistAlerts();
+    saveAlertToSupabase(alert).catch(e => console.error('[WS Acknowledge] Supabase save error:', e));
     console.log(`Alert ${alert.id} acknowledged by ${userId}`);
     addAuditEntry('incident', 'Alert Acknowledged', userId, `Acknowledged ${alert.id}`);
     broadcastMessage({ type: 'alertAcknowledged', alertId: alert.id, userId, timestamp: Date.now() });
@@ -2611,6 +2615,7 @@ app.put('/alerts/:id/acknowledge', requireRole('dispatcher'), (req, res) => {
   if (!alert.acknowledgedAt) alert.acknowledgedAt = Date.now();
   alerts.set(alert.id, alert);
   persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[Acknowledge] Supabase save error:', e));
   addAuditEntry('incident', 'Alert Acknowledged', req.body?.userId || 'Mobile App', `Acknowledged ${alert.id}`);
   broadcastMessage({ type: 'alertAcknowledged', alertId: alert.id, timestamp: Date.now() });
   res.json({ success: true });
@@ -2624,6 +2629,7 @@ app.put('/alerts/:id/resolve', requireRole('dispatcher'), (req, res) => {
   if (!alert.resolvedAt) alert.resolvedAt = Date.now();
   alerts.set(alert.id, alert);
   persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[Resolve] Supabase save error:', e));
   addAuditEntry('incident', 'Incident Resolved', req.body?.userId || 'Mobile App', `Resolved ${alert.id}: ${alert.type} at ${alert.location.address}`);
   broadcastMessage({ type: 'alertResolved', alertId: alert.id, timestamp: Date.now() });
   res.json({ success: true });
@@ -2639,6 +2645,7 @@ app.put('/alerts/:id/archive', requireRole('dispatcher'), (req, res) => {
   alert.archivedAt = Date.now();
   alerts.set(alert.id, alert);
   persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[Archive] Supabase save error:', e));
   addAuditEntry('incident', 'Incident Archived', req.supabaseUser?.id || 'Dispatch Console', `Archived ${alert.id}`);
   broadcastMessage({ type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
   res.json({ success: true });
@@ -2651,6 +2658,7 @@ app.put('/alerts/:id/unarchive', requireRole('dispatcher'), (req, res) => {
   alert.archivedAt = undefined;
   alerts.set(alert.id, alert);
   persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[Unarchive] Supabase save error:', e));
   addAuditEntry('incident', 'Incident Unarchived', req.supabaseUser?.id || 'Dispatch Console', `Unarchived ${alert.id}`);
   broadcastMessage({ type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
   res.json({ success: true });
@@ -2696,6 +2704,8 @@ app.post('/alerts/:id/link/:otherId', requireRole('dispatcher'), (req, res) => {
   alerts.set(alert.id, alert);
   alerts.set(other.id, other);
   persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[Link] Supabase save error:', e));
+  saveAlertToSupabase(other).catch(e => console.error('[Link] Supabase save error:', e));
   addAuditEntry('incident', 'Incidents Linked', req.supabaseUser?.id || 'Dispatch Console', `Linked ${alert.id} and ${other.id} as the same event`);
   broadcastMessage({ type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
   broadcastMessage({ type: 'alertUpdate', data: { ...other, respondingNames: (other.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
@@ -2711,10 +2721,12 @@ app.delete('/alerts/:id/duplicate-suggestion/:otherId', requireRole('dispatcher'
   if (!alert) return res.status(404).json({ error: 'Incident not found' });
   alert.possibleDuplicates = (alert.possibleDuplicates || []).filter(d => d.id !== otherId);
   alerts.set(alert.id, alert);
+  saveAlertToSupabase(alert).catch(e => console.error('[DismissDuplicate] Supabase save error:', e));
   const other = alerts.get(otherId);
   if (other) {
     other.possibleDuplicates = (other.possibleDuplicates || []).filter(d => d.id !== id);
     alerts.set(other.id, other);
+    saveAlertToSupabase(other).catch(e => console.error('[DismissDuplicate] Supabase save error:', e));
   }
   persistAlerts();
   broadcastMessage({ type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
@@ -2743,7 +2755,10 @@ app.delete('/alerts/:id', requireRole('admin'), async (req, res) => {
       other.linkedIncidentIds = other.linkedIncidentIds.filter(otherId => otherId !== id);
       changed = true;
     }
-    if (changed) alerts.set(other.id, other);
+    if (changed) {
+      alerts.set(other.id, other);
+      saveAlertToSupabase(other).catch(e => console.error('[Delete cleanup] Supabase save error:', e));
+    }
   }
   persistAlerts();
   await deleteAlertFromSupabase(id);
@@ -2823,6 +2838,7 @@ app.post('/alerts', requireAuth, async (req, res) => {
   alerts.set(alert.id, alert);
   linkPossibleDuplicates(alert);
   persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[Alerts] Supabase save error:', e));
   broadcastMessage({ type: 'newAlert', data: alert });
 
   // Send push notifications for the new incident
@@ -3079,8 +3095,9 @@ app.post('/api/sos', async (req, res) => {
   alerts.set(alert.id, alert);
   linkPossibleDuplicates(alert);
   persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[SOS REST] Supabase save error:', e));
   addAuditEntry('incident', 'SOS Alert Created (REST)', userId || 'unknown', `SOS ${alert.id}: ${alert.location.address}`);
-  
+
   // Broadcast to ALL connected WebSocket clients (Dispatch console, admin, etc.)
   broadcastMessage({ type: 'newAlert', data: alert });
   
@@ -4221,6 +4238,7 @@ app.put('/dispatch/incidents/:id/acknowledge', (req, res) => {
   if (!alert.acknowledgedAt) alert.acknowledgedAt = Date.now();
   alerts.set(alert.id, alert);
   persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[DispatchAcknowledge] Supabase save error:', e));
   addAuditEntry('incident', 'Alert Acknowledged', 'Dispatch Console', `Acknowledged ${alert.id}`);
   broadcastMessage({ type: 'alertAcknowledged', alertId: alert.id, timestamp: Date.now() });
   res.json({ success: true });
@@ -4313,6 +4331,7 @@ app.put('/dispatch/incidents/:id/unassign', (req, res) => {
   }
   alerts.set(alert.id, alert);
   persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[Unassign] Supabase save error:', e));
   const responderName = adminUsers.get(responderId)?.name || responderId;
   addAuditEntry('incident', 'Responder Unassigned', 'Dispatch Console', `Unassigned ${responderName} from ${alert.id}`, responderId);
   const enrichedAlert = {
@@ -4471,6 +4490,7 @@ app.put('/dispatch/incidents/:id/resolve', (req, res) => {
   (alert.respondingUsers || []).forEach(uid => clearAcceptanceTimer(alert.id, uid));
   alerts.set(alert.id, alert);
   persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[DispatchResolve] Supabase save error:', e));
   addAuditEntry('incident', 'Incident Resolved', 'Dispatch Console', `Resolved ${alert.id}: ${alert.type} at ${alert.location.address}`);
   broadcastMessage({ type: 'alertResolved', alertId: alert.id, timestamp: Date.now() });
   res.json({ success: true });
@@ -4594,6 +4614,7 @@ app.post('/dispatch/broadcast', async (req, res) => {
 
   alerts.set(alert.id, alert);
   persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[Broadcast] Supabase save error:', e));
   addAuditEntry('broadcast', 'Zone Broadcast Sent', by || 'Dispatch Console', `[${sev.toUpperCase()}] ${message} (${radiusKm || 5}km radius)`);
 
   // Broadcast as newAlert so all WS clients (including mobile) receive it
@@ -5032,6 +5053,7 @@ app.post('/api/sos/duress-check', requireAuth, (req, res) => {
     alerts.set(alert.id, alert);
     if (isNew) linkPossibleDuplicates(alert);
     persistAlerts();
+    saveAlertToSupabase(alert).catch(e => console.error('[Duress] Supabase save error:', e));
     addAuditEntry('incident', 'Duress code triggered', user.id, `Alert ${alert.id}`);
 
     // Auto-reveal: same effect as POST /alerts/:id/reveal, but performed
@@ -6538,6 +6560,9 @@ async function loadAlertsFromSupabase(): Promise<void> {
           origin: a.origin || undefined,
           archived: a.archived || false,
           archivedAt: a.archived_at || undefined,
+          isDuress: a.is_duress || false,
+          acknowledgedAt: a.acknowledged_at || undefined,
+          resolvedAt: a.resolved_at || undefined,
         });
       });
       console.log(`[Supabase] Loaded ${data.length} alerts`);
@@ -6570,6 +6595,9 @@ async function saveAlertToSupabase(alert: Alert): Promise<void> {
       origin: alert.origin || null,
       archived: alert.archived || false,
       archived_at: alert.archivedAt || null,
+      is_duress: alert.isDuress || false,
+      acknowledged_at: alert.acknowledgedAt || null,
+      resolved_at: alert.resolvedAt || null,
     });
     if (error) console.error('[Supabase] saveAlertToSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] saveAlertToSupabase error:', e); }
