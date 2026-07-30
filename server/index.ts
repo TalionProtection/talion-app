@@ -50,6 +50,21 @@ const supabaseAdmin = createSupabaseClient(
   { auth: { autoRefreshToken: false, persistSession: false } }
 );
 
+// Separate client used ONLY for password sign-in during /auth/login. Calling
+// auth.signInWithPassword() on a client mutates its internal session state, and
+// that mutated session — not the service-role key — is what the postgrest client
+// then sends on every subsequent .from() call made through that SAME instance.
+// supabaseAdmin is shared/global and used everywhere for privileged table access,
+// so signing in on it would silently downgrade every write across the whole
+// server (for every request sharing the event loop) to that logging-in user's
+// own restricted role until masked by another login or a restart — exactly the
+// RLS-violation bug this comment is here to prevent from recurring.
+const supabaseAuthOnly = createSupabaseClient(
+  process.env.SUPABASE_URL || '',
+  process.env.SUPABASE_SERVICE_ROLE_KEY || '',
+  { auth: { autoRefreshToken: false, persistSession: false } }
+);
+
 const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server, maxPayload: 50 * 1024 * 1024 });
@@ -2226,7 +2241,7 @@ app.post('/auth/login', async (req, res) => {
   // (requireAuth validates tokens via supabase.auth.getUser, not the local bcrypt hash).
   let accessToken: string | null = null;
   try {
-    const { data: signInData, error: signInError } = await supabaseAdmin.auth.signInWithPassword({ email, password });
+    const { data: signInData, error: signInError } = await supabaseAuthOnly.auth.signInWithPassword({ email, password });
     if (!signInError && signInData.session) {
       accessToken = signInData.session.access_token;
     } else {
@@ -2234,7 +2249,7 @@ app.post('/auth/login', async (req, res) => {
       // (e.g. changed via PUT /admin/users/:id, which only updates the local hash) — self-heal.
       const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(user.id, { password });
       if (!updateError) {
-        const { data: retryData, error: retryError } = await supabaseAdmin.auth.signInWithPassword({ email, password });
+        const { data: retryData, error: retryError } = await supabaseAuthOnly.auth.signInWithPassword({ email, password });
         if (!retryError && retryData.session) {
           accessToken = retryData.session.access_token;
           addAuditEntry('auth', 'Supabase Auth Re-sync', user.name, `Password re-synced to Supabase Auth for ${email} after drift detected`, user.id);
@@ -7247,7 +7262,7 @@ app.post('/api/addresses/:addressId/people', requireAuth, async (req, res) => {
     verification_status: person.verificationStatus || null,
     created_by: person.createdBy, created_at: now, updated_at: now,
   });
-  if (error) console.error('[Supabase] Failed to persist known person (DIAGNOSTIC):', JSON.stringify({ message: error.message, details: error.details, hint: error.hint, code: error.code, url: process.env.SUPABASE_URL, keyLen: (process.env.SUPABASE_SERVICE_ROLE_KEY || '').length }));
+  if (error) console.error('[Supabase] Failed to persist known person:', error.message);
   res.status(201).json(person);
 });
 
