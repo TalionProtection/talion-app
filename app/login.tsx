@@ -36,23 +36,6 @@ export default function LoginScreen() {
     }
   };
 
-  const handleQuickLogin = async (role: 'user' | 'responder' | 'dispatcher' | 'admin') => {
-    setLoginError('');
-    const credentials: Record<string, { email: string; password: string }> = {
-      user: { email: 'thomas@example.com', password: 'talion2026' },
-      responder: { email: 'responder@talion.io', password: 'talion2026' },
-      dispatcher: { email: 'dispatch@talion.io', password: 'talion2026' },
-      admin: { email: 'admin@talion.io', password: 'talion2026' },
-    };
-    const cred = credentials[role];
-    try {
-      await login(cred.email, cred.password);
-      router.replace('/(tabs)');
-    } catch (error: any) {
-      setLoginError(error?.message || 'Connexion échouée');
-    }
-  };
-
   return (
     <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right', 'bottom']}>
       <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
@@ -129,120 +112,6 @@ export default function LoginScreen() {
             <Text style={styles.forgotPasswordText}>Mot de passe oublié ?</Text>
           </TouchableOpacity>
         </View>
-
-        {/* Divider */}
-        <View style={styles.divider}>
-          <View style={styles.dividerLine} />
-          <Text style={styles.dividerText}>DEMO</Text>
-          <View style={styles.dividerLine} />
-        </View>
-
-        {/* Quick Login Buttons */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Connexion rapide (Démo)</Text>
-          <TouchableOpacity
-            style={[styles.quickLoginButton, styles.userButton]}
-            onPress={() => handleQuickLogin('user')}
-            disabled={isLoading}
-          >
-            {isLoading ? (
-              <ActivityIndicator color="#ffffff" />
-            ) : (
-              <>
-                <Text style={styles.quickLoginIcon}>👤</Text>
-                <View>
-                  <Text style={styles.quickLoginText}>Thomas Leroy</Text>
-                  <Text style={styles.quickLoginSub}>Utilisateur</Text>
-                </View>
-              </>
-            )}
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.quickLoginButton, styles.responderButton]}
-            onPress={() => handleQuickLogin('responder')}
-            disabled={isLoading}
-          >
-            {isLoading ? (
-              <ActivityIndicator color="#ffffff" />
-            ) : (
-              <>
-                <Text style={styles.quickLoginIcon}>🚒</Text>
-                <View>
-                  <Text style={styles.quickLoginText}>Pierre Martin</Text>
-                  <Text style={styles.quickLoginSub}>Intervenant</Text>
-                </View>
-              </>
-            )}
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.quickLoginButton, styles.dispatcherButton]}
-            onPress={() => handleQuickLogin('dispatcher')}
-            disabled={isLoading}
-          >
-            {isLoading ? (
-              <ActivityIndicator color="#ffffff" />
-            ) : (
-              <>
-                <Text style={styles.quickLoginIcon}>📡</Text>
-                <View>
-                  <Text style={styles.quickLoginText}>Jean Moreau</Text>
-                  <Text style={styles.quickLoginSub}>Dispatcher</Text>
-                </View>
-              </>
-            )}
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.quickLoginButton, styles.adminButton]}
-            onPress={() => handleQuickLogin('admin')}
-            disabled={isLoading}
-          >
-            {isLoading ? (
-              <ActivityIndicator color="#ffffff" />
-            ) : (
-              <>
-                <Text style={styles.quickLoginIcon}>🔑</Text>
-                <View>
-                  <Text style={styles.quickLoginText}>Marie Dupont</Text>
-                  <Text style={styles.quickLoginSub}>Administratrice</Text>
-                </View>
-              </>
-            )}
-          </TouchableOpacity>
-        </View>
-
-        {/* Demo Credentials */}
-        <View style={[styles.section, { marginBottom: 30 }]}>
-          <Text style={styles.sectionTitle}>Identifiants de démo</Text>
-          <View style={styles.credentialsBox}>
-            <View style={styles.credentialItem}>
-              <Text style={styles.credentialLabel}>Mot de passe :</Text>
-              <Text style={styles.credentialValue}>talion2026 (pour tous)</Text>
-            </View>
-            <View style={styles.credentialDivider} />
-            <View style={styles.credentialItem}>
-              <Text style={styles.credentialLabel}>Admin :</Text>
-              <Text style={styles.credentialValue}>admin@talion.io</Text>
-            </View>
-            <View style={styles.credentialDivider} />
-            <View style={styles.credentialItem}>
-              <Text style={styles.credentialLabel}>Dispatcher :</Text>
-              <Text style={styles.credentialValue}>dispatch@talion.io</Text>
-            </View>
-            <View style={styles.credentialDivider} />
-            <View style={styles.credentialItem}>
-              <Text style={styles.credentialLabel}>Intervenant :</Text>
-              <Text style={styles.credentialValue}>responder@talion.io</Text>
-            </View>
-            <View style={styles.credentialDivider} />
-            <View style={styles.credentialItem}>
-              <Text style={styles.credentialLabel}>Utilisateur :</Text>
-              <Text style={styles.credentialValue}>thomas@example.com</Text>
-            </View>
-          </View>
-        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -316,57 +185,6 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     textAlign: 'center',
   },
-  quickLoginButton: {
-    paddingVertical: 14,
-    paddingHorizontal: 20,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginBottom: 10,
-    flexDirection: 'row',
-    gap: 12,
-  },
-  userButton: {
-    backgroundColor: '#8b5cf6',
-  },
-  responderButton: {
-    backgroundColor: '#22c55e',
-  },
-  dispatcherButton: {
-    backgroundColor: '#1e3a5f',
-  },
-  adminButton: {
-    backgroundColor: '#d97706',
-  },
-  quickLoginIcon: {
-    fontSize: 22,
-  },
-  quickLoginText: {
-    color: '#ffffff',
-    fontWeight: '600',
-    fontSize: 15,
-  },
-  quickLoginSub: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 12,
-    fontWeight: '400',
-  },
-  divider: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginVertical: 20,
-    paddingHorizontal: 20,
-  },
-  dividerLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: '#d1d5db',
-  },
-  dividerText: {
-    marginHorizontal: 12,
-    color: '#9ca3af',
-    fontWeight: '600',
-    fontSize: 12,
-  },
   formGroup: {
     marginBottom: 14,
   },
@@ -410,33 +228,5 @@ const styles = StyleSheet.create({
     color: '#1e3a5f',
     fontSize: 14,
     fontWeight: '500',
-  },
-  credentialsBox: {
-    backgroundColor: '#ffffff',
-    borderRadius: 12,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
-  },
-  credentialItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  credentialDivider: {
-    height: 1,
-    backgroundColor: '#f3f4f6',
-    marginVertical: 8,
-  },
-  credentialLabel: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#1e3a5f',
-    width: 90,
-  },
-  credentialValue: {
-    fontSize: 12,
-    color: '#6b7280',
-    flex: 1,
   },
 });

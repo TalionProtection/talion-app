@@ -160,6 +160,38 @@ export default function HomeScreen() {
   // Fetch real alerts from server with 10s polling
   const { alerts: serverAlerts, isLoading, error: alertsError, refresh: refreshAlerts } = useAlerts({ pollInterval: 10000, userRole: user?.role, userId: user?.id, playSounds: true });
 
+  // Family presence, at a glance — replaces the old "Quick Actions" shortcuts
+  // for family accounts (Messages/PTT/Map View just duplicated the tab bar;
+  // this actually shows something you can't already see at a glance).
+  interface FamilyPresenceItem {
+    userId: string;
+    name: string;
+    presenceStatus?: 'inside' | 'outside' | 'unknown';
+    presenceLabel?: string;
+  }
+  const [familyPresence, setFamilyPresence] = useState<FamilyPresenceItem[]>([]);
+  const [familyPresenceLoading, setFamilyPresenceLoading] = useState(false);
+
+  useEffect(() => {
+    if (user?.role !== 'user' || !user?.id) return;
+    let cancelled = false;
+    const fetchPresence = async () => {
+      setFamilyPresenceLoading(true);
+      try {
+        const apiBase = getApiBaseUrl();
+        const res = await fetchWithTimeout(`${apiBase}/api/family/members?userId=${user.id}`, { timeout: 10000 });
+        const data = await res.json();
+        if (!cancelled) setFamilyPresence(Array.isArray(data) ? data : []);
+      } catch {
+        if (!cancelled) setFamilyPresence([]);
+      }
+      if (!cancelled) setFamilyPresenceLoading(false);
+    };
+    fetchPresence();
+    const interval = setInterval(fetchPresence, 30000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [user?.role, user?.id]);
+
   // Convert server alerts to local Incident format
   const incidents = useMemo(() => {
     return serverAlerts.map(serverAlertToIncident);
@@ -557,25 +589,18 @@ export default function HomeScreen() {
           )}
         </View>
 
-        {/* Quick Actions */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Quick Actions</Text>
-          <View style={styles.quickActionsGrid}>
-            {(user?.role === 'dispatcher' || user?.role === 'responder') && (
-              <TouchableOpacity style={styles.quickActionButton} onPress={() => setShowAlertModal(true)}>
-                <Text style={styles.quickActionIcon}>🆘</Text>
-                <Text style={styles.quickActionLabel}>Create Alert</Text>
-              </TouchableOpacity>
-            )}
-            <TouchableOpacity style={styles.quickActionButton} onPress={() => router.push('/(tabs)/messages')}>
-              <Text style={styles.quickActionIcon}>💬</Text>
-              <Text style={styles.quickActionLabel}>Messages</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.quickActionButton} onPress={() => router.push('/(tabs)/ptt')}>
-              <Text style={styles.quickActionIcon}>🎤</Text>
-              <Text style={styles.quickActionLabel}>PTT</Text>
-            </TouchableOpacity>
-            {(user?.role === 'responder' || user?.role === 'dispatcher') && (
+        {/* Quick Actions — staff-only now; Messages/PTT/Map View used to be here
+            too but they just duplicated the tab bar with zero added value. */}
+        {(user?.role === 'dispatcher' || user?.role === 'responder') && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Quick Actions</Text>
+            <View style={styles.quickActionsGrid}>
+              {(user?.role === 'dispatcher' || user?.role === 'responder') && (
+                <TouchableOpacity style={styles.quickActionButton} onPress={() => setShowAlertModal(true)}>
+                  <Text style={styles.quickActionIcon}>🆘</Text>
+                  <Text style={styles.quickActionLabel}>Create Alert</Text>
+                </TouchableOpacity>
+              )}
               <TouchableOpacity
                 style={[styles.quickActionButton, locationState.isBackgroundTracking && styles.quickActionActive]}
                 onPress={async () => {
@@ -595,13 +620,48 @@ export default function HomeScreen() {
                 <Text style={styles.quickActionIcon}>{locationState.isBackgroundTracking ? '🟢' : '📡'}</Text>
                 <Text style={styles.quickActionLabel}>{locationState.isBackgroundTracking ? 'BG Tracking On' : 'BG Tracking'}</Text>
               </TouchableOpacity>
-            )}
-            <TouchableOpacity style={styles.quickActionButton} onPress={() => router.push('/(tabs)/explore')}>
-              <Text style={styles.quickActionIcon}>🗺️</Text>
-              <Text style={styles.quickActionLabel}>Map View</Text>
-            </TouchableOpacity>
+            </View>
           </View>
-        </View>
+        )}
+
+        {/* Family presence, at a glance — family accounts only */}
+        {user?.role === 'user' && (
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Présence famille</Text>
+              <TouchableOpacity onPress={() => router.push('/(tabs)/family')}>
+                <Text style={styles.familyPresenceSeeAll}>Voir tout</Text>
+              </TouchableOpacity>
+            </View>
+            {familyPresenceLoading && familyPresence.length === 0 ? (
+              <ActivityIndicator size="small" color="#1e3a5f" style={{ marginTop: 8 }} />
+            ) : familyPresence.length === 0 ? (
+              <Text style={styles.familyPresenceEmpty}>Aucun membre de famille enregistré.</Text>
+            ) : (
+              <View style={styles.familyPresenceCard}>
+                {familyPresence.map((m, idx) => (
+                  <TouchableOpacity
+                    key={m.userId}
+                    style={[styles.familyPresenceRow, idx < familyPresence.length - 1 && styles.familyPresenceRowBorder]}
+                    onPress={() => router.push('/(tabs)/family')}
+                  >
+                    <Text style={styles.familyPresenceName}>{m.name}</Text>
+                    <Text style={[
+                      styles.familyPresenceStatus,
+                      { color: m.presenceStatus === 'inside' ? '#22C55E' : m.presenceStatus === 'outside' ? '#F59E0B' : '#9CA3AF' },
+                    ]}>
+                      {m.presenceStatus === 'inside'
+                        ? `🏠 Présent${m.presenceLabel ? ` — ${m.presenceLabel}` : ''}`
+                        : m.presenceStatus === 'outside'
+                          ? '🚶 Sorti'
+                          : '❓ Inconnu'}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+          </View>
+        )}
 
         <View style={{ height: 100 }} />
       </ScrollView>
@@ -761,6 +821,41 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontWeight: '700',
     fontSize: 12,
+  },
+  familyPresenceSeeAll: {
+    color: '#1e3a5f',
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  familyPresenceEmpty: {
+    color: '#9CA3AF',
+    fontSize: 13,
+  },
+  familyPresenceCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  familyPresenceRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+  },
+  familyPresenceRowBorder: {
+    borderBottomWidth: 1,
+    borderBottomColor: '#F3F4F6',
+  },
+  familyPresenceName: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1F2937',
+  },
+  familyPresenceStatus: {
+    fontSize: 13,
+    fontWeight: '500',
   },
   filterRow: {
     flexDirection: 'row',
