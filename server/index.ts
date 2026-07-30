@@ -7247,7 +7247,7 @@ app.post('/api/addresses/:addressId/people', requireAuth, async (req, res) => {
     verification_status: person.verificationStatus || null,
     created_by: person.createdBy, created_at: now, updated_at: now,
   });
-  if (error) console.error('[Supabase] Failed to persist known person:', error.message);
+  if (error) console.error('[Supabase] Failed to persist known person (DIAGNOSTIC):', JSON.stringify({ message: error.message, details: error.details, hint: error.hint, code: error.code, url: process.env.SUPABASE_URL, keyLen: (process.env.SUPABASE_SERVICE_ROLE_KEY || '').length }));
   res.status(201).json(person);
 });
 
