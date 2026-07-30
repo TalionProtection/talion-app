@@ -112,11 +112,12 @@ interface PreAuthorizedGuest {
   validUntil: number;
 }
 
-interface LocationHistoryEntry {
-  userId: string;
+interface LocationEvent {
+  type: 'entered' | 'left';
+  label: string;
+  timestamp: number;
   latitude: number;
   longitude: number;
-  timestamp: number;
 }
 
 interface KnownPerson {
@@ -265,7 +266,7 @@ export default function FamilyScreen() {
   // Modals
   const [selectedMember, setSelectedMember] = useState<FamilyMember | null>(null);
   const [showHistory, setShowHistory] = useState(false);
-  const [history, setHistory] = useState<LocationHistoryEntry[]>([]);
+  const [history, setHistory] = useState<LocationEvent[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
 
   // Perimeter creation
@@ -1265,6 +1266,54 @@ export default function FamilyScreen() {
 
   // ─── Render Helpers ─────────────────────────────────────────────────────
 
+  // Providers/itineraries/history are meaningful for the account holder too
+  // (their own residence's staff, their own trips) — the family list below
+  // only ever contains OTHER family members (see /api/family/members), so
+  // without this card there was no way to reach these for yourself.
+  // Périmètre/Couvre-feu/Check-in stay family-only: they're inherently about
+  // one person watching another, not something you'd set up on yourself.
+  const renderSelfActions = () => {
+    if (!user || !userId) return null;
+    const selfMember: FamilyMember = {
+      userId, name: user.name, email: user.email,
+      relationship: 'self', location: null, isSharing: true, lastSeen: null,
+    };
+    return (
+      <View style={styles.card}>
+        <View style={styles.cardHeader}>
+          <View style={styles.avatarCircle}>
+            <Text style={styles.avatarText}>{user.name.charAt(0).toUpperCase()}</Text>
+          </View>
+          <View style={styles.cardInfo}>
+            <Text style={styles.cardTitle}>{user.name}</Text>
+            <Text style={styles.cardSubtitle}>Vous-même</Text>
+          </View>
+        </View>
+        <View style={styles.cardActions}>
+          <TouchableOpacity style={styles.actionBtn} onPress={() => openHistory(selfMember)}>
+            <IconSymbol name="clock.fill" size={18} color="#1e3a5f" />
+            <Text style={styles.actionBtnText}>Historique</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.actionBtn} onPress={() => openProvidersModal(selfMember)}>
+            <IconSymbol name="person.2.fill" size={18} color="#1e3a5f" />
+            <Text style={styles.actionBtnText}>Prestataires</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.actionBtn}
+            onPress={() => {
+              setItineraryTarget(selfMember);
+              resetItineraryForm();
+              setShowItineraryModal(true);
+            }}
+          >
+            <IconSymbol name="airplane" size={18} color="#1e3a5f" />
+            <Text style={styles.actionBtnText}>Voyage</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  };
+
   // Persistent map above the members list — native only; on web the member cards
   // below already show a resolved address + freshness, so a redundant fallback
   // map isn't worth the complexity (family.tsx keeps its web fallbacks simple).
@@ -1365,8 +1414,26 @@ export default function FamilyScreen() {
           style={styles.actionBtn}
           onPress={() => openHistory(item)}
         >
-          <IconSymbol name="clock.fill" size={16} color="#1e3a5f" />
+          <IconSymbol name="clock.fill" size={18} color="#1e3a5f" />
           <Text style={styles.actionBtnText}>Historique</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.actionBtn}
+          onPress={() => openProvidersModal(item)}
+        >
+          <IconSymbol name="person.2.fill" size={18} color="#1e3a5f" />
+          <Text style={styles.actionBtnText}>Prestataires</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.actionBtn}
+          onPress={() => {
+            setItineraryTarget(item);
+            resetItineraryForm();
+            setShowItineraryModal(true);
+          }}
+        >
+          <IconSymbol name="airplane" size={18} color="#1e3a5f" />
+          <Text style={styles.actionBtnText}>Voyage</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.actionBtn}
@@ -1375,7 +1442,7 @@ export default function FamilyScreen() {
             setShowCreatePerimeter(true);
           }}
         >
-          <IconSymbol name="plus.circle.fill" size={16} color="#1e3a5f" />
+          <IconSymbol name="plus.circle.fill" size={18} color="#1e3a5f" />
           <Text style={styles.actionBtnText}>Périmètre</Text>
         </TouchableOpacity>
         <TouchableOpacity
@@ -1393,7 +1460,7 @@ export default function FamilyScreen() {
             setShowCreateCurfew(true);
           }}
         >
-          <IconSymbol name="bell.fill" size={16} color="#1e3a5f" />
+          <IconSymbol name="bell.fill" size={18} color="#1e3a5f" />
           <Text style={styles.actionBtnText}>Couvre-feu</Text>
         </TouchableOpacity>
         <TouchableOpacity
@@ -1406,26 +1473,8 @@ export default function FamilyScreen() {
             setShowCreateCheckIn(true);
           }}
         >
-          <IconSymbol name="checkmark.seal.fill" size={16} color="#1e3a5f" />
+          <IconSymbol name="checkmark.seal.fill" size={18} color="#1e3a5f" />
           <Text style={styles.actionBtnText}>Check-in</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.actionBtn}
-          onPress={() => {
-            setItineraryTarget(item);
-            resetItineraryForm();
-            setShowItineraryModal(true);
-          }}
-        >
-          <IconSymbol name="airplane" size={16} color="#1e3a5f" />
-          <Text style={styles.actionBtnText}>Voyage</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.actionBtn}
-          onPress={() => openProvidersModal(item)}
-        >
-          <IconSymbol name="person.2.fill" size={16} color="#1e3a5f" />
-          <Text style={styles.actionBtnText}>Prestataires</Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -1827,7 +1876,12 @@ export default function FamilyScreen() {
               renderItem={renderMemberCard}
               contentContainerStyle={styles.listContent}
               ListEmptyComponent={EmptyMembers}
-              ListHeaderComponent={renderFamilyMap}
+              ListHeaderComponent={() => (
+                <>
+                  {renderSelfActions()}
+                  {renderFamilyMap()}
+                </>
+              )}
               refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#1e3a5f" />}
             />
           )}
@@ -2109,7 +2163,7 @@ export default function FamilyScreen() {
               <IconSymbol name="xmark.circle.fill" size={28} color="#6B7280" />
             </TouchableOpacity>
           </View>
-          <Text style={styles.modalSubtitle}>Dernières 24 heures</Text>
+          <Text style={styles.modalSubtitle}>Entrées et sorties — dernières 24 heures</Text>
 
           {historyLoading ? (
             <ActivityIndicator size="large" color="#1e3a5f" style={{ marginTop: 40 }} />
@@ -2118,7 +2172,7 @@ export default function FamilyScreen() {
               <IconSymbol name="clock.fill" size={48} color="#D1D5DB" />
               <Text style={styles.emptyTitle}>Aucun historique</Text>
               <Text style={styles.emptySubtitle}>
-                Aucune donnée de localisation enregistrée pour les dernières 24h.
+                Aucune entrée ou sortie d'un lieu connu enregistrée pour les dernières 24h.
               </Text>
             </View>
           ) : (
@@ -2128,12 +2182,12 @@ export default function FamilyScreen() {
               contentContainerStyle={{ padding: 16 }}
               renderItem={({ item }) => (
                 <View style={styles.historyRow}>
-                  <View style={styles.historyDot} />
+                  <View style={[styles.historyDot, { backgroundColor: item.type === 'entered' ? '#22C55E' : '#F59E0B' }]} />
                   <View style={styles.historyInfo}>
-                    <Text style={styles.historyTime}>{formatDate(item.timestamp)}</Text>
-                    <Text style={styles.historyCoords}>
-                      {item.latitude.toFixed(5)}, {item.longitude.toFixed(5)}
+                    <Text style={styles.historyTime}>
+                      {item.type === 'entered' ? '🏠 Entrée' : '🚶 Sortie'} — {item.label}
                     </Text>
+                    <Text style={styles.historyCoords}>{formatDate(item.timestamp)}</Text>
                   </View>
                 </View>
               )}
@@ -2937,25 +2991,28 @@ const styles = StyleSheet.create({
   },
   cardActions: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 8,
     marginTop: 12,
   },
   actionBtn: {
-    flex: 1,
-    flexDirection: 'row',
+    flexBasis: '31%',
+    flexGrow: 1,
+    flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 8,
+    gap: 4,
+    paddingVertical: 10,
     borderRadius: 8,
     backgroundColor: '#F3F4F6',
   },
   actionBtnActive: {},
   actionBtnInactive: {},
   actionBtnText: {
-    fontSize: 13,
-    fontWeight: '500',
+    fontSize: 11,
+    fontWeight: '600',
     color: '#1e3a5f',
+    textAlign: 'center',
   },
   timestampText: {
     fontSize: 11,

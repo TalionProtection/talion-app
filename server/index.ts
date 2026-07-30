@@ -3568,7 +3568,41 @@ app.put('/api/family/proximity-alerts/:id/acknowledge', (req, res) => {
   res.json({ success: true });
 });
 
-// GET /api/family/location-history - get location history for a family member
+// A raw GPS ping every few minutes isn't useful to read — collapse the
+// history into "entered X" / "left X" transitions against the target's known
+// addresses, which is what a family member actually wants ("where did they
+// go and when"), not a dense stream of coordinates.
+interface LocationEvent {
+  type: 'entered' | 'left';
+  label: string;
+  timestamp: number;
+  latitude: number;
+  longitude: number;
+}
+
+function computeLocationEvents(targetUserId: string, history: LocationHistoryEntry[]): LocationEvent[] {
+  const now = Date.now();
+  const addresses = (userAddresses.get(targetUserId) || []).filter(a => !a.temporary || !a.expiresAt || a.expiresAt > now);
+  const events: LocationEvent[] = [];
+  let previousAddr: UserAddress | null = null;
+  for (const point of history) {
+    const matched = addresses.find(a =>
+      a.latitude != null && a.longitude != null &&
+      haversineDistance(point.latitude, point.longitude, a.latitude, a.longitude) <= (a.radiusMeters || 150)
+    ) || null;
+    if ((matched?.id || null) !== (previousAddr?.id || null)) {
+      if (matched) {
+        events.push({ type: 'entered', label: matched.label, timestamp: point.timestamp, latitude: point.latitude, longitude: point.longitude });
+      } else if (previousAddr) {
+        events.push({ type: 'left', label: previousAddr.label, timestamp: point.timestamp, latitude: point.latitude, longitude: point.longitude });
+      }
+      previousAddr = matched;
+    }
+  }
+  return events;
+}
+
+// GET /api/family/location-history - entry/exit events (not raw pings) for a family member
 app.get('/api/family/location-history', (req, res) => {
   const userId = req.query.userId as string;
   const targetUserId = req.query.targetUserId as string;
@@ -3583,7 +3617,8 @@ app.get('/api/family/location-history', (req, res) => {
   const history = locationHistory.get(targetUserId) || [];
   const since = Number(req.query.since) || 0;
   const filtered = since > 0 ? history.filter(h => h.timestamp >= since) : history;
-  res.json(filtered.slice(-100)); // return last 100 entries
+  const events = computeLocationEvents(targetUserId, filtered);
+  res.json(events.slice(-200));
 });
 
 // ─── Admin REST API ──────────────────────────────────────────────
