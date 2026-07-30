@@ -413,7 +413,8 @@ export class LocationService {
       const results = await Location.reverseGeocodeAsync({ latitude, longitude });
       if (results.length > 0) {
         const addr = results[0];
-        const parts = [addr.street, addr.city, addr.region, addr.country].filter(Boolean);
+        const street = [addr.streetNumber, addr.street].filter(Boolean).join(' ');
+        const parts = [street || addr.street, addr.city, addr.region, addr.country].filter(Boolean);
         return parts.join(', ') || `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
       }
       return `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
