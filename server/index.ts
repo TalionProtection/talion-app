@@ -8435,12 +8435,20 @@ function computeResidenceSummaries(ownerIds: string[], forDispatch: boolean) {
     // (e.g. test/demo profiles that happen to share the same coordinates),
     // and the rename endpoint relies on ownerId's family to re-locate a.id.
     const primaryOwnerId = cluster.entries.find(e => e.addr.id === a.id)?.ownerId || clusterOwnerIds[0];
+    const members = computeResidenceMembersFor(Array.from(memberIds), primaryOwnerId, a, forDispatch);
+    // Occupancy is derived live from whether anyone tracked is actually there,
+    // not the address's stored occupancyStatus field — that field is a
+    // separate manual flag (set via the place-management form) and was
+    // showing "Occupée" while every member read "Sorti", which read as
+    // contradictory/wrong on this card. The stored field itself is untouched
+    // (still used for the residence/place management UI and incident context).
+    const occupancyStatus: 'occupied' | 'unoccupied' = members.some(m => m.isPresent) ? 'occupied' : 'unoccupied';
     return {
       id: a.id, ownerId: primaryOwnerId, ownerName: adminUsers.get(primaryOwnerId)?.name || primaryOwnerId,
       label: a.label, address: a.address,
       latitude: a.latitude!, longitude: a.longitude!, radiusMeters: a.radiusMeters || 150,
-      occupancyStatus: a.occupancyStatus || null,
-      members: computeResidenceMembersFor(Array.from(memberIds), primaryOwnerId, a, forDispatch),
+      occupancyStatus,
+      members,
     };
   });
 }
