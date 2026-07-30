@@ -8428,8 +8428,13 @@ function computeResidenceSummaries(ownerIds: string[], forDispatch: boolean) {
       memberIds.add(ownerId);
       for (const fid of getFamilyMemberIds(ownerId)) memberIds.add(fid);
     }
-    const primaryOwnerId = clusterOwnerIds.sort()[0];
     const a = cluster.addr;
+    // primaryOwnerId MUST be whoever actually owns the representative address
+    // (a.id), not independently "whichever owner id sorts first" — those two
+    // can point to different people once a cluster spans unrelated accounts
+    // (e.g. test/demo profiles that happen to share the same coordinates),
+    // and the rename endpoint relies on ownerId's family to re-locate a.id.
+    const primaryOwnerId = cluster.entries.find(e => e.addr.id === a.id)?.ownerId || clusterOwnerIds[0];
     return {
       id: a.id, ownerId: primaryOwnerId, ownerName: adminUsers.get(primaryOwnerId)?.name || primaryOwnerId,
       label: a.label, address: a.address,
