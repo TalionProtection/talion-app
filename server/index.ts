@@ -3640,6 +3640,8 @@ app.get('/api/family/location-history', (req, res) => {
   const since = Number(req.query.since) || 0;
   const filtered = since > 0 ? history.filter(h => h.timestamp >= since) : history;
   const events = computeLocationEvents(targetUserId, filtered);
+  const addressesForDiag = (userAddresses.get(targetUserId) || []);
+  console.log(`[LocationHistory DIAGNOSTIC] targetUserId=${targetUserId} rawPointsTotal=${history.length} rawPointsInWindow=${filtered.length} addressesCount=${addressesForDiag.length} addressesWithCoords=${addressesForDiag.filter(a => a.latitude != null && a.longitude != null).length} eventsComputed=${events.length}`);
   res.json(events.slice(-200));
 });
 
