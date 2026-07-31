@@ -8229,10 +8229,14 @@ async function saveThreatAnalysisToSupabase(a: ThreatAnalysis): Promise<void> {
 // as geocodeAddress's Mapbox call). Returns null on any failure so the
 // caller can respond with a clean 503 instead of crashing — this must never
 // take down the server the way an uncaught throw would.
-async function callThreatAnalysisAI(entriesText: string, entryCount: number): Promise<{ summary: string; flaggedItems: Array<{ severity: string; title: string; rationale: string; sourceRefs: string[] }> } | null> {
+type ThreatAnalysisAIResult =
+  | { ok: true; summary: string; flaggedItems: Array<{ severity: string; title: string; rationale: string; sourceRefs: string[] }> }
+  | { ok: false; reason: string };
+
+async function callThreatAnalysisAI(entriesText: string, entryCount: number): Promise<ThreatAnalysisAIResult> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) { console.warn('[ThreatAnalysis] ANTHROPIC_API_KEY not set'); return null; }
-  if (entryCount === 0) return { summary: 'Aucune activité enregistrée sur cette période.', flaggedItems: [] };
+  if (!apiKey) { console.warn('[ThreatAnalysis] ANTHROPIC_API_KEY not set'); return { ok: false, reason: 'Clé API non configurée sur le serveur (ANTHROPIC_API_KEY absente)' }; }
+  if (entryCount === 0) return { ok: true, summary: 'Aucune activité enregistrée sur cette période.', flaggedItems: [] };
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -8246,16 +8250,27 @@ Si rien de notable ne ressort des données, renvoie un summary qui le dit explic
         messages: [{ role: 'user', content: entriesText }],
       }),
     });
-    if (!resp.ok) { console.error('[ThreatAnalysis] Anthropic API error:', resp.status, await resp.text().catch(() => '')); return null; }
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      console.error('[ThreatAnalysis] Anthropic API error:', resp.status, body);
+      return { ok: false, reason: `Anthropic a répondu ${resp.status}: ${body.slice(0, 300)}` };
+    }
     const data = await resp.json() as any;
     const text = data?.content?.[0]?.text;
-    if (!text) return null;
-    const parsed = JSON.parse(text);
-    if (typeof parsed.summary !== 'string' || !Array.isArray(parsed.flaggedItems)) return null;
-    return parsed;
+    if (!text) return { ok: false, reason: 'Réponse Anthropic sans contenu texte exploitable' };
+    let parsed: any;
+    try {
+      parsed = JSON.parse(text);
+    } catch (parseErr) {
+      return { ok: false, reason: `JSON invalide renvoyé par le modèle: ${String(text).slice(0, 300)}` };
+    }
+    if (typeof parsed.summary !== 'string' || !Array.isArray(parsed.flaggedItems)) {
+      return { ok: false, reason: 'Forme JSON inattendue renvoyée par le modèle' };
+    }
+    return { ok: true, summary: parsed.summary, flaggedItems: parsed.flaggedItems };
   } catch (e) {
     console.error('[ThreatAnalysis] callThreatAnalysisAI error:', e);
-    return null;
+    return { ok: false, reason: `Erreur réseau: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
 
@@ -8279,7 +8294,7 @@ app.post('/admin/threat-analysis/generate', requireAuth, requireRole('dispatcher
   ).join('\n');
 
   const result = await callThreatAnalysisAI(entriesText, entries.length);
-  if (!result) return res.status(503).json({ error: "Analyse IA indisponible (clé API manquante ou erreur réseau)" });
+  if (!result.ok) return res.status(503).json({ error: `Analyse IA indisponible : ${result.reason}` });
 
   const analysis: ThreatAnalysis = {
     id: uuidv4(), ownerId: userId, ownerName: owner.name,
