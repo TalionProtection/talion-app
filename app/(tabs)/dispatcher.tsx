@@ -206,6 +206,23 @@ export default function DispatcherScreen() {
   const [kpisLoading, setKpisLoading] = useState(false);
   const [kpisPeriodDays, setKpisPeriodDays] = useState(30);
 
+  // Main Courante + Analyse IA — mirrors the console's tabs of the same
+  // name, same endpoints, staff only.
+  const [familyGroupsList, setFamilyGroupsList] = useState<any[]>([]);
+  const [showMainCouranteModal, setShowMainCouranteModal] = useState(false);
+  const [mcFamilyUserId, setMcFamilyUserId] = useState('');
+  const [mcDays, setMcDays] = useState(30);
+  const [mcEntries, setMcEntries] = useState<any[]>([]);
+  const [mcLoading, setMcLoading] = useState(false);
+  const [mcNoteText, setMcNoteText] = useState('');
+  const [mcNoteSaving, setMcNoteSaving] = useState(false);
+
+  const [showThreatAnalysisModal, setShowThreatAnalysisModal] = useState(false);
+  const [taFamilyUserId, setTaFamilyUserId] = useState('');
+  const [taAnalyses, setTaAnalyses] = useState<any[]>([]);
+  const [taLoading, setTaLoading] = useState(false);
+  const [taGenerating, setTaGenerating] = useState(false);
+
   // Fetch responders from server
   const fetchResponders = useCallback(async () => {
     try {
@@ -498,6 +515,129 @@ export default function DispatcherScreen() {
     loadKPIs();
   }, [loadKPIs]);
 
+  const ensureFamilyGroupsLoaded = useCallback(async () => {
+    if (familyGroupsList.length > 0) return familyGroupsList;
+    try {
+      const baseUrl = getApiBaseUrl();
+      const res = await fetchWithTimeout(`${baseUrl}/api/family-groups`, { timeout: 10000, headers: await authHeader() });
+      const groups = res.ok ? await res.json() : [];
+      setFamilyGroupsList(groups);
+      return groups;
+    } catch (e) {
+      return [];
+    }
+  }, [familyGroupsList]);
+
+  const loadMainCourante = useCallback(async (userId?: string, days?: number) => {
+    const targetUserId = userId ?? mcFamilyUserId;
+    if (!targetUserId) return;
+    setMcLoading(true);
+    try {
+      const baseUrl = getApiBaseUrl();
+      const res = await fetchWithTimeout(`${baseUrl}/api/main-courante?userId=${targetUserId}&days=${days ?? mcDays}`, { timeout: 10000, headers: await authHeader() });
+      setMcEntries(res.ok ? await res.json() : []);
+    } catch (e) {
+      setMcEntries([]);
+    }
+    setMcLoading(false);
+  }, [mcFamilyUserId, mcDays]);
+
+  const openMainCouranteModal = useCallback(async () => {
+    setShowMainCouranteModal(true);
+    const groups = await ensureFamilyGroupsLoaded();
+    if (!mcFamilyUserId && groups.length > 0) {
+      const firstId = groups[0].members[0].id;
+      setMcFamilyUserId(firstId);
+      loadMainCourante(firstId);
+    } else if (mcFamilyUserId) {
+      loadMainCourante(mcFamilyUserId);
+    }
+  }, [ensureFamilyGroupsLoaded, mcFamilyUserId, loadMainCourante]);
+
+  const submitMainCouranteNote = useCallback(async () => {
+    if (!mcFamilyUserId || !mcNoteText.trim()) return;
+    setMcNoteSaving(true);
+    try {
+      const baseUrl = getApiBaseUrl();
+      const res = await fetchWithTimeout(`${baseUrl}/api/main-courante`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({ userId: mcFamilyUserId, text: mcNoteText.trim() }),
+        timeout: 10000,
+      });
+      if (res.ok) {
+        setMcNoteText('');
+        loadMainCourante(mcFamilyUserId);
+      } else {
+        Alert.alert('Erreur', "Impossible d'ajouter la note");
+      }
+    } catch (e) {
+      Alert.alert('Erreur', 'Erreur réseau');
+    }
+    setMcNoteSaving(false);
+  }, [mcFamilyUserId, mcNoteText, loadMainCourante]);
+
+  const loadThreatAnalyses = useCallback(async (userId?: string) => {
+    const targetUserId = userId ?? taFamilyUserId;
+    if (!targetUserId) return;
+    setTaLoading(true);
+    try {
+      const baseUrl = getApiBaseUrl();
+      const res = await fetchWithTimeout(`${baseUrl}/admin/threat-analysis?userId=${targetUserId}`, { timeout: 10000, headers: await authHeader() });
+      setTaAnalyses(res.ok ? await res.json() : []);
+    } catch (e) {
+      setTaAnalyses([]);
+    }
+    setTaLoading(false);
+  }, [taFamilyUserId]);
+
+  const openThreatAnalysisModal = useCallback(async () => {
+    setShowThreatAnalysisModal(true);
+    const groups = await ensureFamilyGroupsLoaded();
+    if (!taFamilyUserId && groups.length > 0) {
+      const firstId = groups[0].members[0].id;
+      setTaFamilyUserId(firstId);
+      loadThreatAnalyses(firstId);
+    } else if (taFamilyUserId) {
+      loadThreatAnalyses(taFamilyUserId);
+    }
+  }, [ensureFamilyGroupsLoaded, taFamilyUserId, loadThreatAnalyses]);
+
+  const generateThreatAnalysis = useCallback(async () => {
+    if (!taFamilyUserId) return;
+    setTaGenerating(true);
+    try {
+      const baseUrl = getApiBaseUrl();
+      const res = await fetchWithTimeout(`${baseUrl}/admin/threat-analysis/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({ userId: taFamilyUserId }),
+        timeout: 30000,
+      });
+      if (res.ok) {
+        loadThreatAnalyses(taFamilyUserId);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        Alert.alert('Erreur', err.error || "Impossible de générer l'analyse");
+      }
+    } catch (e) {
+      Alert.alert('Erreur', 'Erreur réseau');
+    }
+    setTaGenerating(false);
+  }, [taFamilyUserId, loadThreatAnalyses]);
+
+  const acknowledgeThreatItem = useCallback(async (analysisId: string, itemId: string) => {
+    try {
+      const baseUrl = getApiBaseUrl();
+      const res = await fetchWithTimeout(`${baseUrl}/admin/threat-analysis/${analysisId}/items/${itemId}/acknowledge`, {
+        method: 'PUT', headers: await authHeader(), timeout: 10000,
+      });
+      if (res.ok) loadThreatAnalyses(taFamilyUserId);
+    } catch (e) {
+      // silent
+    }
+  }, [taFamilyUserId, loadThreatAnalyses]);
+
   const formatDurationMs = (ms: number | null | undefined) => {
     if (ms == null) return '—';
     const minutes = Math.round(ms / 60000);
@@ -769,6 +909,18 @@ export default function DispatcherScreen() {
         <TouchableOpacity style={[styles.broadcastButton, { backgroundColor: '#1e3a5f' }]} onPress={openKPIsModal}>
           <Text style={styles.broadcastButtonIcon}>{'\u{1F4CA}'}</Text>
           <Text style={styles.broadcastButtonText}>Statistiques</Text>
+        </TouchableOpacity>
+
+        {/* Main Courante Button */}
+        <TouchableOpacity style={[styles.broadcastButton, { backgroundColor: '#4b5563' }]} onPress={openMainCouranteModal}>
+          <Text style={styles.broadcastButtonIcon}>{'\u{1F4D6}'}</Text>
+          <Text style={styles.broadcastButtonText}>Main Courante</Text>
+        </TouchableOpacity>
+
+        {/* Analyse IA Button */}
+        <TouchableOpacity style={[styles.broadcastButton, { backgroundColor: '#5b21b6' }]} onPress={openThreatAnalysisModal}>
+          <Text style={styles.broadcastButtonIcon}>{'\u{1F9E0}'}</Text>
+          <Text style={styles.broadcastButtonText}>Analyse IA</Text>
         </TouchableOpacity>
 
         {/* Refresh Button */}
@@ -1693,9 +1845,172 @@ export default function DispatcherScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* Main Courante Modal — mirrors the console's Main Courante tab */}
+      <Modal visible={showMainCouranteModal} transparent animationType="slide">
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' }}>
+          <View style={{ backgroundColor: '#fff', borderTopLeftRadius: 16, borderTopRightRadius: 16, maxHeight: '88%', padding: 16 }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <Text style={{ fontSize: 18, fontWeight: '700', color: '#1f2937' }}>{'\u{1F4D6}'} Main Courante</Text>
+              <TouchableOpacity onPress={() => mcFamilyUserId && loadMainCourante(mcFamilyUserId)}>
+                <Text style={{ fontSize: 20 }}>{'↻'}</Text>
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }}>
+              {familyGroupsList.map((g: any) => {
+                const id = g.members[0].id;
+                const label = g.members.map((m: any) => m.name).join(', ');
+                const active = mcFamilyUserId === id;
+                return (
+                  <TouchableOpacity
+                    key={id}
+                    style={{ paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8, backgroundColor: active ? '#1e3a5f' : '#f3f4f6', marginRight: 6 }}
+                    onPress={() => { setMcFamilyUserId(id); loadMainCourante(id); }}
+                  >
+                    <Text style={{ fontSize: 12, fontWeight: '600', color: active ? '#fff' : '#374151' }}>{label}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+
+            <View style={{ flexDirection: 'row', gap: 6, marginBottom: 12 }}>
+              {[{ label: '7j', value: 7 }, { label: '30j', value: 30 }, { label: '90j', value: 90 }].map(p => (
+                <TouchableOpacity
+                  key={p.label}
+                  style={{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: mcDays === p.value ? '#1e3a5f' : '#f3f4f6' }}
+                  onPress={() => { setMcDays(p.value); loadMainCourante(mcFamilyUserId, p.value); }}
+                >
+                  <Text style={{ fontSize: 12, fontWeight: '600', color: mcDays === p.value ? '#fff' : '#374151' }}>{p.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12, alignItems: 'center' }}>
+              <TextInput
+                style={{ flex: 1, borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 8, fontSize: 13 }}
+                placeholder="Ajouter une note..."
+                placeholderTextColor="#9ca3af"
+                value={mcNoteText}
+                onChangeText={setMcNoteText}
+              />
+              <TouchableOpacity
+                style={{ backgroundColor: '#1e3a5f', borderRadius: 8, paddingHorizontal: 14, paddingVertical: 9, opacity: mcNoteSaving ? 0.6 : 1 }}
+                onPress={submitMainCouranteNote}
+                disabled={mcNoteSaving}
+              >
+                {mcNoteSaving ? <ActivityIndicator size="small" color="#fff" /> : <Text style={{ color: '#fff', fontSize: 13, fontWeight: '600' }}>Ajouter</Text>}
+              </TouchableOpacity>
+            </View>
+
+            {mcLoading ? (
+              <ActivityIndicator size="large" color="#1e3a5f" style={{ marginTop: 24 }} />
+            ) : mcEntries.length === 0 ? (
+              <Text style={{ textAlign: 'center', color: '#9ca3af', marginTop: 24 }}>Aucune entrée sur cette période</Text>
+            ) : (
+              <ScrollView showsVerticalScrollIndicator={false}>
+                {mcEntries.map((e: any) => (
+                  <View key={e.id} style={{ backgroundColor: '#f9fafb', borderRadius: 10, padding: 10, marginBottom: 8 }}>
+                    <Text style={{ fontSize: 12, fontWeight: '700', color: '#1f2937' }}>
+                      {e.source === 'patrol' ? '🚶' : e.source === 'blackbook' ? '👁️' : '📝'} {new Date(e.timestamp).toLocaleString('fr-FR')}
+                    </Text>
+                    <Text style={{ fontSize: 12, color: '#374151', marginTop: 2 }}>{e.summary}</Text>
+                    {!!e.notes && <Text style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>{e.notes}</Text>}
+                    <Text style={{ fontSize: 10, color: '#9ca3af', marginTop: 4, fontStyle: 'italic' }}>{e.createdByName}</Text>
+                  </View>
+                ))}
+              </ScrollView>
+            )}
+
+            <TouchableOpacity style={styles.modalCloseBtn} onPress={() => setShowMainCouranteModal(false)}>
+              <Text style={styles.modalCloseBtnText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Analyse IA Modal — mirrors the console's Analyse IA tab */}
+      <Modal visible={showThreatAnalysisModal} transparent animationType="slide">
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' }}>
+          <View style={{ backgroundColor: '#fff', borderTopLeftRadius: 16, borderTopRightRadius: 16, maxHeight: '88%', padding: 16 }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <Text style={{ fontSize: 18, fontWeight: '700', color: '#1f2937' }}>{'\u{1F9E0}'} Analyse IA</Text>
+              <TouchableOpacity onPress={() => taFamilyUserId && loadThreatAnalyses(taFamilyUserId)}>
+                <Text style={{ fontSize: 20 }}>{'↻'}</Text>
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
+              {familyGroupsList.map((g: any) => {
+                const id = g.members[0].id;
+                const label = g.members.map((m: any) => m.name).join(', ');
+                const active = taFamilyUserId === id;
+                return (
+                  <TouchableOpacity
+                    key={id}
+                    style={{ paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8, backgroundColor: active ? '#1e3a5f' : '#f3f4f6', marginRight: 6 }}
+                    onPress={() => { setTaFamilyUserId(id); loadThreatAnalyses(id); }}
+                  >
+                    <Text style={{ fontSize: 12, fontWeight: '600', color: active ? '#fff' : '#374151' }}>{label}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+
+            <TouchableOpacity
+              style={{ backgroundColor: '#5b21b6', borderRadius: 10, paddingVertical: 12, alignItems: 'center', marginBottom: 12, opacity: taGenerating || !taFamilyUserId ? 0.6 : 1 }}
+              onPress={generateThreatAnalysis}
+              disabled={taGenerating || !taFamilyUserId}
+            >
+              {taGenerating ? <ActivityIndicator size="small" color="#fff" /> : <Text style={{ color: '#fff', fontSize: 14, fontWeight: '700' }}>{'\u{1F9E0}'} Générer une analyse (30 jours)</Text>}
+            </TouchableOpacity>
+
+            {taLoading ? (
+              <ActivityIndicator size="large" color="#1e3a5f" style={{ marginTop: 24 }} />
+            ) : taAnalyses.length === 0 ? (
+              <Text style={{ textAlign: 'center', color: '#9ca3af', marginTop: 24 }}>Aucune analyse générée pour cette famille</Text>
+            ) : (
+              <ScrollView showsVerticalScrollIndicator={false}>
+                {taAnalyses.map((a: any) => (
+                  <View key={a.id} style={{ backgroundColor: '#f9fafb', borderRadius: 10, padding: 12, marginBottom: 10 }}>
+                    <Text style={{ fontSize: 11, color: '#9ca3af' }}>
+                      {new Date(a.generatedAt).toLocaleString('fr-FR')} — {a.entryCount} entrée(s) sur {a.periodDays}j
+                    </Text>
+                    <Text style={{ fontSize: 13, color: '#1f2937', marginTop: 4 }}>{a.summary}</Text>
+                    {(a.flaggedItems || []).map((item: any) => (
+                      <View key={item.id} style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 8, backgroundColor: '#fff', borderRadius: 8, padding: 8, marginTop: 6 }}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ fontSize: 12, fontWeight: '700', color: KPI_SEVERITY_COLORS?.[item.severity] || '#6b7280' }}>
+                            {SEVERITY_LABELS_FR[item.severity] || item.severity} — {item.title}
+                          </Text>
+                          <Text style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>{item.rationale}</Text>
+                        </View>
+                        {item.acknowledged ? (
+                          <Text style={{ fontSize: 11, color: '#22c55e' }}>{'✓'} Acquitté</Text>
+                        ) : (
+                          <TouchableOpacity onPress={() => acknowledgeThreatItem(a.id, item.id)}>
+                            <Text style={{ fontSize: 11, color: '#1e3a5f', fontWeight: '600' }}>Acquitter</Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    ))}
+                  </View>
+                ))}
+              </ScrollView>
+            )}
+
+            <TouchableOpacity style={styles.modalCloseBtn} onPress={() => setShowThreatAnalysisModal(false)}>
+              <Text style={styles.modalCloseBtnText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </TalionScreen>
   );
 }
+
+const SEVERITY_LABELS_FR: Record<string, string> = { low: 'Faible', medium: 'Moyen', high: 'Élevé', critical: 'Critique' };
+const KPI_SEVERITY_COLORS: Record<string, string> = { low: '#6b7280', medium: '#3b82f6', high: '#f59e0b', critical: '#dc2626' };
 
 const styles = StyleSheet.create({
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },

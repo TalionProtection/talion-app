@@ -58,6 +58,12 @@
       <a href="#" class="nav-item" data-tab="blackbook">
         <span class="nav-icon">&#x1F575;&#xFE0F;</span> Blackbook
       </a>
+      <a href="#" class="nav-item" data-tab="main-courante">
+        <span class="nav-icon">&#x1F4D6;</span> Main Courante
+      </a>
+      <a href="#" class="nav-item" data-tab="threat-analysis">
+        <span class="nav-icon">&#x1F9E0;</span> Analyse IA
+      </a>
       <a href="#" class="nav-item" data-tab="health">
         <span class="nav-icon">&#x1FA7A;</span> Santé Système
       </a>
@@ -837,6 +843,58 @@
         <div id="blackbookEmptyState" class="empty-state" style="display:none;"><div class="empty-icon">🕵️</div><p>Aucune fiche trouvée</p></div>
       </div>
     </section>
+
+    <!-- Main Courante Tab: unified chronological log (rondes + Blackbook + notes) -->
+    <section class="tab-content" id="tab-main-courante">
+      <div class="toolbar">
+        <div class="toolbar-stats">
+          <select id="mcFamilySelect" class="form-control" onchange="loadMainCourante()" style="min-width:260px;"></select>
+          <select id="mcDaysSelect" class="form-control" onchange="loadMainCourante()" style="width:140px;">
+            <option value="7">7 derniers jours</option>
+            <option value="30" selected>30 derniers jours</option>
+            <option value="90">90 derniers jours</option>
+          </select>
+          <button class="btn btn-sm" onclick="loadMainCourante()">&#x21BB; Rafraîchir</button>
+          <button class="btn btn-primary btn-sm" onclick="openAddMainCouranteNote()">&#x2795; Ajouter une note</button>
+        </div>
+      </div>
+      <div id="mainCouranteList" class="patrol-reports-grid">
+        <div class="empty-state">Sélectionnez une famille</div>
+      </div>
+    </section>
+
+    <!-- Analyse IA Tab -->
+    <section class="tab-content" id="tab-threat-analysis">
+      <div class="toolbar">
+        <div class="toolbar-stats">
+          <select id="taFamilySelect" class="form-control" onchange="loadThreatAnalyses()" style="min-width:260px;"></select>
+          <button class="btn btn-sm" onclick="loadThreatAnalyses()">&#x21BB; Rafraîchir</button>
+          <button class="btn btn-primary btn-sm" id="taGenerateBtn" onclick="generateThreatAnalysis()">&#x1F9E0; Générer une analyse (30 jours)</button>
+        </div>
+      </div>
+      <div id="threatAnalysisList" class="patrol-reports-grid">
+        <div class="empty-state">Sélectionnez une famille</div>
+      </div>
+    </section>
+
+    <!-- Add Main Courante Note Modal -->
+    <div class="modal-overlay" id="mcNoteModal" style="display:none;">
+      <div class="modal" style="max-width:440px;">
+        <h3 class="modal-title">Ajouter une note</h3>
+        <div class="form-group">
+          <label>Famille</label>
+          <select id="mcNoteFamilySelect" class="form-control"></select>
+        </div>
+        <div class="form-group">
+          <label>Note</label>
+          <textarea id="mcNoteText" class="form-control" rows="4" placeholder="Observation, information à consigner..."></textarea>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+          <button class="btn btn-secondary" onclick="closeAddMainCouranteNote()">Annuler</button>
+          <button class="btn btn-primary" onclick="submitMainCouranteNote()">Ajouter</button>
+        </div>
+      </div>
+    </div>
 
     <!-- System Health Tab -->
     <section class="tab-content" id="tab-health">

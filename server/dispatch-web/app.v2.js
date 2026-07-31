@@ -677,7 +677,7 @@ function switchTab(tab) {
   document.querySelector(`.nav-item[data-tab="${tab}"]`)?.classList.add('active');
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.getElementById(`tab-${tab}`)?.classList.add('active');
-  const titles = { overview: "Vue d'ensemble", incidents: "Gestion des incidents", responders: "Unités d'intervention", broadcast: "Diffusion", map: "Carte en direct", messages: "Messages", patrol: "Rapports de Ronde", ptt: "Push-to-Talk", archives: "Archives", families: "Familles", visits: "Visites", blackbook: "Blackbook", health: "Santé Système", kpis: "Statistiques" };
+  const titles = { overview: "Vue d'ensemble", incidents: "Gestion des incidents", responders: "Unités d'intervention", broadcast: "Diffusion", map: "Carte en direct", messages: "Messages", patrol: "Rapports de Ronde", ptt: "Push-to-Talk", archives: "Archives", families: "Familles", visits: "Visites", blackbook: "Blackbook", 'main-courante': "Main Courante", 'threat-analysis': "Analyse IA", health: "Santé Système", kpis: "Statistiques" };
   document.getElementById('pageTitle').textContent = titles[tab] || tab;
   if (tab === 'map') {
     setTimeout(() => { if (dispatchMap) { dispatchMap.invalidateSize(); } else { initMap(); } }, 100);
@@ -696,6 +696,12 @@ function switchTab(tab) {
   }
   if (tab === 'blackbook') {
     loadBlackbook();
+  }
+  if (tab === 'main-courante') {
+    ensureFamilyGroupsLoaded().then(() => { populateFamilySelect('mcFamilySelect'); loadMainCourante(); });
+  }
+  if (tab === 'threat-analysis') {
+    ensureFamilyGroupsLoaded().then(() => { populateFamilySelect('taFamilySelect'); loadThreatAnalyses(); });
   }
   if (tab === 'health') {
     loadSystemHealth();
@@ -1406,6 +1412,167 @@ async function loadFamilyGroups() {
   renderFamilyGroups();
   loadUpcomingInterventions();
   loadUpcomingItineraries();
+}
+
+// ─── Main Courante + Analyse IA ─────────────────────────────────────────
+async function ensureFamilyGroupsLoaded() {
+  if (familyGroups.length > 0) return;
+  try {
+    const res = await fetch(`${API_BASE}/dispatch/family-groups`);
+    familyGroups = res.ok ? await res.json() : [];
+  } catch (e) {
+    familyGroups = [];
+  }
+}
+
+// Any member of the group works as the anchor userId — getFamilyMemberIds
+// resolves the same family regardless of which member is picked.
+function populateFamilySelect(selectId) {
+  const select = document.getElementById(selectId);
+  const current = select.value;
+  select.innerHTML = '<option value="">— Choisir une famille —</option>' +
+    familyGroups.map(g => `<option value="${g.members[0].id}">${escapeHtml(g.members.map(m => m.name).join(', '))}</option>`).join('');
+  if (current) select.value = current;
+}
+
+async function loadMainCourante() {
+  const userId = document.getElementById('mcFamilySelect').value;
+  const container = document.getElementById('mainCouranteList');
+  if (!userId) { container.innerHTML = '<div class="empty-state">Sélectionnez une famille</div>'; return; }
+  const days = document.getElementById('mcDaysSelect').value;
+  container.innerHTML = '<div class="empty-state">Chargement...</div>';
+  try {
+    const res = await fetch(`${API_BASE}/api/main-courante?userId=${userId}&days=${days}`);
+    const entries = res.ok ? await res.json() : [];
+    renderMainCourante(entries);
+  } catch (e) {
+    container.innerHTML = '<div class="empty-state">Erreur de chargement</div>';
+  }
+}
+
+const MC_SOURCE_ICON = { patrol: '🚶', blackbook: '👁️', manual: '📝' };
+
+function renderMainCourante(entries) {
+  const container = document.getElementById('mainCouranteList');
+  if (!entries || entries.length === 0) {
+    container.innerHTML = '<div class="empty-state">📖 Aucune entrée sur cette période</div>';
+    return;
+  }
+  container.innerHTML = entries.map(e => `
+    <div class="provider-row">
+      <div>
+        <div class="provider-row-name">${MC_SOURCE_ICON[e.source] || '•'} ${new Date(e.timestamp).toLocaleString('fr-FR')} — ${escapeHtml(e.summary)}</div>
+        ${e.notes ? `<div class="provider-row-detail">${escapeHtml(e.notes)}</div>` : ''}
+        <div class="provider-row-detail" style="font-style:italic;">${escapeHtml(e.createdByName || '')}</div>
+      </div>
+    </div>`).join('');
+}
+
+function openAddMainCouranteNote() {
+  populateFamilySelect('mcNoteFamilySelect');
+  const mcFamily = document.getElementById('mcFamilySelect').value;
+  if (mcFamily) document.getElementById('mcNoteFamilySelect').value = mcFamily;
+  document.getElementById('mcNoteText').value = '';
+  document.getElementById('mcNoteModal').style.display = 'flex';
+}
+
+function closeAddMainCouranteNote() {
+  document.getElementById('mcNoteModal').style.display = 'none';
+}
+
+async function submitMainCouranteNote() {
+  const userId = document.getElementById('mcNoteFamilySelect').value;
+  const text = document.getElementById('mcNoteText').value.trim();
+  if (!userId) { alert('Sélectionnez une famille'); return; }
+  if (!text) { alert('La note ne peut pas être vide'); return; }
+  try {
+    const res = await fetch(`${API_BASE}/api/main-courante`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, text }),
+    });
+    if (!res.ok) { alert('Impossible d\'ajouter la note'); return; }
+    closeAddMainCouranteNote();
+    if (document.getElementById('mcFamilySelect').value === userId) loadMainCourante();
+  } catch (e) {
+    alert('Erreur réseau');
+  }
+}
+
+async function loadThreatAnalyses() {
+  const userId = document.getElementById('taFamilySelect').value;
+  const container = document.getElementById('threatAnalysisList');
+  if (!userId) { container.innerHTML = '<div class="empty-state">Sélectionnez une famille</div>'; return; }
+  container.innerHTML = '<div class="empty-state">Chargement...</div>';
+  try {
+    const res = await fetch(`${API_BASE}/admin/threat-analysis?userId=${userId}`);
+    const analyses = res.ok ? await res.json() : [];
+    renderThreatAnalyses(analyses);
+  } catch (e) {
+    container.innerHTML = '<div class="empty-state">Erreur de chargement</div>';
+  }
+}
+
+const SEVERITY_LABELS_FR = { low: 'Faible', medium: 'Moyen', high: 'Élevé', critical: 'Critique' };
+
+function renderThreatAnalyses(analyses) {
+  const container = document.getElementById('threatAnalysisList');
+  if (!analyses || analyses.length === 0) {
+    container.innerHTML = '<div class="empty-state">🧠 Aucune analyse générée pour cette famille</div>';
+    return;
+  }
+  container.innerHTML = analyses.map(a => `
+    <div class="provider-row" style="flex-direction:column;align-items:stretch;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div class="provider-row-name">${new Date(a.generatedAt).toLocaleString('fr-FR')} — ${a.entryCount} entrée(s) sur ${a.periodDays}j</div>
+        <span style="font-size:11px;color:var(--text-muted);">par ${escapeHtml(a.generatedByName)}</span>
+      </div>
+      <div class="provider-row-detail" style="margin:6px 0;">${escapeHtml(a.summary)}</div>
+      ${(a.flaggedItems || []).map(item => `
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;background:rgba(148,163,184,0.1);border-radius:6px;padding:8px;margin-top:6px;">
+          <div style="flex:1;">
+            <div style="font-size:12px;font-weight:700;color:${SEVERITY_COLORS[item.severity] || '#6b7280'};">${SEVERITY_LABELS_FR[item.severity] || item.severity} — ${escapeHtml(item.title)}</div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${escapeHtml(item.rationale)}</div>
+          </div>
+          ${item.acknowledged
+            ? `<span style="font-size:11px;color:#4ade80;white-space:nowrap;">✓ Acquitté</span>`
+            : `<button class="btn btn-secondary btn-sm" onclick="acknowledgeThreatItem('${a.id}','${item.id}')">Acquitter</button>`}
+        </div>`).join('')}
+    </div>`).join('');
+}
+
+async function generateThreatAnalysis() {
+  const userId = document.getElementById('taFamilySelect').value;
+  if (!userId) { alert('Sélectionnez une famille'); return; }
+  const btn = document.getElementById('taGenerateBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Génération en cours...';
+  try {
+    const res = await fetch(`${API_BASE}/admin/threat-analysis/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(err.error || 'Impossible de générer l\'analyse');
+    } else {
+      loadThreatAnalyses();
+    }
+  } catch (e) {
+    alert('Erreur réseau');
+  }
+  btn.disabled = false;
+  btn.textContent = '🧠 Générer une analyse (30 jours)';
+}
+
+async function acknowledgeThreatItem(analysisId, itemId) {
+  try {
+    const res = await fetch(`${API_BASE}/admin/threat-analysis/${analysisId}/items/${itemId}/acknowledge`, { method: 'PUT' });
+    if (res.ok) loadThreatAnalyses();
+  } catch (e) {
+    alert('Erreur réseau');
+  }
 }
 
 // ─── Cross-residence interventions calendar ────────────────────────────

@@ -585,7 +585,7 @@ interface AdminIncident {
 interface AuditEntry {
   id: string;
   timestamp: number;
-  category: 'auth' | 'user' | 'incident' | 'system' | 'broadcast' | 'access_override';
+  category: 'auth' | 'user' | 'incident' | 'system' | 'broadcast' | 'access_override' | 'threat_analysis';
   action: string;
   performedBy: string;
   targetUser?: string;
@@ -6506,6 +6506,8 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
     loadPlannedInterventionsFromSupabase(),
     loadTravelItinerariesFromSupabase(),
     loadPreauthorizedGuestsFromSupabase(),
+    loadMainCouranteNotesFromSupabase(),
+    loadThreatAnalysesFromSupabase(),
   ]);
   console.log('[Startup] All Supabase data loaded — ready to serve requests');
 
@@ -7979,6 +7981,354 @@ async function deleteBlackbookEntryFromSupabase(id: string): Promise<void> {
 function isBlackbookStaff(role: string): boolean {
   return role === 'responder' || role === 'dispatcher' || role === 'admin';
 }
+
+// ─── Main Courante + Analyse IA ────────────────────────────────────────
+// Main Courante is a unified chronological log — it doesn't store its own
+// events for patrol reports/Blackbook sightings (those already live in
+// patrolReports/blackbookEntries), it merges them at read time. Only
+// free-text manual notes need their own store.
+interface MainCouranteNote {
+  id: string;
+  timestamp: number;
+  ownerId: string; // family anchor, same convention as UserAddress.userId
+  residenceId?: string;
+  residenceLabel?: string;
+  text: string;
+  createdBy: string;
+  createdByName: string;
+}
+
+const mainCouranteNotes = new Map<string, MainCouranteNote>();
+
+async function loadMainCouranteNotesFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('main_courante_notes').select('*');
+    if (error) { console.error('[Supabase] Failed to load main_courante_notes:', error.message); return; }
+    if (data && data.length > 0) {
+      mainCouranteNotes.clear();
+      data.forEach((n: any) => {
+        mainCouranteNotes.set(n.id, {
+          id: n.id, timestamp: n.timestamp, ownerId: n.owner_id,
+          residenceId: n.residence_id || undefined, residenceLabel: n.residence_label || undefined,
+          text: n.text, createdBy: n.created_by, createdByName: n.created_by_name,
+        });
+      });
+      console.log(`[Supabase] Loaded ${data.length} main courante notes`);
+    }
+  } catch (e) { console.error('[Supabase] loadMainCouranteNotesFromSupabase error:', e); }
+}
+
+async function saveMainCouranteNoteToSupabase(note: MainCouranteNote): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('main_courante_notes').upsert({
+      id: note.id, timestamp: note.timestamp, owner_id: note.ownerId,
+      residence_id: note.residenceId || null, residence_label: note.residenceLabel || null,
+      text: note.text, created_by: note.createdBy, created_by_name: note.createdByName,
+    });
+    if (error) console.error('[Supabase] Failed to persist main courante note:', error.message);
+  } catch (e) { console.error('[Supabase] saveMainCouranteNoteToSupabase error:', e); }
+}
+
+// PATROL_SITES are fixed neighborhood beats (e.g. "Champel — Avenue de
+// Champel 24") that read like real addresses but carry no stored link to
+// any UserAddress/family — patrol reports used to show up in every family's
+// Main Courante unfiltered, which defeats the point of filtering by family
+// at all. Resolve each site to the nearest registered residence (if any)
+// once, by geocoding it and matching against every family's addresses —
+// same geocodeAddress()/haversineDistance() building blocks already used
+// for residence dedup. Cached per site name: there are only 8 sites today,
+// they don't move, so this costs at most 8 geocoding calls per server
+// lifetime, not one per report.
+const PATROL_SITE_FAMILY_MATCH_METERS = 250;
+const patrolSiteFamilyCache = new Map<string, { ownerId: string; ownerName: string; residenceLabel: string } | null>();
+
+async function resolvePatrolSiteFamily(siteName: string): Promise<{ ownerId: string; ownerName: string; residenceLabel: string } | null> {
+  if (patrolSiteFamilyCache.has(siteName)) return patrolSiteFamilyCache.get(siteName)!;
+  let result: { ownerId: string; ownerName: string; residenceLabel: string } | null = null;
+  try {
+    // PATROL_SITES strings (e.g. "Champel — Avenue de Champel 24") have no
+    // city/country, unlike every registered residence address — append one
+    // so the geocoder has the same context it gets everywhere else.
+    const coords = await geocodeAddress(`${siteName}, Genève, Suisse`);
+    if (coords) {
+      let best: { ownerId: string; label: string; dist: number } | null = null;
+      for (const [ownerId, addresses] of userAddresses) {
+        for (const a of addresses) {
+          if (a.latitude == null || a.longitude == null) continue;
+          const dist = haversineDistance(coords.latitude, coords.longitude, a.latitude, a.longitude);
+          if (dist <= PATROL_SITE_FAMILY_MATCH_METERS && (!best || dist < best.dist)) best = { ownerId, label: a.label, dist };
+        }
+      }
+      if (best) result = { ownerId: best.ownerId, ownerName: adminUsers.get(best.ownerId)?.name || best.ownerId, residenceLabel: best.label };
+    }
+  } catch (e) {
+    console.error('[Patrol] resolvePatrolSiteFamily error:', e);
+  }
+  patrolSiteFamilyCache.set(siteName, result);
+  return result;
+}
+
+interface MainCouranteEntry {
+  id: string;
+  timestamp: number;
+  source: 'patrol' | 'blackbook' | 'manual';
+  ownerId?: string; // family this entry belongs to, when known — for
+  // patrol, resolved live via resolvePatrolSiteFamily; absent if the site
+  // isn't within range of any registered residence.
+  ownerName?: string;
+  residenceLabel?: string;
+  category: string;
+  summary: string;
+  notes?: string;
+  createdBy: string;
+  createdByName: string;
+  refId: string;
+}
+
+// Shared by the Main Courante tab (family-filterable) and the AI analysis
+// (always called with a specific family's ownerIds). When ownerIds is null
+// (unfiltered view), every patrol report is included regardless of whether
+// its site resolved to a family; when scoped, only reports whose resolved
+// family is in ownerIds are included — a site with no nearby residence
+// simply never appears in any family-scoped view.
+async function computeMainCouranteEntries(ownerIds: string[] | null, fromMs: number, toMs: number): Promise<MainCouranteEntry[]> {
+  const entries: MainCouranteEntry[] = [];
+
+  for (const r of patrolReports) {
+    if (r.createdAt < fromMs || r.createdAt > toMs) continue;
+    const family = await resolvePatrolSiteFamily(r.location);
+    if (ownerIds && (!family || !ownerIds.includes(family.ownerId))) continue;
+    entries.push({
+      id: `patrol-${r.id}`, timestamp: r.createdAt, source: 'patrol',
+      ownerId: family?.ownerId, ownerName: family?.ownerName, residenceLabel: family?.residenceLabel,
+      category: r.status,
+      summary: `Ronde — ${r.location}${family ? ` (${family.ownerName})` : ''} — ${PATROL_STATUS_CONFIG[r.status]?.label || r.status}`,
+      notes: r.notes, createdBy: r.createdBy, createdByName: r.createdByName, refId: r.id,
+    });
+  }
+
+  for (const entry of blackbookEntries.values()) {
+    for (const s of entry.sightings) {
+      if (s.timestamp < fromMs || s.timestamp > toMs) continue;
+      if (ownerIds && (!s.residenceOwnerId || !ownerIds.includes(s.residenceOwnerId))) continue;
+      entries.push({
+        id: `bb-${s.id}`, timestamp: s.timestamp, source: 'blackbook',
+        ownerId: s.residenceOwnerId, ownerName: s.residenceOwnerName, residenceLabel: s.residenceLabel,
+        category: s.category,
+        summary: `${entry.firstName} ${entry.lastName} — ${BLACKBOOK_CATEGORY_LABELS[s.category] || s.category}${s.residenceLabel ? ' — ' + s.residenceLabel : ''}`,
+        notes: s.notes, createdBy: s.reportedBy, createdByName: s.reportedByName, refId: entry.id,
+      });
+    }
+  }
+
+  for (const note of mainCouranteNotes.values()) {
+    if (note.timestamp < fromMs || note.timestamp > toMs) continue;
+    if (ownerIds && !ownerIds.includes(note.ownerId)) continue;
+    entries.push({
+      id: `note-${note.id}`, timestamp: note.timestamp, source: 'manual',
+      ownerId: note.ownerId, residenceLabel: note.residenceLabel,
+      category: 'note', summary: note.text.length > 80 ? note.text.slice(0, 80) + '…' : note.text,
+      notes: note.text, createdBy: note.createdBy, createdByName: note.createdByName, refId: note.id,
+    });
+  }
+
+  entries.sort((a, b) => b.timestamp - a.timestamp);
+  return entries;
+}
+
+// GET /api/main-courante?userId=&days= - unified log for a family (staff only)
+app.get('/api/main-courante', requireAuth, async (req, res) => {
+  const caller = req.supabaseUser!;
+  if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
+  const userId = req.query.userId as string;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  if (!canAccessFamily(callerAccess, userId)) return res.status(403).json({ error: 'Not authorized for this family' });
+  const days = Math.min(Number(req.query.days) || 30, 365);
+  const now = Date.now();
+  const ownerIds = Array.from(new Set([userId, ...getFamilyMemberIds(userId)]));
+  res.json(await computeMainCouranteEntries(ownerIds, now - days * 24 * 60 * 60 * 1000, now));
+});
+
+// POST /api/main-courante - add a free-text log entry (staff only)
+app.post('/api/main-courante', requireAuth, async (req, res) => {
+  const caller = req.supabaseUser!;
+  if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
+  const { userId, residenceId, residenceLabel, text } = req.body;
+  if (!userId || !text || !String(text).trim()) return res.status(400).json({ error: 'userId and text required' });
+  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  if (!canAccessFamily(callerAccess, userId)) return res.status(403).json({ error: 'Not authorized for this family' });
+  const note: MainCouranteNote = {
+    id: uuidv4(), timestamp: Date.now(), ownerId: userId,
+    residenceId: residenceId || undefined, residenceLabel: residenceLabel || undefined,
+    text: String(text).trim(), createdBy: caller.id, createdByName: adminUsers.get(caller.id)?.name || caller.id,
+  };
+  mainCouranteNotes.set(note.id, note);
+  await saveMainCouranteNoteToSupabase(note);
+  res.json(note);
+});
+
+interface ThreatAnalysisItem {
+  id: string;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  title: string;
+  rationale: string;
+  sourceRefs: string[];
+  acknowledged: boolean;
+  acknowledgedBy?: string;
+  acknowledgedAt?: number;
+}
+
+interface ThreatAnalysis {
+  id: string;
+  ownerId: string;
+  ownerName: string;
+  generatedAt: number;
+  generatedBy: string;
+  generatedByName: string;
+  periodDays: number;
+  entryCount: number;
+  summary: string;
+  flaggedItems: ThreatAnalysisItem[];
+}
+
+const threatAnalyses = new Map<string, ThreatAnalysis>();
+
+async function loadThreatAnalysesFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('threat_analyses').select('*');
+    if (error) { console.error('[Supabase] Failed to load threat_analyses:', error.message); return; }
+    if (data && data.length > 0) {
+      threatAnalyses.clear();
+      data.forEach((a: any) => {
+        threatAnalyses.set(a.id, {
+          id: a.id, ownerId: a.owner_id, ownerName: a.owner_name,
+          generatedAt: a.generated_at, generatedBy: a.generated_by, generatedByName: a.generated_by_name,
+          periodDays: a.period_days, entryCount: a.entry_count, summary: a.summary,
+          flaggedItems: a.flagged_items || [],
+        });
+      });
+      console.log(`[Supabase] Loaded ${data.length} threat analyses`);
+    }
+  } catch (e) { console.error('[Supabase] loadThreatAnalysesFromSupabase error:', e); }
+}
+
+async function saveThreatAnalysisToSupabase(a: ThreatAnalysis): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('threat_analyses').upsert({
+      id: a.id, owner_id: a.ownerId, owner_name: a.ownerName,
+      generated_at: a.generatedAt, generated_by: a.generatedBy, generated_by_name: a.generatedByName,
+      period_days: a.periodDays, entry_count: a.entryCount, summary: a.summary,
+      flagged_items: a.flaggedItems,
+    });
+    if (error) console.error('[Supabase] Failed to persist threat analysis:', error.message);
+  } catch (e) { console.error('[Supabase] saveThreatAnalysisToSupabase error:', e); }
+}
+
+// Calls the Anthropic Messages API directly (fetch, no SDK — same convention
+// as geocodeAddress's Mapbox call). Returns null on any failure so the
+// caller can respond with a clean 503 instead of crashing — this must never
+// take down the server the way an uncaught throw would.
+async function callThreatAnalysisAI(entriesText: string, entryCount: number): Promise<{ summary: string; flaggedItems: Array<{ severity: string; title: string; rationale: string; sourceRefs: string[] }> } | null> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) { console.warn('[ThreatAnalysis] ANTHROPIC_API_KEY not set'); return null; }
+  if (entryCount === 0) return { summary: 'Aucune activité enregistrée sur cette période.', flaggedItems: [] };
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5',
+        max_tokens: 2000,
+        system: `Tu es un analyste protection pour une société de sécurité résidentielle (clients UHNWI). On te fournit la main courante (rondes, sightings Blackbook, notes manuelles) d'une famille sur une période donnée. Réponds UNIQUEMENT en JSON strict, sans texte autour, avec exactement cette forme :
+{"summary": "résumé narratif court en français", "flaggedItems": [{"severity": "low|medium|high|critical", "title": "titre court", "rationale": "pourquoi c'est signalé, en te basant uniquement sur les faits fournis", "sourceRefs": ["id des entrées concernées"]}]}
+Si rien de notable ne ressort des données, renvoie un summary qui le dit explicitement et flaggedItems: [] — n'invente jamais un pattern qui n'est pas soutenu par les données. Les rondes ne sont pas rattachées à une famille spécifique (secteur général) — ne leur attribue pas une signification propre à cette famille sans justification claire.`,
+        messages: [{ role: 'user', content: entriesText }],
+      }),
+    });
+    if (!resp.ok) { console.error('[ThreatAnalysis] Anthropic API error:', resp.status, await resp.text().catch(() => '')); return null; }
+    const data = await resp.json() as any;
+    const text = data?.content?.[0]?.text;
+    if (!text) return null;
+    const parsed = JSON.parse(text);
+    if (typeof parsed.summary !== 'string' || !Array.isArray(parsed.flaggedItems)) return null;
+    return parsed;
+  } catch (e) {
+    console.error('[ThreatAnalysis] callThreatAnalysisAI error:', e);
+    return null;
+  }
+}
+
+// POST /admin/threat-analysis/generate - on-demand, 30-day window (dispatcher+)
+app.post('/admin/threat-analysis/generate', requireAuth, requireRole('dispatcher'), async (req, res) => {
+  const caller = req.supabaseUser!;
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  if (!canAccessFamily(callerAccess, userId)) return res.status(403).json({ error: 'Not authorized for this family' });
+
+  const owner = adminUsers.get(userId);
+  if (!owner) return res.status(404).json({ error: 'User not found' });
+
+  const periodDays = 30;
+  const now = Date.now();
+  const ownerIds = Array.from(new Set([userId, ...getFamilyMemberIds(userId)]));
+  const entries = await computeMainCouranteEntries(ownerIds, now - periodDays * 24 * 60 * 60 * 1000, now);
+  const entriesText = entries.map(e =>
+    `[${e.id}] ${new Date(e.timestamp).toISOString()} (${e.source}) ${e.summary}${e.notes ? ' — ' + e.notes : ''}`
+  ).join('\n');
+
+  const result = await callThreatAnalysisAI(entriesText, entries.length);
+  if (!result) return res.status(503).json({ error: "Analyse IA indisponible (clé API manquante ou erreur réseau)" });
+
+  const analysis: ThreatAnalysis = {
+    id: uuidv4(), ownerId: userId, ownerName: owner.name,
+    generatedAt: now, generatedBy: caller.id, generatedByName: adminUsers.get(caller.id)?.name || caller.id,
+    periodDays, entryCount: entries.length, summary: result.summary,
+    flaggedItems: result.flaggedItems.map(item => ({
+      id: uuidv4(),
+      severity: (['low', 'medium', 'high', 'critical'].includes(item.severity) ? item.severity : 'low') as ThreatAnalysisItem['severity'],
+      title: item.title, rationale: item.rationale, sourceRefs: item.sourceRefs || [],
+      acknowledged: false,
+    })),
+  };
+  threatAnalyses.set(analysis.id, analysis);
+  await saveThreatAnalysisToSupabase(analysis);
+  addAuditEntry('threat_analysis', 'Analyse IA générée', caller.id, `${owner.name} — ${entries.length} entrées, ${analysis.flaggedItems.length} élément(s) signalé(s)`, userId);
+  res.json(analysis);
+});
+
+// GET /admin/threat-analysis?userId=&limit= - history for a family (dispatcher+)
+app.get('/admin/threat-analysis', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const caller = req.supabaseUser!;
+  const userId = req.query.userId as string;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  if (!canAccessFamily(callerAccess, userId)) return res.status(403).json({ error: 'Not authorized for this family' });
+  const limit = Math.min(Number(req.query.limit) || 20, 100);
+  const list = Array.from(threatAnalyses.values())
+    .filter(a => a.ownerId === userId)
+    .sort((a, b) => b.generatedAt - a.generatedAt)
+    .slice(0, limit);
+  res.json(list);
+});
+
+// PUT /admin/threat-analysis/:id/items/:itemId/acknowledge (dispatcher+)
+app.put('/admin/threat-analysis/:id/items/:itemId/acknowledge', requireAuth, requireRole('dispatcher'), async (req, res) => {
+  const caller = req.supabaseUser!;
+  const analysis = threatAnalyses.get(req.params.id as string);
+  if (!analysis) return res.status(404).json({ error: 'Analysis not found' });
+  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  if (!canAccessFamily(callerAccess, analysis.ownerId)) return res.status(403).json({ error: 'Not authorized for this family' });
+  const item = analysis.flaggedItems.find(i => i.id === req.params.itemId);
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+  item.acknowledged = true;
+  item.acknowledgedBy = adminUsers.get(caller.id)?.name || caller.id;
+  item.acknowledgedAt = Date.now();
+  await saveThreatAnalysisToSupabase(analysis);
+  addAuditEntry('threat_analysis', 'Élément signalé acquitté', caller.id, `${analysis.ownerName} — ${item.title}`, analysis.ownerId);
+  res.json(analysis);
+});
 
 // GET /api/blackbook — full list; client handles search/sort/filter (same
 // pattern as the Visites tab — dataset is small enough this stays instant).
