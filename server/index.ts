@@ -8244,7 +8244,7 @@ async function callThreatAnalysisAI(entriesText: string, entryCount: number): Pr
       body: JSON.stringify({
         model: 'claude-haiku-4-5',
         max_tokens: 2000,
-        system: `Tu es un analyste protection pour une société de sécurité résidentielle (clients UHNWI). On te fournit la main courante (rondes, sightings Blackbook, notes manuelles) d'une famille sur une période donnée. Réponds UNIQUEMENT en JSON strict, sans texte autour, avec exactement cette forme :
+        system: `Tu es un analyste protection pour une société de sécurité résidentielle (clients UHNWI). On te fournit la main courante (rondes, sightings Blackbook, notes manuelles) d'une famille sur une période donnée. Réponds UNIQUEMENT en JSON strict, sans texte autour ni bloc de code markdown (pas de \`\`\`), avec exactement cette forme :
 {"summary": "résumé narratif court en français", "flaggedItems": [{"severity": "low|medium|high|critical", "title": "titre court", "rationale": "pourquoi c'est signalé, en te basant uniquement sur les faits fournis", "sourceRefs": ["id des entrées concernées"]}]}
 Si rien de notable ne ressort des données, renvoie un summary qui le dit explicitement et flaggedItems: [] — n'invente jamais un pattern qui n'est pas soutenu par les données. Les rondes ne sont pas rattachées à une famille spécifique (secteur général) — ne leur attribue pas une signification propre à cette famille sans justification claire.`,
         messages: [{ role: 'user', content: entriesText }],
@@ -8258,9 +8258,14 @@ Si rien de notable ne ressort des données, renvoie un summary qui le dit explic
     const data = await resp.json() as any;
     const text = data?.content?.[0]?.text;
     if (!text) return { ok: false, reason: 'Réponse Anthropic sans contenu texte exploitable' };
+    // Models frequently wrap JSON in a markdown code fence despite being told
+    // not to — strip it before parsing rather than relying on the prompt
+    // instruction alone.
+    const fenceMatch = text.trim().match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
+    const jsonText = fenceMatch ? fenceMatch[1] : text.trim();
     let parsed: any;
     try {
-      parsed = JSON.parse(text);
+      parsed = JSON.parse(jsonText);
     } catch (parseErr) {
       return { ok: false, reason: `JSON invalide renvoyé par le modèle: ${String(text).slice(0, 300)}` };
     }
