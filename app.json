@@ -89,7 +89,10 @@
           "photosPermission": "Talion Crisis Comm needs access to your photos to attach them to incident reports, patrol logs, messages, and your profile picture.",
           "cameraPermission": "Talion Crisis Comm uses your camera to attach photos to incident reports, patrol logs, and messages."
         }
-      ]
+      ],
+      "expo-font",
+      "expo-web-browser",
+      "expo-asset"
     ],
     "experiments": {
       "typedRoutes": true,
