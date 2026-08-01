@@ -8755,14 +8755,20 @@ function computeResidenceMembersFor(memberIds: string[], primaryOwnerId: string,
     const visible = forDispatch
       ? !(adminUser?.ghostMode && !isRevealedForActiveIncident(memberId))
       : adminUser?.shareLocationWithFamily !== false;
-    const isPresent = visible && !!runtimeUser?.location && addr.latitude != null && addr.longitude != null &&
-      haversineDistance(runtimeUser.location.latitude, runtimeUser.location.longitude, addr.latitude, addr.longitude) <= (addr.radiusMeters || 150);
+    // Reuse the same presence computation as the rest of the app (Famille
+    // tab, dispatch map) instead of a fresh distance check against only the
+    // live `users` location — that map is never persisted and has no
+    // fallback, so a momentary gap (a missed background ping, a server
+    // restart) showed "Sorti" here even when computeEffectivePresence's own
+    // fallback to the last confirmed state got it right everywhere else.
+    const presence = visible ? computeEffectivePresence(memberId, forDispatch) : null;
+    const isPresent = !!presence && presence.status === 'inside' && presence.matchedLabel === addr.label;
     return {
       userId: memberId,
       name: adminUser?.name || memberId,
       relationship,
       photoUrl: adminUser?.photoUrl || null,
-      isPresent: visible ? isPresent : false,
+      isPresent,
       lastSeen: visible ? (runtimeUser?.lastSeen || null) : null,
     };
   });
