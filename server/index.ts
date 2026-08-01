@@ -1381,6 +1381,24 @@ function getFamilyMemberIds(userId: string): string[] {
     .map(r => r.userId);
 }
 
+// "Parent" means someone at least one family member has an explicit
+// 'parent'-type relationship pointing to — i.e. an actual parent of a child
+// in this family unit, not just "not a child" (a family with no children
+// would have none, which is correct: there's no one to shield notifications
+// from either). Used to restrict presence-transition notifications to
+// adults only — children must never receive these, about themselves or
+// anyone else in the family.
+function getFamilyParentIds(userId: string): string[] {
+  const groupIds = [userId, ...getFamilyMemberIds(userId)];
+  const parentIds = new Set<string>();
+  for (const memberId of groupIds) {
+    for (const r of (adminUsers.get(memberId)?.relationships || [])) {
+      if (r.type === 'parent') parentIds.add(r.userId);
+    }
+  }
+  return Array.from(parentIds);
+}
+
 // ─── Presence status (in/out of a known residence) ───────────────────────
 // Automatic: computed live from the user's last known location against
 // every address on their profile (home, secondary residence, hotel while
@@ -1466,21 +1484,33 @@ function applyAutoPresenceResult(
 
 // Tell dispatch/responder/admin (web + mobile) and the target's family whenever
 // someone's inside/outside status flips — live WS for open consoles/app, plus a
-// push for staff so it still reaches them if the app is backgrounded or closed.
+// push notification for staff AND family (this is what actually reaches anyone
+// whose app is backgrounded or closed — the WS message alone doesn't). Uses
+// whichever registered address was actually matched, unlike the single
+// manually-configured FamilyPerimeter (checkFamilyPerimeters), which always
+// names the one fixed point it was set up against regardless of where the
+// person actually is — that's what previously made "left the perimeter"
+// notifications confusing while traveling.
 function notifyPresenceTransition(userId: string, status: 'inside' | 'outside', matchedLabel: string | undefined, setAt: number, excludeStaffId?: string) {
   const name = adminUsers.get(userId)?.name || userId;
   const payload = { type: 'presenceUpdated', targetUserId: userId, name, status, matchedLabel, setBy: 'auto', setAt };
+  // Parents only, never children — whether the transition is the child's own
+  // movement or a parent's, per explicit request after a child received one
+  // of these during testing.
+  const parentIds = getFamilyParentIds(userId).filter(id => id !== userId);
   broadcastToRole('dispatcher', payload);
   broadcastToRole('admin', payload);
   broadcastToRole('responder', payload);
-  broadcastToUsers(getFamilyMemberIds(userId), payload);
-  notifyStaffPresenceChangePush(name, status, matchedLabel, excludeStaffId).catch(() => {});
+  broadcastToUsers(parentIds, payload);
+  notifyPresenceChangePush(name, status, matchedLabel, excludeStaffId, parentIds).catch(() => {});
 }
 
-async function notifyStaffPresenceChangePush(name: string, status: 'inside' | 'outside', matchedLabel: string | undefined, excludeUserId?: string) {
+async function notifyPresenceChangePush(name: string, status: 'inside' | 'outside', matchedLabel: string | undefined, excludeUserId: string | undefined, familyMemberIds: string[]) {
   const targetTokens: string[] = [];
   for (const [token, entry] of pushTokens) {
-    if ((entry.userRole === 'dispatcher' || entry.userRole === 'responder' || entry.userRole === 'admin') && entry.userId !== excludeUserId) {
+    const isStaff = entry.userRole === 'dispatcher' || entry.userRole === 'responder' || entry.userRole === 'admin';
+    const isFamilyMember = familyMemberIds.includes(entry.userId);
+    if ((isStaff || isFamilyMember) && entry.userId !== excludeUserId) {
       targetTokens.push(token);
     }
   }
@@ -3373,7 +3403,7 @@ app.put('/api/family/presence/:targetUserId', requireAuth, (req, res) => {
     broadcastToRole('dispatcher', payload);
     broadcastToRole('admin', payload);
     broadcastToRole('responder', payload);
-    broadcastToUsers(getFamilyMemberIds(targetUserId), payload);
+    broadcastToUsers(getFamilyParentIds(targetUserId).filter(id => id !== targetUserId), payload);
     return res.json({ success: true });
   }
 
@@ -3391,9 +3421,9 @@ app.put('/api/family/presence/:targetUserId', requireAuth, (req, res) => {
   broadcastToRole('dispatcher', payload);
   broadcastToRole('admin', payload);
   broadcastToRole('responder', payload);
-  broadcastToUsers(getFamilyMemberIds(targetUserId), payload);
+  broadcastToUsers(getFamilyParentIds(targetUserId).filter(id => id !== targetUserId), payload);
   if (previousStatus !== entry.status) {
-    notifyStaffPresenceChangePush(name, entry.status, matchedLabel, isStaff ? caller.id : undefined).catch(() => {});
+    notifyPresenceChangePush(name, entry.status, matchedLabel, isStaff ? caller.id : undefined, getFamilyParentIds(targetUserId).filter(id => id !== targetUserId)).catch(() => {});
   }
   res.json({ success: true });
 });
