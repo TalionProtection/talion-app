@@ -3,8 +3,9 @@ import { AppState, AppStateStatus, Platform } from 'react-native';
 import locationService, { UserLocation, LocationServiceState } from '@/services/location-service';
 
 // Import background task definitions (must be in global scope for TaskManager)
+let setBackgroundLocationUser: (userId: string | null, role: string | null) => void = () => {};
 if (Platform.OS !== 'web') {
-  require('@/services/background-location-task');
+  setBackgroundLocationUser = require('@/services/background-location-task').setBackgroundLocationUser;
   require('@/services/presence-geofence-task');
 }
 
@@ -37,6 +38,11 @@ const LocationContext = createContext<LocationContextValue | null>(null);
 
 interface LocationProviderProps {
   children: React.ReactNode;
+  /** Current user id — passed straight through to the background location
+   * task (see setBackgroundLocationUser) so it can POST location updates to
+   * the server directly, without depending on any React component being
+   * mounted/foregrounded to do it. */
+  userId?: string;
   /** User role - if 'responder' or 'dispatcher', background tracking is available */
   userRole?: string;
   /** Whether the user is on duty (responders only) */
@@ -48,7 +54,7 @@ interface LocationProviderProps {
   shareLocationWithFamily?: boolean;
 }
 
-export function LocationProvider({ children, userRole, isOnDuty, shareLocationWithFamily }: LocationProviderProps) {
+export function LocationProvider({ children, userId, userRole, isOnDuty, shareLocationWithFamily }: LocationProviderProps) {
   const [state, setState] = useState<LocationServiceState>(locationService.getState());
   const [location, setLocation] = useState<UserLocation>(locationService.getCurrentLocation());
   const [isLoading, setIsLoading] = useState(true);
@@ -99,6 +105,12 @@ export function LocationProvider({ children, userRole, isOnDuty, shareLocationWi
       mounted = false;
     };
   }, []);
+
+  // Keep the background task's notion of "who this is" current, so it can
+  // POST directly to the server when it wakes (see background-location-task.ts).
+  useEffect(() => {
+    setBackgroundLocationUser(userId || null, userRole || null);
+  }, [userId, userRole]);
 
   // Auto-start background tracking for responders on duty, AND for family
   // users who've opted in to location sharing — without this, the family
