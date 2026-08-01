@@ -384,7 +384,7 @@ export default function FamilyScreen() {
         if (!granted) {
           Alert.alert(
             'Permission requise',
-            'Le suivi automatique nécessite l\'accès "Toujours" à la localisation. Activez-le dans Réglages > Talion Crisis Comm > Position.'
+            'Le suivi automatique nécessite l\'accès "Toujours" à la localisation. Activez-le dans Réglages > Talion\'s Eye > Position.'
           );
           setAutoTrackingBusy(false);
           return;

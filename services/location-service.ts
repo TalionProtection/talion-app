@@ -342,7 +342,7 @@ export class LocationService {
         deferredUpdatesDistance: distanceMeters,
         showsBackgroundLocationIndicator: true,
         foregroundService: {
-          notificationTitle: 'Talion Crisis Comm',
+          notificationTitle: 'Talion\'s Eye',
           notificationBody: 'Location tracking active for emergency response',
           notificationColor: '#1e3a5f',
           killServiceOnDestroy: false,

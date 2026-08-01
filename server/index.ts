@@ -6517,7 +6517,7 @@ server.keepAliveTimeout = 65000; // 65 seconds
 server.headersTimeout = 66000;   // slightly > keepAliveTimeout
 
 server.listen(Number(PORT), '0.0.0.0', async () => {
-  console.log(`Talion Crisis Comm Server running on port ${PORT}`);
+  console.log(`Talion's Eye Server running on port ${PORT}`);
   // Charger toutes les données depuis Supabase avant d'accepter les requêtes
   await Promise.all([
     loadAdminUsersFromSupabase(),

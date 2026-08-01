@@ -1,6 +1,6 @@
 /**
  * LiveKit PTT Service
- * Gère la connexion PTT via LiveKit pour Talion Crisis Comm.
+ * Gère la connexion PTT via LiveKit pour Talion's Eye.
  */
 
 import { Platform } from 'react-native';
@@ -163,7 +163,7 @@ class LiveKitPTTService {
         const { requestRecordingPermissionsAsync } = require('expo-audio');
         const { granted } = await requestRecordingPermissionsAsync();
         if (!granted) {
-          this.onError?.('Accès au microphone refusé. Activez-le dans Réglages > Talion Crisis Comm > Microphone.');
+          this.onError?.('Accès au microphone refusé. Activez-le dans Réglages > Talion\'s Eye > Microphone.');
           return;
         }
       }

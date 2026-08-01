@@ -1,4 +1,4 @@
-// ─── Talion Crisis Comm - Admin Console JS ──────────────────────
+// ─── Talion's Eye - Admin Console JS ──────────────────────
 // Derive API base: if accessed via a proxy with a different port prefix,
 // replace with 3000 to reach the actual API server.
 const API_BASE = (() => {

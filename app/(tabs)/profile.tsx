@@ -615,7 +615,7 @@ export default function ProfileScreen() {
 
         {/* App Info */}
         <View style={styles.appInfo}>
-          <Text style={styles.appInfoText}>Talion Crisis Comm v1.0.0</Text>
+          <Text style={styles.appInfoText}>Talion's Eye v1.0.0</Text>
           <Text style={styles.appInfoText}>ID: {user.id}</Text>
         </View>
       </ScrollView>

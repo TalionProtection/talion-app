@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Talion Crisis Comm",
+    "name": "Talion's Eye",
     "slug": "talion-crisis-comm",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -15,7 +15,7 @@
         "ITSAppUsesNonExemptEncryption": false,
         "UIFileSharingEnabled": true,
         "LSSupportsOpeningDocumentsInPlace": true,
-        "NSDocumentsFolderUsageDescription": "Talion needs access to documents for sharing files in chat."
+        "NSDocumentsFolderUsageDescription": "Talion's Eye needs access to documents for sharing files in chat."
       }
     },
     "android": {
@@ -48,9 +48,9 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Talion Crisis Comm needs your location to track responders during emergencies.",
-          "locationAlwaysPermission": "Allow Talion Crisis Comm to always access your location for emergency response tracking.",
-          "locationWhenInUsePermission": "Allow Talion Crisis Comm to use your location during emergencies.",
+          "locationAlwaysAndWhenInUsePermission": "Talion's Eye needs your location to track responders during emergencies.",
+          "locationAlwaysPermission": "Allow Talion's Eye to always access your location for emergency response tracking.",
+          "locationWhenInUsePermission": "Allow Talion's Eye to use your location during emergencies.",
           "isIosBackgroundLocationEnabled": true,
           "isAndroidBackgroundLocationEnabled": true,
           "isAndroidForegroundServiceEnabled": true
@@ -79,15 +79,15 @@
       [
         "@config-plugins/react-native-webrtc",
         {
-          "microphonePermission": "Talion Crisis Comm needs your microphone to talk on PTT channels.",
-          "cameraPermission": "Talion Crisis Comm uses your camera to attach photos to incident reports, patrol logs, and messages."
+          "microphonePermission": "Talion's Eye needs your microphone to talk on PTT channels.",
+          "cameraPermission": "Talion's Eye uses your camera to attach photos to incident reports, patrol logs, and messages."
         }
       ],
       [
         "expo-image-picker",
         {
-          "photosPermission": "Talion Crisis Comm needs access to your photos to attach them to incident reports, patrol logs, messages, and your profile picture.",
-          "cameraPermission": "Talion Crisis Comm uses your camera to attach photos to incident reports, patrol logs, and messages."
+          "photosPermission": "Talion's Eye needs access to your photos to attach them to incident reports, patrol logs, messages, and your profile picture.",
+          "cameraPermission": "Talion's Eye uses your camera to attach photos to incident reports, patrol logs, and messages."
         }
       ],
       "expo-font",

@@ -89,7 +89,7 @@ describe('Background Location Tracking', () => {
           distanceInterval: 10,
           showsBackgroundLocationIndicator: true,
           foregroundService: expect.objectContaining({
-            notificationTitle: 'Talion Crisis Comm',
+            notificationTitle: 'Talion\'s Eye',
             notificationBody: 'Location tracking active for emergency response',
           }),
         })
@@ -245,7 +245,7 @@ describe('Background Location Tracking', () => {
       if (callArgs) {
         const options = callArgs[1];
         expect(options.foregroundService).toBeDefined();
-        expect(options.foregroundService?.notificationTitle).toBe('Talion Crisis Comm');
+        expect(options.foregroundService?.notificationTitle).toBe('Talion\'s Eye');
         expect(options.foregroundService?.notificationColor).toBe('#1e3a5f');
         expect(options.foregroundService?.killServiceOnDestroy).toBe(false);
       }
