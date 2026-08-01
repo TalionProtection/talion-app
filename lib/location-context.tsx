@@ -41,9 +41,14 @@ interface LocationProviderProps {
   userRole?: string;
   /** Whether the user is on duty (responders only) */
   isOnDuty?: boolean;
+  /** Family users ('user' role): whether they've opted in to sharing their
+   * location with family (Profile toggle) — gates background tracking the
+   * same way isOnDuty gates it for responders. undefined/true = shared
+   * (matches the toggle's own non-regressive default). */
+  shareLocationWithFamily?: boolean;
 }
 
-export function LocationProvider({ children, userRole, isOnDuty }: LocationProviderProps) {
+export function LocationProvider({ children, userRole, isOnDuty, shareLocationWithFamily }: LocationProviderProps) {
   const [state, setState] = useState<LocationServiceState>(locationService.getState());
   const [location, setLocation] = useState<UserLocation>(locationService.getCurrentLocation());
   const [isLoading, setIsLoading] = useState(true);
@@ -95,29 +100,36 @@ export function LocationProvider({ children, userRole, isOnDuty }: LocationProvi
     };
   }, []);
 
-  // Auto-start background tracking for responders who are on duty
+  // Auto-start background tracking for responders on duty, AND for family
+  // users who've opted in to location sharing — without this, the family
+  // presence/residence features only ever reflect a live position while the
+  // app is open in the foreground, since iOS suspends plain foreground
+  // location watching within moments of backgrounding.
   useEffect(() => {
     if (Platform.OS === 'web') return;
 
     const isResponderOrDispatcher = userRole === 'responder' || userRole === 'dispatcher';
+    const isFamilyUser = userRole === 'user';
+    const shouldTrackInBackground =
+      (isResponderOrDispatcher && isOnDuty) ||
+      (isFamilyUser && shareLocationWithFamily !== false);
 
-    if (isResponderOrDispatcher && isOnDuty) {
-      // Start background tracking when responder goes on duty
-      locationService.startBackgroundTracking({
-        intervalMs: 15000,  // every 15 seconds
-        distanceMeters: 10, // minimum 10 meters movement
-      }).then((started) => {
+    if (shouldTrackInBackground) {
+      locationService.startBackgroundTracking(
+        isResponderOrDispatcher
+          ? { intervalMs: 15000, distanceMeters: 10 } // responders: tight tracking while on duty
+          : { intervalMs: 30000, distanceMeters: 20 } // family: enough to reflect presence, lighter on battery
+      ).then((started) => {
         if (started) {
           console.log('[LocationProvider] Background tracking auto-started for', userRole);
         }
       });
-    } else if (!isOnDuty && state.isBackgroundTracking) {
-      // Stop background tracking when going off duty
+    } else if (state.isBackgroundTracking) {
       locationService.stopBackgroundTracking().then(() => {
-        console.log('[LocationProvider] Background tracking stopped (off duty)');
+        console.log('[LocationProvider] Background tracking stopped');
       });
     }
-  }, [userRole, isOnDuty]);
+  }, [userRole, isOnDuty, shareLocationWithFamily]);
 
   // Handle app state changes - manage foreground/background transitions
   useEffect(() => {

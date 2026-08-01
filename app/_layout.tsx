@@ -81,7 +81,7 @@ function AuthAwareProviders({ children }: { children: React.ReactNode }) {
 
   return (
     <WebSocketProvider>
-      <LocationProvider userRole={userRole} isOnDuty={isOnDuty}>
+      <LocationProvider userRole={userRole} isOnDuty={isOnDuty} shareLocationWithFamily={user?.shareLocationWithFamily}>
         <NotificationProvider>
           <MessagingProvider>
             <LiveKitPTTProvider>
