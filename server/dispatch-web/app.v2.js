@@ -315,7 +315,6 @@ function handleWsMessage(msg) {
       showToast(`⚠️ Ronde ${sc.label}: ${pr.location} — ${pr.createdByName}`, 'warning');
       sendBrowserNotification(`Ronde ${sc.label}`, `${pr.createdByName} — ${pr.location}`, 'warning', `patrol-${pr.reportId}`);
       refreshPatrolReports();
-      updatePatrolNavBadge();
       break;
     }
 
@@ -7048,7 +7047,6 @@ async function refreshPatrolReports() {
     populatePatrolAgentFilter();
     renderPatrolReports();
     updatePatrolStats();
-    updatePatrolNavBadge();
   } catch (err) {
     console.error('[Patrol] Refresh error:', err);
   }
@@ -7202,18 +7200,6 @@ function updatePatrolStats() {
   el('patrolGreenCount', green);
   el('patrolAlertCount', alerts);
   el('patrolPasOkCount', pasOk);
-}
-
-function updatePatrolNavBadge() {
-  const badge = document.getElementById('patrolNavBadge');
-  if (!badge) return;
-  const alertCount = patrolReports.filter(r => r.status !== 'habituel').length;
-  if (alertCount > 0) {
-    badge.textContent = alertCount;
-    badge.style.display = 'inline-block';
-  } else {
-    badge.style.display = 'none';
-  }
 }
 
 function showPatrolDetail(reportId) {
