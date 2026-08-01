@@ -46,8 +46,8 @@ export default function LoginScreen() {
             style={styles.logo}
             resizeMode="contain"
           />
-          <Text style={styles.title}>TALION</Text>
-          <Text style={styles.subtitle}>CRISIS COMM</Text>
+          <Text style={styles.title}>TALION'S</Text>
+          <Text style={styles.subtitle}>EYE</Text>
           <Text style={styles.tagline}>Système d'Alerte et de Réponse d'Urgence</Text>
         </View>
 

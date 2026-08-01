@@ -31,8 +31,8 @@ export function TalionBanner({
         resizeMode="contain"
       />
       <View style={styles.bannerTextContainer}>
-        <Text style={styles.bannerTitle}>TALION</Text>
-        <Text style={styles.bannerSubtitle}>CRISIS COMM</Text>
+        <Text style={styles.bannerTitle}>TALION'S</Text>
+        <Text style={styles.bannerSubtitle}>EYE</Text>
       </View>
       {rightContent ? (
         rightContent

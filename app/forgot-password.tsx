@@ -109,8 +109,8 @@ export default function ForgotPasswordScreen() {
         <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
           {/* Header */}
           <View style={styles.header}>
-            <Text style={styles.headerTitle}>TALION</Text>
-            <Text style={styles.headerSubtitle}>CRISIS COMM</Text>
+            <Text style={styles.headerTitle}>TALION'S</Text>
+            <Text style={styles.headerSubtitle}>EYE</Text>
           </View>
 
           <View style={styles.content}>
