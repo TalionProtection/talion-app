@@ -1498,11 +1498,36 @@ function notifyPresenceTransition(userId: string, status: 'inside' | 'outside', 
   // movement or a parent's, per explicit request after a child received one
   // of these during testing.
   const parentIds = getFamilyParentIds(userId).filter(id => id !== userId);
+  // Live status (WS) updates immediately — it's just a silent indicator, no
+  // harm if it flickers momentarily. The push is what's actually disruptive
+  // (a popup per bounce), so it's debounced separately below.
   broadcastToRole('dispatcher', payload);
   broadcastToRole('admin', payload);
   broadcastToRole('responder', payload);
   broadcastToUsers(parentIds, payload);
-  notifyPresenceChangePush(name, status, matchedLabel, excludeStaffId, parentIds).catch(() => {});
+  schedulePresenceChangePush(userId, name, status, matchedLabel, excludeStaffId, parentIds);
+}
+
+// GPS readings right at a geofence boundary (arriving/leaving a gate, a large
+// property) commonly jitter in/out for a short stretch — each bounce is a
+// genuine inside<->outside transition, so without this, notifyPresenceTransition
+// above would fire (and push) once per bounce: "sorti", "rentré", "sorti"...
+// in quick succession. Wait out a settling window and only push if the
+// status is still the same one that triggered this call once it elapses —
+// a bounce that flips back within the window never reaches a real push.
+const pendingPresencePush = new Map<string, ReturnType<typeof setTimeout>>();
+const PRESENCE_PUSH_DEBOUNCE_MS = 90000;
+
+function schedulePresenceChangePush(userId: string, name: string, status: 'inside' | 'outside', matchedLabel: string | undefined, excludeStaffId: string | undefined, parentIds: string[]) {
+  const existing = pendingPresencePush.get(userId);
+  if (existing) clearTimeout(existing);
+  pendingPresencePush.set(userId, setTimeout(() => {
+    pendingPresencePush.delete(userId);
+    const current = autoPresenceState.get(userId);
+    if (current && current.status === status && current.label === matchedLabel) {
+      notifyPresenceChangePush(name, status, matchedLabel, excludeStaffId, parentIds).catch(() => {});
+    }
+  }, PRESENCE_PUSH_DEBOUNCE_MS));
 }
 
 async function notifyPresenceChangePush(name: string, status: 'inside' | 'outside', matchedLabel: string | undefined, excludeUserId: string | undefined, familyMemberIds: string[]) {
