@@ -33,6 +33,9 @@
       <a href="#" class="nav-item" data-tab="login-history">
         <span class="nav-icon">&#x1F512;</span> Login History
       </a>
+      <a href="#" class="nav-item" data-tab="organizations" id="navOrganizations" style="display:none;">
+        <span class="nav-icon">&#x1F3E2;</span> Organisations
+      </a>
     </nav>
     <div class="sidebar-footer">
       <a href="/dispatch-console/" style="display:block;padding:8px 12px;margin-bottom:8px;border-radius:6px;background:#243447;color:#94a3b8;text-decoration:none;font-size:12px;text-align:center;transition:all 0.15s;">&#x1F4E1; Dispatch Console</a>
@@ -140,6 +143,7 @@
               <th>Utilisateur</th>
               <th>Contact</th>
               <th>Rôle</th>
+              <th id="usersOrgHeader" style="display:none;">Organisation</th>
               <th>Tags</th>
               <th>Statut</th>
               <th>Relations</th>
@@ -287,7 +291,44 @@
         <button class="btn btn-secondary" id="lhNextBtn" onclick="loadLoginHistory(currentLHPage + 1)" disabled>Suivant &raquo;</button>
       </div>
     </section>
+
+    <!-- Organizations (superadmin only) -->
+    <section class="tab-content" id="tab-organizations">
+      <div class="toolbar">
+        <div></div>
+        <button class="btn btn-primary" onclick="openCreateOrgModal()">&#x2795; Nouvelle organisation</button>
+      </div>
+      <div class="table-container">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Nom</th>
+              <th>Statut</th>
+              <th>Utilisateurs</th>
+              <th>Créée le</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="organizationsTableBody"></tbody>
+        </table>
+      </div>
+    </section>
   </main>
+
+  <!-- Create Organization Modal -->
+  <div class="modal-overlay" id="createOrgModal">
+    <div class="modal">
+      <h3 class="modal-title">Nouvelle organisation</h3>
+      <div class="form-group">
+        <label class="form-label">Nom</label>
+        <input type="text" class="form-input" id="newOrgName" placeholder="Nom de l'organisation">
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+        <button class="btn btn-secondary" onclick="closeCreateOrgModal()">Annuler</button>
+        <button class="btn btn-primary" onclick="submitCreateOrg()">Créer</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Role Change Modal -->
   <div class="modal-overlay" id="roleModal">
@@ -374,7 +415,12 @@
               <option value="responder">Intervenant</option>
               <option value="dispatcher">Dispatcher</option>
               <option value="admin">Administrateur</option>
+              <option value="superadmin" id="fieldRoleSuperadminOption" style="display:none;">Superadmin (Talion)</option>
             </select>
+          </div>
+          <div class="form-group" id="fieldOrgGroup" style="display:none;">
+            <label class="form-label">Organisation</label>
+            <select class="form-select" id="fieldOrg"></select>
           </div>
           <div class="form-group">
             <label class="form-label">Statut</label>

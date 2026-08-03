@@ -38,6 +38,7 @@ if (!localStorage.getItem('talion_token')) {
 
 // State
 let allUsers = [];
+let allOrganizations = [];
 let allIncidents = [];
 let allAudit = [];
 let currentIncidentFilter = 'all';
@@ -246,10 +247,50 @@ setInterval(() => {
 // ─── Initialization ──────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   setupNavigation();
+  applyRoleGating();
   connectWebSocket();
   refreshData();
   setInterval(refreshData, 30000);
 });
+
+// Only a superadmin (Talion staff, manages every organization) sees the
+// Organizations nav item — a regular admin is scoped to their own
+// organization server-side anyway, so the tab would be empty/rejected for
+// them. Role comes from talion_user, written at login (server/console-login).
+function currentUserRole() {
+  try {
+    return JSON.parse(localStorage.getItem('talion_user') || '{}').role || '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function applyRoleGating() {
+  if (currentUserRole() === 'superadmin') {
+    document.getElementById('navOrganizations').style.display = '';
+    document.getElementById('fieldRoleSuperadminOption').style.display = '';
+    document.getElementById('fieldOrgGroup').style.display = '';
+    document.getElementById('usersOrgHeader').style.display = '';
+    populateFieldOrgOptions();
+  }
+}
+
+// Only relevant for a superadmin caller — an org admin never sees this
+// picker, the server always forces organizationId to their own org
+// regardless of what (if anything) the client sends. See POST/PUT
+// /admin/users on the server. Also backs the "Organisation" column in the
+// users table and the org picker in the create-user form.
+async function populateFieldOrgOptions() {
+  try {
+    const res = await fetch(`${API_BASE}/admin/organizations`);
+    allOrganizations = await res.json();
+    const select = document.getElementById('fieldOrg');
+    select.innerHTML = allOrganizations.map(o => `<option value="${o.id}">${o.name}</option>`).join('');
+    renderUsers();
+  } catch (e) {
+    console.error('[Organizations] populateFieldOrgOptions error:', e);
+  }
+}
 
 function setupNavigation() {
   document.querySelectorAll('.nav-item').forEach(item => {
@@ -265,12 +306,91 @@ function switchTab(tab) {
   document.querySelector(`.nav-item[data-tab="${tab}"]`).classList.add('active');
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.getElementById(`tab-${tab}`).classList.add('active');
-  const titles = { dashboard: 'Dashboard', users: 'Gestion des Utilisateurs', incidents: 'Gestion des Incidents', audit: 'Journal d\'Audit', 'login-history': 'Historique de Connexion' };
+  const titles = { dashboard: 'Dashboard', users: 'Gestion des Utilisateurs', incidents: 'Gestion des Incidents', audit: 'Journal d\'Audit', 'login-history': 'Historique de Connexion', organizations: 'Organisations' };
   document.getElementById('pageTitle').textContent = titles[tab] || tab;
   if (tab === 'login-history') {
     loadLoginHistory(1);
     loadLoginStats();
     populateLoginHistoryUserFilter();
+  }
+  if (tab === 'organizations') {
+    loadOrganizations();
+  }
+}
+
+// ─── Organizations (superadmin only) ──────────────────────────────────
+async function loadOrganizations() {
+  try {
+    const res = await fetch(`${API_BASE}/admin/organizations`);
+    const orgs = await res.json();
+    renderOrganizationsTable(orgs);
+  } catch (e) {
+    console.error('[Organizations] load error:', e);
+  }
+}
+
+function renderOrganizationsTable(orgs) {
+  const tbody = document.getElementById('organizationsTableBody');
+  tbody.innerHTML = orgs.map(o => `
+    <tr>
+      <td>${o.name}</td>
+      <td><span class="badge ${o.status === 'active' ? 'badge-success' : 'badge-error'}">${o.status === 'active' ? 'Active' : 'Suspendue'}</span></td>
+      <td>${o.memberCount}</td>
+      <td>${new Date(o.createdAt).toLocaleDateString('fr-FR')}</td>
+      <td><button class="btn btn-secondary" onclick="toggleOrgStatus('${o.id}', '${o.status === 'active' ? 'suspended' : 'active'}')">${o.status === 'active' ? 'Suspendre' : 'Réactiver'}</button></td>
+    </tr>
+  `).join('');
+}
+
+function openCreateOrgModal() {
+  document.getElementById('newOrgName').value = '';
+  document.getElementById('createOrgModal').classList.add('visible');
+}
+
+function closeCreateOrgModal() {
+  document.getElementById('createOrgModal').classList.remove('visible');
+}
+
+async function submitCreateOrg() {
+  const name = document.getElementById('newOrgName').value.trim();
+  if (!name) {
+    showToast('Le nom est obligatoire', 'error');
+    return;
+  }
+  try {
+    const res = await fetch(`${API_BASE}/admin/organizations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors de la création', 'error');
+      return;
+    }
+    closeCreateOrgModal();
+    loadOrganizations();
+    showToast('Organisation créée', 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
+}
+
+async function toggleOrgStatus(id, newStatus) {
+  try {
+    const res = await fetch(`${API_BASE}/admin/organizations/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: newStatus }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur', 'error');
+      return;
+    }
+    loadOrganizations();
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
   }
 }
 
@@ -391,8 +511,8 @@ function renderUsers() {
   document.getElementById('usersSuspended').textContent = `${allUsers.filter(u => u.status === 'suspended').length} Suspendus`;
   document.getElementById('usersDeactivated').textContent = `${allUsers.filter(u => u.status === 'deactivated').length} Désactivés`;
 
-  const roleColors = { admin: '#7c3aed', dispatcher: '#1e3a5f', responder: '#059669', user: '#6b7280' };
-  const roleLabels = { admin: 'ADMIN', dispatcher: 'DISPATCH', responder: 'INTERVENANT', user: 'UTILISATEUR' };
+  const roleColors = { superadmin: '#b91c1c', admin: '#7c3aed', dispatcher: '#1e3a5f', responder: '#059669', user: '#6b7280' };
+  const roleLabels = { superadmin: 'SUPERADMIN', admin: 'ADMIN', dispatcher: 'DISPATCH', responder: 'INTERVENANT', user: 'UTILISATEUR' };
   const relTypeLabels = { spouse: 'Conjoint(e)', parent: 'Parent', child: 'Enfant', sibling: 'Frère/Sœur', cohabitant: 'Cohabitant', other: 'Autre' };
 
   document.getElementById('usersTableBody').innerHTML = filtered.map(u => {
@@ -425,6 +545,7 @@ function renderUsers() {
         </td>
         <td style="font-size:12px">${contact}</td>
         <td><span class="badge badge-${u.role}">${roleLabels[u.role] || u.role.toUpperCase()}</span></td>
+        ${currentUserRole() === 'superadmin' ? `<td style="font-size:12px">${(allOrganizations.find(o => o.id === u.organizationId) || {}).name || '—'}</td>` : ''}
         <td style="max-width:160px">${tags}</td>
         <td><span class="badge badge-${u.status}">${u.status.toUpperCase()}</span></td>
         <td style="font-size:11px;max-width:180px">${rels}</td>
@@ -810,6 +931,11 @@ async function saveUser() {
   };
   // Only include password if user typed one
   if (password) payload.password = password;
+  // Only relevant on creation, by a superadmin (an org admin's new users are
+  // always forced server-side into their own org regardless of this field).
+  if (!editingUserId && currentUserRole() === 'superadmin') {
+    payload.organizationId = document.getElementById('fieldOrg').value;
+  }
 
   try {
     let res;
@@ -876,8 +1002,10 @@ function openRoleModal(userId) {
   if (!selectedUserForRole) return;
   document.getElementById('roleModalSubtitle').textContent =
     `${selectedUserForRole.name} - Actuellement: ${selectedUserForRole.role.charAt(0).toUpperCase() + selectedUserForRole.role.slice(1)}`;
-  const roles = ['admin', 'dispatcher', 'responder', 'user'];
-  const roleColors = { admin: '#7c3aed', dispatcher: '#1e3a5f', responder: '#059669', user: '#6b7280' };
+  const roles = currentUserRole() === 'superadmin'
+    ? ['superadmin', 'admin', 'dispatcher', 'responder', 'user']
+    : ['admin', 'dispatcher', 'responder', 'user'];
+  const roleColors = { superadmin: '#b91c1c', admin: '#7c3aed', dispatcher: '#1e3a5f', responder: '#059669', user: '#6b7280' };
   document.getElementById('roleOptions').innerHTML = roles.map(role => `
     <div class="role-option ${selectedUserForRole.role === role ? 'disabled' : ''}" onclick="changeRole('${userId}', '${role}')">
       <span class="role-dot" style="background:${roleColors[role]}"></span>

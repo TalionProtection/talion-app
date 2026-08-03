@@ -292,7 +292,7 @@
         localStorage.setItem('talion_role', data.user.role);
         localStorage.setItem('talion_user', JSON.stringify(data.user));
 
-        if (data.user.role === 'admin') {
+        if (data.user.role === 'admin' || data.user.role === 'superadmin') {
           window.location.href = '/admin-console/';
         } else if (data.user.role === 'dispatcher') {
           window.location.href = '/dispatch-v2/';

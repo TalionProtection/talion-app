@@ -2591,6 +2591,7 @@ app.get('/admin/users/:id/login-history', requireAuth, requireRole('admin'), (re
   const userId = req.params.id as string;
   const user = adminUsers.get(userId);
   if (!user) return res.status(404).json({ error: 'User not found' });
+  if (!canAccessOrg(req.supabaseUser!, user.organizationId)) return res.status(403).json({ error: 'Not authorized' });
 
   const page = parseInt(req.query.page as string) || 1;
   const limit = parseInt(req.query.limit as string) || 50;
@@ -2654,6 +2655,7 @@ app.get('/admin/login-stats', (req, res) => {
 app.post('/admin/users/:id/photo', requireAuth, requireRole('admin'), upload.single('photo'), (req: any, res) => {
   const user = adminUsers.get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
+  if (!canAccessOrg(req.supabaseUser!, user.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   user.photoUrl = `/uploads/${req.file.filename}`;
   adminUsers.set(user.id, user);
@@ -3982,10 +3984,12 @@ app.get('/admin/kpis', requireAuth, requireRole('dispatcher'), (req, res) => {
 
 // Admin users list
 app.get('/admin/users', requireAuth, requireRole('admin'), (req, res) => {
-  const users = Array.from(adminUsers.values()).map(u => {
-    const { passwordHash, ...safeUser } = u;
-    return { ...safeUser, hasPassword: !!passwordHash };
-  });
+  const users = Array.from(adminUsers.values())
+    .filter(u => canAccessOrg(req.supabaseUser!, u.organizationId))
+    .map(u => {
+      const { passwordHash, ...safeUser } = u;
+      return { ...safeUser, hasPassword: !!passwordHash };
+    });
   res.json(users);
 });
 
@@ -4004,8 +4008,12 @@ app.get('/admin/family-groups', (req, res) => {
 app.put('/admin/users/:id/role', requireAuth, requireRole('admin'), (req, res) => {
   const user = adminUsers.get(req.params.id as string);
   if (!user) return res.status(404).json({ error: 'User not found' });
+  if (!canAccessOrg(req.supabaseUser!, user.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   const { role } = req.body;
-  if (!['admin', 'dispatcher', 'responder', 'user'].includes(role)) {
+  const allowedRoles = req.supabaseUser!.role === 'superadmin'
+    ? ['superadmin', 'admin', 'dispatcher', 'responder', 'user']
+    : ['admin', 'dispatcher', 'responder', 'user'];
+  if (!allowedRoles.includes(role)) {
     return res.status(400).json({ error: 'Invalid role' });
   }
   const oldRole = user.role;
@@ -4020,6 +4028,7 @@ app.put('/admin/users/:id/role', requireAuth, requireRole('admin'), (req, res) =
 app.put('/admin/users/:id/status', requireAuth, requireRole('admin'), (req, res) => {
   const user = adminUsers.get(req.params.id as string);
   if (!user) return res.status(404).json({ error: 'User not found' });
+  if (!canAccessOrg(req.supabaseUser!, user.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   const { status } = req.body;
   if (!['active', 'suspended', 'deactivated'].includes(status)) {
     return res.status(400).json({ error: 'Invalid status' });
@@ -4039,6 +4048,7 @@ app.put('/admin/users/:id/status', requireAuth, requireRole('admin'), (req, res)
 app.get('/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => {
   const user = adminUsers.get(req.params.id as string);
   if (!user) return res.status(404).json({ error: 'User not found' });
+  if (!canAccessOrg(req.supabaseUser!, user.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   // Resolve relationship names
   const enrichedRelationships = (user.relationships || []).map(r => {
     const relUser = adminUsers.get(r.userId);
@@ -4063,8 +4073,25 @@ app.post('/admin/users', requireAuth, requireRole('admin'), async (req, res) => 
   if (!firstName || !lastName || !email) {
     return res.status(400).json({ error: 'firstName, lastName, and email are required' });
   }
-  if (role && !['admin', 'dispatcher', 'responder', 'user'].includes(role)) {
+  const isSuperadminCaller = req.supabaseUser!.role === 'superadmin';
+  const allowedRoles = isSuperadminCaller
+    ? ['superadmin', 'admin', 'dispatcher', 'responder', 'user']
+    : ['admin', 'dispatcher', 'responder', 'user'];
+  if (role && !allowedRoles.includes(role)) {
     return res.status(400).json({ error: 'Invalid role' });
+  }
+  // An organization admin can only ever create accounts in their own
+  // organization — the client can't override this. A superadmin has no
+  // organization of their own, so they must pick one explicitly (typically
+  // to create an org's first admin), validated against real organizations.
+  let organizationId: string | undefined;
+  if (isSuperadminCaller) {
+    organizationId = req.body.organizationId;
+    if (!organizationId || !organizations.has(organizationId)) {
+      return res.status(400).json({ error: 'A valid organizationId is required' });
+    }
+  } else {
+    organizationId = req.supabaseUser!.organizationId;
   }
   // Check email uniqueness
   const existing = Array.from(adminUsers.values()).find(u => u.email === email);
@@ -4112,6 +4139,7 @@ app.post('/admin/users', requireAuth, requireRole('admin'), async (req, res) => 
     photoUrl: photoUrl || '',
     relationships: relationships || [],
     passwordHash: password ? bcrypt.hashSync(password, 10) : undefined,
+    organizationId,
   };
   adminUsers.set(id, newUser);
   saveAdminUserToSupabase(newUser);
@@ -4136,13 +4164,17 @@ app.post('/admin/users', requireAuth, requireRole('admin'), async (req, res) => 
 app.put('/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => {
   const user = adminUsers.get(req.params.id as string);
   if (!user) return res.status(404).json({ error: 'User not found' });
+  if (!canAccessOrg(req.supabaseUser!, user.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   const { firstName, lastName, email, role, tags, address, addressComponents, phoneLandline, phoneMobile, comments, photoUrl, relationships, status, password, assignedFamilyIds } = req.body;
   // Check email uniqueness if changed
   if (email && email !== user.email) {
     const existing = Array.from(adminUsers.values()).find(u => u.email === email && u.id !== user.id);
     if (existing) return res.status(409).json({ error: 'A user with this email already exists' });
   }
-  if (role && !['admin', 'dispatcher', 'responder', 'user'].includes(role)) {
+  const allowedRolesForUpdate = req.supabaseUser!.role === 'superadmin'
+    ? ['superadmin', 'admin', 'dispatcher', 'responder', 'user']
+    : ['admin', 'dispatcher', 'responder', 'user'];
+  if (role && !allowedRolesForUpdate.includes(role)) {
     return res.status(400).json({ error: 'Invalid role' });
   }
   const changes: string[] = [];
@@ -4199,6 +4231,7 @@ app.put('/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => {
 app.delete('/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => {
   const user = adminUsers.get(req.params.id as string);
   if (!user) return res.status(404).json({ error: 'User not found' });
+  if (!canAccessOrg(req.supabaseUser!, user.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   // Remove reciprocal relationships
   (user.relationships || []).forEach(rel => {
     const relUser = adminUsers.get(rel.userId);
@@ -4217,6 +4250,7 @@ app.delete('/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => 
 app.get('/admin/users/:id/cohabitants', requireAuth, requireRole('admin'), (req, res) => {
   const user = adminUsers.get(req.params.id as string);
   if (!user) return res.status(404).json({ error: 'User not found' });
+  if (!canAccessOrg(req.supabaseUser!, user.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   if (!user.address) return res.json([]);
   const cohabitants: AdminUser[] = [];
   adminUsers.forEach(u => {
@@ -4231,11 +4265,55 @@ app.get('/admin/users/:id/cohabitants', requireAuth, requireRole('admin'), (req,
 app.get('/admin/users/:id/relationships', requireAuth, requireRole('admin'), (req, res) => {
   const user = adminUsers.get(req.params.id as string);
   if (!user) return res.status(404).json({ error: 'User not found' });
+  if (!canAccessOrg(req.supabaseUser!, user.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   const enriched = (user.relationships || []).map(r => {
     const relUser = adminUsers.get(r.userId);
     return { ...r, userName: relUser?.name || 'Unknown', userEmail: relUser?.email || '', userRole: relUser?.role || '' };
   });
   res.json(enriched);
+});
+
+// ─── Organizations (superadmin only) ─────────────────────────────────
+// Talion-side tenant management — create/list/update the organizations
+// that /admin/users' organizationId scoping (above) partitions everyone
+// into. requireRole('superadmin') already rejects plain 'admin' callers
+// via the level comparison in ROLE_HIERARCHY, no extra check needed.
+app.get('/admin/organizations', requireAuth, requireRole('superadmin'), (req, res) => {
+  const result = Array.from(organizations.values()).map(o => ({
+    ...o,
+    memberCount: Array.from(adminUsers.values()).filter(u => u.organizationId === o.id).length,
+  }));
+  res.json(result);
+});
+
+app.post('/admin/organizations', requireAuth, requireRole('superadmin'), (req, res) => {
+  const name = (req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  const org: Organization = {
+    id: uuidv4(),
+    name,
+    status: 'active',
+    createdAt: Date.now(),
+  };
+  organizations.set(org.id, org);
+  saveOrganizationToSupabase(org).catch(e => console.error('[Organizations] Supabase save error:', e));
+  addAuditEntry('system', 'Organization Created', req.supabaseUser!.id, `New organization: ${name}`, org.id);
+  res.status(201).json(org);
+});
+
+app.put('/admin/organizations/:id', requireAuth, requireRole('superadmin'), (req, res) => {
+  const org = organizations.get(req.params.id as string);
+  if (!org) return res.status(404).json({ error: 'Organization not found' });
+  const { name, status } = req.body;
+  if (status !== undefined && status !== 'active' && status !== 'suspended') {
+    return res.status(400).json({ error: "status must be 'active' or 'suspended'" });
+  }
+  if (name !== undefined) org.name = name;
+  if (status !== undefined) org.status = status;
+  organizations.set(org.id, org);
+  saveOrganizationToSupabase(org).catch(e => console.error('[Organizations] Supabase save error:', e));
+  addAuditEntry('system', 'Organization Updated', req.supabaseUser!.id, `Organization ${org.id}: ${JSON.stringify({ name, status })}`, org.id);
+  res.json(org);
 });
 
 // Helper: get reciprocal relationship type
