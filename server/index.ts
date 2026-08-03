@@ -414,6 +414,17 @@ interface Organization {
   createdAt: number;
 }
 
+// Replaces the old hardcoded PATROL_SITES constant — each organization
+// configures its own patrol sites (see /admin/patrol-sites). PatrolReport
+// still stores the site as a denormalized name string, not this id, to
+// match the existing PatrolReport.location convention.
+interface PatrolSite {
+  id: string;
+  organizationId: string;
+  name: string;
+  createdAt: number;
+}
+
 interface AdminUser {
   id: string;
   name: string;
@@ -779,6 +790,7 @@ interface PatrolReport {
   notes?: string;
   media?: PatrolMedia[];
   escalatedIncidentId?: string; // set once a dispatcher has escalated this report to a real incident
+  organizationId?: string;
 }
 
 interface ProximityAlert {
@@ -824,6 +836,7 @@ const wsClientMap = new Map<any, string>();
 
 // Organizations (tenants) — source of truth for AdminUser.organizationId.
 const organizations = new Map<string, Organization>();
+const patrolSites = new Map<string, PatrolSite>();
 
 // Admin storage
 const adminUsers = new Map<string, AdminUser>();
@@ -3915,19 +3928,29 @@ function computeStaleDevices(): { userId: string; name: string; role: string; la
 // surfaces recent server error messages/stack traces alongside the counts.
 app.get('/admin/health', requireAuth, requireRole('dispatcher'), async (req, res) => {
   const [supabaseHealth, livekitHealth] = await Promise.all([checkSupabaseHealth(), checkLiveKitHealth()]);
+  const caller = req.supabaseUser!;
+  // Tenant data (who/what belongs to an organization) is scoped for a plain
+  // admin, global only for superadmin. Infra facts about the Node process
+  // itself (memory, uptime, ws/supabase/livekit connectivity, stale device
+  // count) aren't tenant data — scoping them would only reduce their value
+  // as a diagnostic for an org admin without protecting anything. The error
+  // log can contain details from any organization's requests, so it's
+  // superadmin-only rather than partially filtered.
+  const orgUsers = Array.from(adminUsers.values()).filter(u => canAccessOrg(caller, u.organizationId));
+  const orgAlerts = Array.from(alerts.values()).filter(a => canAccessOrg(caller, a.organizationId));
   res.json({
     status: 'ok',
     uptimeSeconds: Math.round(process.uptime()),
     memory: process.memoryUsage(),
     connectedUsers: userConnections.size,
-    totalUsers: adminUsers.size,
-    activeAlerts: Array.from(alerts.values()).filter(a => a.status === 'active').length,
-    totalAlerts: alerts.size,
+    totalUsers: orgUsers.length,
+    activeAlerts: orgAlerts.filter(a => a.status === 'active').length,
+    totalAlerts: orgAlerts.length,
     wsClients: wss.clients.size,
     supabase: supabaseHealth,
     livekit: livekitHealth,
     staleDevices: computeStaleDevices(),
-    recentErrors: recentErrors.slice(0, 50),
+    recentErrors: caller.role === 'superadmin' ? recentErrors.slice(0, 50) : [],
     timestamp: Date.now(),
   });
 });
@@ -3938,9 +3961,9 @@ app.get('/admin/health', requireAuth, requireRole('dispatcher'), async (req, res
 // set alert.status = 'acknowledged'/'resolved') - replaces what used to be a
 // randomly-generated fake resolvedAt in /admin/incidents. False-alarm rate
 // and per-severity breakdowns use only real, already-tracked status data.
-function computeIncidentKPIs(days: number) {
+function computeIncidentKPIs(days: number, caller: { role: string; organizationId?: string }) {
   const since = Date.now() - days * 24 * 60 * 60 * 1000;
-  const relevant = Array.from(alerts.values()).filter(a => a.createdAt >= since);
+  const relevant = Array.from(alerts.values()).filter(a => a.createdAt >= since && canAccessOrg(caller, a.organizationId));
 
   const bySeverity: Record<string, { count: number; ackTimes: number[]; resolveTimes: number[] }> = {};
   let cancelledCount = 0;
@@ -3979,7 +4002,7 @@ function computeIncidentKPIs(days: number) {
 
 app.get('/admin/kpis', requireAuth, requireRole('dispatcher'), (req, res) => {
   const days = Math.max(1, Math.min(365, Number(req.query.days) || 30));
-  res.json(computeIncidentKPIs(days));
+  res.json(computeIncidentKPIs(days, req.supabaseUser!));
 });
 
 // Admin users list
@@ -5932,18 +5955,6 @@ app.get('/api/messaging/tags', (_req, res) => {
 });
 // ─── Patrol Reports REST API ─────────────────────────────────────────────────────────────
 
-// Predefined patrol sites (Geneva communes)
-const PATROL_SITES = [
-  'Champel — Avenue de Champel 24',
-  'Champel — Chemin des Crêts-de-Champel 2',
-  'Florissant — Route de Florissant 62',
-  'Florissant — Avenue de Miremont 30',
-  'Malagnou — Route de Malagnou 32',
-  'Malagnou — Chemin du Velours 10',
-  'Vésenaz — Route de Thonon 85',
-  'Vésenaz — Chemin de la Capite 12',
-];
-
 // Predefined patrol statuses with severity levels
 const PATROL_STATUS_CONFIG: Record<PatrolStatus, { label: string; color: string; severity: number }> = {
   habituel:       { label: 'Habituel',       color: '#22C55E', severity: 0 },
@@ -5958,9 +5969,50 @@ const PATROL_STATUS_CONFIG: Record<PatrolStatus, { label: string; color: string;
 const PATROL_COVERAGE_WARNING_HOURS = 4;
 const PATROL_COVERAGE_CRITICAL_HOURS = 8;
 
-// GET /api/patrol/sites - list predefined patrol sites
-app.get('/api/patrol/sites', (_req, res) => {
-  res.json({ sites: PATROL_SITES });
+// GET /api/patrol/sites - list this caller's organization's patrol sites.
+// Response shape ({ sites: string[] }) is unchanged from the old hardcoded
+// PATROL_SITES constant, so app/(tabs)/patrol.tsx needs no changes.
+app.get('/api/patrol/sites', requireAuth, (req, res) => {
+  const sites = Array.from(patrolSites.values())
+    .filter(s => canAccessOrg(req.supabaseUser!, s.organizationId))
+    .map(s => s.name);
+  res.json({ sites });
+});
+
+// ─── Patrol sites management (each organization configures its own) ─────
+app.get('/admin/patrol-sites', requireAuth, requireRole('admin'), (req, res) => {
+  const sites = Array.from(patrolSites.values()).filter(s => canAccessOrg(req.supabaseUser!, s.organizationId));
+  res.json(sites);
+});
+
+app.post('/admin/patrol-sites', requireAuth, requireRole('admin'), (req, res) => {
+  const name = (req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  const isSuperadminCaller = req.supabaseUser!.role === 'superadmin';
+  let organizationId: string | undefined;
+  if (isSuperadminCaller) {
+    organizationId = req.body.organizationId;
+    if (!organizationId || !organizations.has(organizationId)) {
+      return res.status(400).json({ error: 'A valid organizationId is required' });
+    }
+  } else {
+    organizationId = req.supabaseUser!.organizationId;
+  }
+  const site: PatrolSite = { id: uuidv4(), organizationId: organizationId!, name, createdAt: Date.now() };
+  patrolSites.set(site.id, site);
+  savePatrolSiteToSupabase(site).catch(e => console.error('[PatrolSites] Supabase save error:', e));
+  addAuditEntry('system', 'Patrol Site Created', req.supabaseUser!.id, `New patrol site: ${name}`, site.id);
+  res.status(201).json(site);
+});
+
+app.delete('/admin/patrol-sites/:id', requireAuth, requireRole('admin'), (req, res) => {
+  const site = patrolSites.get(req.params.id as string);
+  if (!site) return res.status(404).json({ error: 'Patrol site not found' });
+  if (!canAccessOrg(req.supabaseUser!, site.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  patrolSites.delete(site.id);
+  deletePatrolSiteFromSupabase(site.id).catch(e => console.error('[PatrolSites] Supabase delete error:', e));
+  addAuditEntry('system', 'Patrol Site Deleted', req.supabaseUser!.id, `Deleted patrol site: ${site.name}`, site.id);
+  res.json({ success: true });
 });
 
 // GET /api/patrol/statuses - list predefined patrol statuses
@@ -6003,6 +6055,7 @@ app.post('/api/patrol/reports', (req, res) => {
     tasks,
     notes: notes || undefined,
     media: [],
+    organizationId: user.organizationId,
   };
 
   patrolReports.unshift(report); // newest first
@@ -6088,6 +6141,14 @@ app.get('/api/patrol/reports', (req, res) => {
   const currentRole = req.supabaseUser?.role || (req.query.role as string);
 
   let filtered = [...patrolReports];
+  // Same temporary tolerance as the identity fallback above: only narrow by
+  // organization when a verified caller is actually present (real callers
+  // today — the app via apiGet, dispatch-web via its authenticated fetch
+  // wrapper — always have one). Once requireAuth replaces optionalAuth on
+  // this prefix, req.supabaseUser is guaranteed and this becomes unconditional.
+  if (req.supabaseUser) {
+    filtered = filtered.filter(r => canAccessOrg(req.supabaseUser!, r.organizationId));
+  }
   if (locationFilter) {
     filtered = filtered.filter(r => r.location === locationFilter);
   }
@@ -6112,11 +6173,12 @@ app.get('/api/patrol/reports', (req, res) => {
   res.json({ reports: filtered.slice(0, limit), total: filtered.length });
 });
 
-// GET /api/patrol/coverage - last patrol time per fixed site, for dispatch oversight
-app.get('/api/patrol/coverage', (_req, res) => {
+// GET /api/patrol/coverage - last patrol time per site, for dispatch oversight
+app.get('/api/patrol/coverage', requireAuth, (req, res) => {
   const now = Date.now();
-  const sites = PATROL_SITES.map(location => {
-    const reportsForSite = patrolReports.filter(r => r.location === location);
+  const orgSites = Array.from(patrolSites.values()).filter(s => canAccessOrg(req.supabaseUser!, s.organizationId));
+  const sites = orgSites.map(({ name: location }) => {
+    const reportsForSite = patrolReports.filter(r => r.location === location && canAccessOrg(req.supabaseUser!, r.organizationId));
     const lastReportAt = reportsForSite.length
       ? Math.max(...reportsForSite.map(r => r.createdAt))
       : null;
@@ -6747,6 +6809,8 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
     loadAdminUsersFromSupabase(),
     loadAlertsFromSupabase(),
     loadPatrolReportsFromSupabase(),
+    loadPatrolSitesFromSupabase(),
+    loadBlackbookFromSupabase(),
     loadPTTChannelsFromSupabase(),
     loadFamilyPerimetersFromSupabase(),
     loadSectorsFromSupabase(),
@@ -6868,6 +6932,36 @@ async function deleteOrganizationFromSupabase(orgId: string): Promise<void> {
     const { error } = await supabaseAdmin.from('organizations').delete().eq('id', orgId);
     if (error) console.error('[Supabase] deleteOrganizationFromSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] deleteOrganizationFromSupabase error:', e); }
+}
+
+async function loadPatrolSitesFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('patrol_sites').select('*');
+    if (error) { console.error('[Supabase] Failed to load patrol_sites:', error.message); return; }
+    if (data && data.length > 0) {
+      patrolSites.clear();
+      data.forEach((s: any) => {
+        patrolSites.set(s.id, { id: s.id, organizationId: s.organization_id, name: s.name, createdAt: s.created_at || Date.now() });
+      });
+      console.log(`[Supabase] Loaded ${data.length} patrol sites`);
+    }
+  } catch (e) { console.error('[Supabase] loadPatrolSitesFromSupabase error:', e); }
+}
+
+async function savePatrolSiteToSupabase(site: PatrolSite): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('patrol_sites').upsert({
+      id: site.id, organization_id: site.organizationId, name: site.name, created_at: site.createdAt,
+    });
+    if (error) console.error('[Supabase] savePatrolSiteToSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] savePatrolSiteToSupabase error:', e); }
+}
+
+async function deletePatrolSiteFromSupabase(siteId: string): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('patrol_sites').delete().eq('id', siteId);
+    if (error) console.error('[Supabase] deletePatrolSiteFromSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] deletePatrolSiteFromSupabase error:', e); }
 }
 
 async function saveAdminUserToSupabase(user: AdminUser): Promise<void> {
@@ -6993,6 +7087,7 @@ async function loadPatrolReportsFromSupabase(): Promise<void> {
         id: r.id, createdAt: r.created_at, createdBy: r.created_by,
         createdByName: r.created_by_name, location: r.location,
         status: r.status, tasks: r.tasks || [], notes: r.notes, media: r.media || [],
+        organizationId: r.organization_id || undefined,
       }));
       console.log(`[Supabase] Loaded ${data.length} patrol reports`);
     }
@@ -7005,6 +7100,7 @@ async function savePatrolReportToSupabase(report: PatrolReport): Promise<void> {
       id: report.id, created_at: report.createdAt, created_by: report.createdBy,
       created_by_name: report.createdByName, location: report.location,
       status: report.status, tasks: report.tasks, notes: report.notes || null, media: report.media || [],
+      organization_id: report.organizationId || null,
     });
     if (error) console.error('[Supabase] savePatrolReportToSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] savePatrolReportToSupabase error:', e); }
@@ -8065,8 +8161,10 @@ app.get('/api/entity-search', requireAuth, (req, res) => {
   const results: any[] = [];
 
   for (const entry of blackbookEntries.values()) {
-    // Entries not linked to any specific family are general threats, not
-    // confidential to one client — only gate entries that ARE linked.
+    if (!canAccessOrg(caller, entry.organizationId)) continue;
+    // Within the organization, entries not linked to any specific family are
+    // general threats, not confidential to one client — only gate entries
+    // that ARE linked at the family level.
     if (entry.linkedUserId && !canAccessUser(callerAccess, entry.linkedUserId)) continue;
     const haystacks = [
       `${entry.firstName} ${entry.lastName}`,
@@ -8221,6 +8319,7 @@ interface BlackbookEntry {
   createdByName: string;
   createdAt: number;
   updatedAt: number;
+  organizationId?: string;
 }
 
 const blackbookEntries = new Map<string, BlackbookEntry>();
@@ -8243,6 +8342,7 @@ async function loadBlackbookFromSupabase(): Promise<void> {
           tags: e.tags || [], notes: e.notes || undefined, sightings: e.sightings || [],
           linkedIncidentIds: e.linked_incident_ids || [], linkedUserId: e.linked_user_id || undefined,
           createdBy: e.created_by, createdByName: e.created_by_name, createdAt: e.created_at, updatedAt: e.updated_at,
+          organizationId: e.organization_id || undefined,
         });
       });
       console.log(`[Supabase] Loaded ${data.length} blackbook entries`);
@@ -8259,6 +8359,7 @@ async function saveBlackbookEntryToSupabase(entry: BlackbookEntry): Promise<void
       tags: entry.tags, notes: entry.notes || null, sightings: entry.sightings,
       linked_incident_ids: entry.linkedIncidentIds, linked_user_id: entry.linkedUserId || null,
       created_by: entry.createdBy, created_by_name: entry.createdByName, created_at: entry.createdAt, updated_at: entry.updatedAt,
+      organization_id: entry.organizationId || null,
     });
     if (error) console.error('[Supabase] Failed to persist blackbook entry:', error.message);
   } catch (e) { console.error('[Supabase] saveBlackbookEntryToSupabase error:', e); }
@@ -8272,7 +8373,7 @@ async function deleteBlackbookEntryFromSupabase(id: string): Promise<void> {
 }
 
 function isBlackbookStaff(role: string): boolean {
-  return role === 'responder' || role === 'dispatcher' || role === 'admin';
+  return role === 'responder' || role === 'dispatcher' || role === 'admin' || role === 'superadmin';
 }
 
 // ─── Main Courante + Analyse IA ────────────────────────────────────────
@@ -8653,9 +8754,12 @@ app.get('/api/blackbook', requireAuth, (req, res) => {
   const caller = req.supabaseUser!;
   if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
   const callerAccess = { id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
-  // Entries not linked to any specific family are general threats, not
-  // confidential to one client — only gate entries that ARE linked.
+  // Organization boundary first, hard, no exceptions — then, within that
+  // organization, entries not linked to any specific family are general
+  // threats, not confidential to one client, so only gate entries that ARE
+  // linked at the family level.
   const entries = Array.from(blackbookEntries.values())
+    .filter(e => canAccessOrg(caller, e.organizationId))
     .filter(e => !e.linkedUserId || canAccessUser(callerAccess, e.linkedUserId))
     .sort((a, b) => b.updatedAt - a.updatedAt).map(enrichBlackbookEntry);
   res.json(entries);
@@ -8667,6 +8771,7 @@ app.get('/api/blackbook/:id', requireAuth, (req, res) => {
   if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
   const entry = blackbookEntries.get(req.params.id as string);
   if (!entry) return res.status(404).json({ error: 'Entry not found' });
+  if (!canAccessOrg(caller, entry.organizationId)) return res.status(403).json({ error: 'Not authorized for this entry' });
   const callerAccess = { id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
   if (entry.linkedUserId && !canAccessUser(callerAccess, entry.linkedUserId)) return res.status(403).json({ error: 'Not authorized for this entry' });
   res.json(enrichBlackbookEntry(entry));
@@ -8688,6 +8793,7 @@ app.post('/api/blackbook', requireAuth, async (req, res) => {
     vehicles: Array.isArray(vehicles) ? vehicles : [], tags: Array.isArray(tags) ? tags : [],
     notes: notes || undefined, sightings: [], linkedIncidentIds: [], linkedUserId: linkedUserId || undefined,
     createdBy: caller.id, createdByName: callerUser?.name || caller.id, createdAt: now, updatedAt: now,
+    organizationId: caller.organizationId,
   };
   blackbookEntries.set(entry.id, entry);
   saveBlackbookEntryToSupabase(entry).catch(() => {});
@@ -8701,6 +8807,7 @@ app.put('/api/blackbook/:id', requireAuth, async (req, res) => {
   if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
   const entry = blackbookEntries.get(req.params.id as string);
   if (!entry) return res.status(404).json({ error: 'Entry not found' });
+  if (!canAccessOrg(caller, entry.organizationId)) return res.status(403).json({ error: 'Not authorized for this entry' });
   const { firstName, lastName, aliases, dateOfBirth, physicalDescription, riskLevel, status, vehicles, tags, notes, linkedUserId, linkedIncidentIds } = req.body;
   if (firstName !== undefined) entry.firstName = firstName;
   if (lastName !== undefined) entry.lastName = lastName;
@@ -8724,9 +8831,10 @@ app.put('/api/blackbook/:id', requireAuth, async (req, res) => {
 // be able to erase a shared record they didn't create.
 app.delete('/api/blackbook/:id', requireAuth, async (req, res) => {
   const caller = req.supabaseUser!;
-  if (caller.role !== 'dispatcher' && caller.role !== 'admin') return res.status(403).json({ error: 'Dispatcher/admin only' });
+  if (caller.role !== 'dispatcher' && caller.role !== 'admin' && caller.role !== 'superadmin') return res.status(403).json({ error: 'Dispatcher/admin only' });
   const entry = blackbookEntries.get(req.params.id as string);
   if (!entry) return res.status(404).json({ error: 'Entry not found' });
+  if (!canAccessOrg(caller, entry.organizationId)) return res.status(403).json({ error: 'Not authorized for this entry' });
   blackbookEntries.delete(entry.id);
   deleteBlackbookEntryFromSupabase(entry.id).catch(() => {});
   addAuditEntry('system', 'Blackbook: fiche supprimée', adminUsers.get(caller.id)?.name || caller.id, `${entry.firstName} ${entry.lastName}`.trim(), caller.id);
@@ -8806,12 +8914,8 @@ function checkBlackbookCrossResidencePattern(entry: BlackbookEntry, priorDistinc
     type: 'blackbookPatternDetected',
     data: { entryId: entry.id, name, riskLevel: entry.riskLevel, residenceCount: distinctResidences.size, residences: Array.from(distinctResidences.values()), title, body },
   };
-  // BlackbookEntry has no organizationId of its own yet (Blackbook org-scoping
-  // is deferred, see Phase 1 plan section 5) — best-effort via the entry's
-  // creator, since residence-linked sightings should belong to one org.
-  const blackbookOrgId = adminUsers.get(entry.createdBy)?.organizationId;
-  broadcastToOrgRole(blackbookOrgId, 'dispatcher', payload);
-  broadcastToOrgRole(blackbookOrgId, 'admin', payload);
+  broadcastToOrgRole(entry.organizationId, 'dispatcher', payload);
+  broadcastToOrgRole(entry.organizationId, 'admin', payload);
   notifyStaffBlackbookPatternPush(title, body).catch(() => {});
   console.log(`[Blackbook] Cross-residence pattern detected for ${name}: ${distinctResidences.size} residences`);
 }

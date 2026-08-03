@@ -36,6 +36,9 @@
       <a href="#" class="nav-item" data-tab="organizations" id="navOrganizations" style="display:none;">
         <span class="nav-icon">&#x1F3E2;</span> Organisations
       </a>
+      <a href="#" class="nav-item" data-tab="patrol-sites">
+        <span class="nav-icon">&#x1F4CD;</span> Sites de patrouille
+      </a>
     </nav>
     <div class="sidebar-footer">
       <a href="/dispatch-console/" style="display:block;padding:8px 12px;margin-bottom:8px;border-radius:6px;background:#243447;color:#94a3b8;text-decoration:none;font-size:12px;text-align:center;transition:all 0.15s;">&#x1F4E1; Dispatch Console</a>
@@ -314,6 +317,26 @@
         </table>
       </div>
     </section>
+
+    <!-- Patrol Sites -->
+    <section class="tab-content" id="tab-patrol-sites">
+      <div class="toolbar">
+        <div></div>
+        <button class="btn btn-primary" onclick="openCreateSiteModal()">&#x2795; Nouveau site</button>
+      </div>
+      <div class="table-container">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Nom</th>
+              <th>Créé le</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="patrolSitesTableBody"></tbody>
+        </table>
+      </div>
+    </section>
   </main>
 
   <!-- Create Organization Modal -->
@@ -327,6 +350,25 @@
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
         <button class="btn btn-secondary" onclick="closeCreateOrgModal()">Annuler</button>
         <button class="btn btn-primary" onclick="submitCreateOrg()">Créer</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create Patrol Site Modal -->
+  <div class="modal-overlay" id="createSiteModal">
+    <div class="modal">
+      <h3 class="modal-title">Nouveau site de patrouille</h3>
+      <div class="form-group">
+        <label class="form-label">Nom / Adresse</label>
+        <input type="text" class="form-input" id="newSiteName" placeholder="ex. Champel — Avenue de Champel 24">
+      </div>
+      <div class="form-group" id="newSiteOrgGroup" style="display:none;">
+        <label class="form-label">Organisation</label>
+        <select class="form-select" id="newSiteOrg"></select>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+        <button class="btn btn-secondary" onclick="closeCreateSiteModal()">Annuler</button>
+        <button class="btn btn-primary" onclick="submitCreateSite()">Créer</button>
       </div>
     </div>
   </div>

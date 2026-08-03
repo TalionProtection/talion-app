@@ -278,21 +278,23 @@ function applyRoleGating() {
     document.getElementById('fieldRoleSuperadminOption').style.display = '';
     document.getElementById('fieldOrgGroup').style.display = '';
     document.getElementById('usersOrgHeader').style.display = '';
+    document.getElementById('newSiteOrgGroup').style.display = '';
     populateFieldOrgOptions();
   }
 }
 
-// Only relevant for a superadmin caller — an org admin never sees this
-// picker, the server always forces organizationId to their own org
+// Only relevant for a superadmin caller — an org admin never sees these
+// pickers, the server always forces organizationId to their own org
 // regardless of what (if anything) the client sends. See POST/PUT
-// /admin/users on the server. Also backs the "Organisation" column in the
-// users table and the org picker in the create-user form.
+// /admin/users and POST /admin/patrol-sites on the server. Also backs the
+// "Organisation" column in the users table.
 async function populateFieldOrgOptions() {
   try {
     const res = await fetch(`${API_BASE}/admin/organizations`);
     allOrganizations = await res.json();
-    const select = document.getElementById('fieldOrg');
-    select.innerHTML = allOrganizations.map(o => `<option value="${o.id}">${o.name}</option>`).join('');
+    const optionsHtml = allOrganizations.map(o => `<option value="${o.id}">${o.name}</option>`).join('');
+    document.getElementById('fieldOrg').innerHTML = optionsHtml;
+    document.getElementById('newSiteOrg').innerHTML = optionsHtml;
     renderUsers();
   } catch (e) {
     console.error('[Organizations] populateFieldOrgOptions error:', e);
@@ -313,7 +315,7 @@ function switchTab(tab) {
   document.querySelector(`.nav-item[data-tab="${tab}"]`).classList.add('active');
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.getElementById(`tab-${tab}`).classList.add('active');
-  const titles = { dashboard: 'Dashboard', users: 'Gestion des Utilisateurs', incidents: 'Gestion des Incidents', audit: 'Journal d\'Audit', 'login-history': 'Historique de Connexion', organizations: 'Organisations' };
+  const titles = { dashboard: 'Dashboard', users: 'Gestion des Utilisateurs', incidents: 'Gestion des Incidents', audit: 'Journal d\'Audit', 'login-history': 'Historique de Connexion', organizations: 'Organisations', 'patrol-sites': 'Sites de patrouille' };
   document.getElementById('pageTitle').textContent = titles[tab] || tab;
   if (tab === 'login-history') {
     loadLoginHistory(1);
@@ -322,6 +324,9 @@ function switchTab(tab) {
   }
   if (tab === 'organizations') {
     loadOrganizations();
+  }
+  if (tab === 'patrol-sites') {
+    loadPatrolSites();
   }
 }
 
@@ -396,6 +401,81 @@ async function toggleOrgStatus(id, newStatus) {
       return;
     }
     loadOrganizations();
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
+}
+
+// ─── Patrol Sites (each organization manages its own) ─────────────────
+async function loadPatrolSites() {
+  try {
+    const res = await fetch(`${API_BASE}/admin/patrol-sites`);
+    const sites = await res.json();
+    renderPatrolSitesTable(sites);
+  } catch (e) {
+    console.error('[PatrolSites] load error:', e);
+  }
+}
+
+function renderPatrolSitesTable(sites) {
+  const tbody = document.getElementById('patrolSitesTableBody');
+  tbody.innerHTML = sites.map(s => `
+    <tr>
+      <td>${s.name}</td>
+      <td>${new Date(s.createdAt).toLocaleDateString('fr-FR')}</td>
+      <td><button class="btn btn-sm btn-danger" onclick="deletePatrolSite('${s.id}')">🗑️</button></td>
+    </tr>
+  `).join('');
+}
+
+function openCreateSiteModal() {
+  document.getElementById('newSiteName').value = '';
+  document.getElementById('createSiteModal').classList.add('visible');
+}
+
+function closeCreateSiteModal() {
+  document.getElementById('createSiteModal').classList.remove('visible');
+}
+
+async function submitCreateSite() {
+  const name = document.getElementById('newSiteName').value.trim();
+  if (!name) {
+    showToast('Le nom est obligatoire', 'error');
+    return;
+  }
+  const payload = { name };
+  if (currentUserRole() === 'superadmin') {
+    payload.organizationId = document.getElementById('newSiteOrg').value;
+  }
+  try {
+    const res = await fetch(`${API_BASE}/admin/patrol-sites`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors de la création', 'error');
+      return;
+    }
+    closeCreateSiteModal();
+    loadPatrolSites();
+    showToast('Site créé', 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
+}
+
+async function deletePatrolSite(id) {
+  if (!confirm('Supprimer ce site de patrouille ?')) return;
+  try {
+    const res = await fetch(`${API_BASE}/admin/patrol-sites/${id}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur', 'error');
+      return;
+    }
+    loadPatrolSites();
   } catch (e) {
     showToast('Erreur de connexion', 'error');
   }
