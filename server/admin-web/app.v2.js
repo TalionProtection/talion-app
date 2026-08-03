@@ -265,6 +265,13 @@ function currentUserRole() {
   }
 }
 
+function logout() {
+  localStorage.removeItem('talion_token');
+  localStorage.removeItem('talion_role');
+  localStorage.removeItem('talion_user');
+  window.location.href = '/console/';
+}
+
 function applyRoleGating() {
   if (currentUserRole() === 'superadmin') {
     document.getElementById('navOrganizations').style.display = '';

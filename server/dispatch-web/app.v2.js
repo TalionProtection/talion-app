@@ -663,6 +663,13 @@ document.addEventListener('DOMContentLoaded', () => {
   setInterval(refreshData, 30000);
 });
 
+function logout() {
+  localStorage.removeItem('talion_token');
+  localStorage.removeItem('talion_role');
+  localStorage.removeItem('talion_user');
+  window.location.href = '/console/';
+}
+
 // ─── Navigation ──────────────────────────────────────────────
 function setupNavigation() {
   document.querySelectorAll('.nav-item').forEach(item => {
