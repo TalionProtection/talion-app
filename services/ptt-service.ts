@@ -225,7 +225,7 @@ export function canTransmitOnChannel(
   channel: PTTChannel,
   userRole: string
 ): boolean {
-  if (userRole === 'admin') return true;
+  if (userRole === 'admin' || userRole === 'superadmin') return true;
   return channel.allowedRoles.includes(userRole as any);
 }
 
@@ -263,6 +263,7 @@ export function getRoleColor(role: string): string {
     case 'responder': return '#22c55e';
     case 'user': return '#8b5cf6';
     case 'admin': return '#ef4444';
+    case 'superadmin': return '#b91c1c';
     default: return '#6b7280';
   }
 }

@@ -6,6 +6,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { TalionScreen } from '@/components/talion-banner';
 import { useAuth } from '@/hooks/useAuth';
+import { isDispatchRole, isStaffRole } from '@/lib/auth-context';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
 import { authHeader } from '@/lib/auth-fetch';
@@ -23,8 +24,8 @@ interface PTTChannel {
 
 export default function PTTScreen() {
   const { user } = useAuth();
-  const isStaff = user?.role === 'responder' || user?.role === 'dispatcher' || user?.role === 'admin';
-  const isDispatchStaff = user?.role === 'dispatcher' || user?.role === 'admin';
+  const isStaff = isStaffRole(user?.role);
+  const isDispatchStaff = isDispatchRole(user?.role);
 
   const {
     connected, connecting, activeChannelId, activeChannelName, activeSpeakers, transmitting,

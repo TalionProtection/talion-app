@@ -396,11 +396,12 @@ export function MessagingProvider({ children }: { children: React.ReactNode }) {
         switch (currentRole) {
           case 'dispatcher':
           case 'admin':
-            // Dispatchers can message everyone
+          case 'superadmin':
+            // Dispatchers/admins/superadmin can message everyone
             return true;
           case 'responder':
             // Responders can message dispatchers and other responders
-            return c.role === 'dispatcher' || c.role === 'responder' || c.role === 'admin';
+            return c.role === 'dispatcher' || c.role === 'responder' || c.role === 'admin' || c.role === 'superadmin';
           case 'user':
             // Users can message dispatchers and responders
             return c.role === 'dispatcher' || c.role === 'responder';

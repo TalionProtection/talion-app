@@ -18,7 +18,22 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 });
 
 // ─── Types ───────────────────────────────────────────────────────────────────
-export type UserRole = 'user' | 'responder' | 'dispatcher' | 'admin';
+export type UserRole = 'user' | 'responder' | 'dispatcher' | 'admin' | 'superadmin';
+
+// Shared hierarchy helpers — every "is this role privileged enough for X"
+// check in the app should go through these rather than reimplementing its
+// own OR-chain of role strings, which is how superadmin ended up silently
+// excluded from every staff-tier feature when it was added server-side
+// (see server/auth-middleware.ts's ROLE_HIERARCHY, which this mirrors).
+export function isStaffRole(role: UserRole | undefined): boolean {
+  return role === 'responder' || role === 'dispatcher' || role === 'admin' || role === 'superadmin';
+}
+export function isDispatchRole(role: UserRole | undefined): boolean {
+  return role === 'dispatcher' || role === 'admin' || role === 'superadmin';
+}
+export function isAdminRole(role: UserRole | undefined): boolean {
+  return role === 'admin' || role === 'superadmin';
+}
 
 export interface User {
   id: string;

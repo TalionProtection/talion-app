@@ -15,6 +15,7 @@ import {
 import { TextInput } from 'react-native';
 import { TalionScreen, TalionBanner } from '@/components/talion-banner';
 import { useAuth } from '@/hooks/useAuth';
+import { isStaffRole } from '@/lib/auth-context';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
 import { authHeader, createPatrolReport, uploadMediaToReport as uploadMedia } from '@/services/patrol-api';
@@ -758,7 +759,7 @@ export default function PatrolScreen() {
           <Text style={styles.emptyIcon}>📋</Text>
           <Text style={styles.emptyText}>Aucun rapport de ronde</Text>
           <Text style={styles.emptySubtext}>
-            {user?.role === 'responder' || user?.role === 'dispatcher' || user?.role === 'admin'
+            {isStaffRole(user?.role)
               ? 'Créez votre premier rapport'
               : 'Vous n\'avez pas accès aux rapports'}
           </Text>
@@ -773,8 +774,8 @@ export default function PatrolScreen() {
         />
       )}
 
-      {/* FAB: Create new report (responders, dispatchers, admins only) */}
-      {(user?.role === 'responder' || user?.role === 'dispatcher' || user?.role === 'admin') && (
+      {/* FAB: Create new report (staff only) */}
+      {isStaffRole(user?.role) && (
         <TouchableOpacity style={styles.fab} onPress={handleCreate} activeOpacity={0.8}>
           <Text style={styles.fabText}>+ Nouveau rapport</Text>
         </TouchableOpacity>
@@ -1185,7 +1186,7 @@ export default function PatrolScreen() {
 
   // ─── Access Control ───────────────────────────────────────────────────
 
-  const canAccess = user?.role === 'responder' || user?.role === 'dispatcher' || user?.role === 'admin';
+  const canAccess = isStaffRole(user?.role);
 
   if (!canAccess) {
     return (

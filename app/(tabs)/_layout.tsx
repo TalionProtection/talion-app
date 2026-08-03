@@ -6,6 +6,7 @@ import { IconSymbol } from '@/components/ui/icon-symbol';
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useAuth } from '@/hooks/useAuth';
+import { isAdminRole, isDispatchRole, isStaffRole } from '@/lib/auth-context';
 import { useMessaging } from '@/lib/messaging-context';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Platform } from 'react-native';
@@ -26,10 +27,10 @@ export default function TabLayout() {
   // - user: Home, Messages, PTT, Map, Famille, Profil
   // - responder: Home, Messages, PTT, Map, Famille, Profil
   // - dispatcher: Home, Messages, PTT, Map, Famille, Dispatch, Profil
-  // - admin: Home, Messages, PTT, Map, Famille, Dispatch, Admin, Profil
-  const canSeePatrol = role === 'responder' || role === 'dispatcher' || role === 'admin';
-  const canSeeDispatch = role === 'dispatcher' || role === 'admin';
-  const canSeeAdmin = role === 'admin';
+  // - admin/superadmin: Home, Messages, PTT, Map, Famille, Dispatch, Admin, Profil
+  const canSeePatrol = isStaffRole(role);
+  const canSeeDispatch = isDispatchRole(role);
+  const canSeeAdmin = isAdminRole(role);
 
   return (
     <Tabs

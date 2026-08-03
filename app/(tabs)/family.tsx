@@ -7,6 +7,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 import { useAuth } from '@/hooks/useAuth';
+import { isStaffRole } from '@/lib/auth-context';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
 import { authHeader } from '@/lib/auth-fetch';
@@ -354,7 +355,7 @@ export default function FamilyScreen() {
 
   const BASE = getApiBaseUrl();
   const userId = user?.id;
-  const isStaff = user?.role === 'responder' || user?.role === 'dispatcher' || user?.role === 'admin';
+  const isStaff = isStaffRole(user?.role);
 
   // Location context for "Use my position" button
   const locationCtx = useLocation();

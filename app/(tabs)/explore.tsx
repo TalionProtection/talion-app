@@ -3,6 +3,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'expo-router';
 import { TalionScreen } from '@/components/talion-banner';
 import { useAuth } from '@/hooks/useAuth';
+import { isStaffRole } from '@/lib/auth-context';
 import { useLocation } from '@/lib/location-context';
 import NativeMapView, { Marker, Circle, Callout, isNativeMap } from '@/components/map-view';
 import { websocketService, type LocationUpdate, type Alert as WSAlert } from '@/services/websocket';
@@ -421,7 +422,7 @@ export default function MapScreen() {
   const { user } = useAuth();
   const router = useRouter();
   const { location, state: locationState } = useLocation();
-  const isPrivileged = user?.role === 'responder' || user?.role === 'dispatcher' || user?.role === 'admin';
+  const isPrivileged = isStaffRole(user?.role);
   const [mapFilter, setMapFilter] = useState<MapFilter>('all');
   // Regular users do NOT see responder locations - only privileged roles do
   const [responders, setResponders] = useState<ResponderLocation[]>(isPrivileged ? MOCK_RESPONDERS : []);

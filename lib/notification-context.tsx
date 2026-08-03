@@ -97,7 +97,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     async (payload: SOSNotificationPayload) => {
       // Only send local notification if user is a responder or dispatcher
       // (users trigger SOS, responders/dispatchers receive alerts)
-      if (user?.role === 'responder' || user?.role === 'dispatcher' || user?.role === 'admin') {
+      if (user?.role === 'responder' || user?.role === 'dispatcher' || user?.role === 'admin' || user?.role === 'superadmin') {
         await notificationService.sendSOSAlert(payload);
       }
     },

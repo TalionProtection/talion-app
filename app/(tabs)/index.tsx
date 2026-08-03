@@ -4,6 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SOSButton } from '@/components/sos-button';
 import { AlertCreationModal } from '@/components/alert-creation-modal';
 import { useAuth } from '@/hooks/useAuth';
+import { isStaffRole } from '@/lib/auth-context';
 import { useLocation } from '@/lib/location-context';
 import { TalionScreen } from '@/components/talion-banner';
 import { useAlerts, type ServerAlert } from '@/hooks/useAlerts';
@@ -261,7 +262,7 @@ export default function HomeScreen() {
   };
 
   const handleRespondToIncident = (incident: Incident) => {
-    const isPrivileged = user?.role === 'responder' || user?.role === 'dispatcher' || user?.role === 'admin';
+    const isPrivileged = isStaffRole(user?.role);
     const isBroadcast = incident.type === 'broadcast';
 
     // Regular users can only view alerts (no respond option)
@@ -436,7 +437,7 @@ export default function HomeScreen() {
           </View>
 
           {/* Filter chips for responders */}
-          {(user?.role === 'responder' || user?.role === 'dispatcher' || user?.role === 'admin') && (
+          {isStaffRole(user?.role) && (
             <View style={styles.filterRow}>
               <TouchableOpacity
                 style={[styles.filterChip, incidentFilter === 'all' && styles.filterChipActive]}
@@ -564,8 +565,8 @@ export default function HomeScreen() {
                   );
                 })()}
                 {/* Generic respond button for non-assigned privileged users */}
-                {(user?.role === 'responder' || user?.role === 'dispatcher' || user?.role === 'admin') && 
-                  incident.status === 'active' && 
+                {isStaffRole(user?.role) &&
+                  incident.status === 'active' &&
                   !(user?.id && incident.assignedResponders.includes(user.id)) && (
                   <TouchableOpacity
                     style={styles.respondButton}

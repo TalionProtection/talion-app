@@ -174,7 +174,7 @@ const response = await fetchWithTimeout(`${baseUrl}/alerts?${params}`, {
   // Filter alerts based on user role
   const alerts = useMemo(() => {
     // Only dispatchers, responders, and admins see SOS alerts
-    const privilegedRoles = ['dispatcher', 'responder', 'admin'];
+    const privilegedRoles = ['dispatcher', 'responder', 'admin', 'superadmin'];
     if (userRole && privilegedRoles.includes(userRole)) {
       return allAlerts; // privileged roles see everything
     }

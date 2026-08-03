@@ -68,6 +68,7 @@ interface AuditEntry {
 type AdminTab = 'users' | 'incidents' | 'analytics' | 'audit';
 
 const ROLE_COLORS: Record<UserRole, string> = {
+  superadmin: '#b91c1c',
   admin: '#7c3aed',
   dispatcher: '#1e3a5f',
   responder: '#059669',
@@ -75,6 +76,7 @@ const ROLE_COLORS: Record<UserRole, string> = {
 };
 
 const ROLE_LABELS: Record<UserRole, string> = {
+  superadmin: 'Superadmin',
   admin: 'Admin',
   dispatcher: 'Dispatcher',
   responder: 'Intervenant',
@@ -538,7 +540,7 @@ export default function AdminScreen() {
       );
     }
     return result.sort((a, b) => {
-      const roleOrder: Record<UserRole, number> = { admin: 0, dispatcher: 1, responder: 2, user: 3 };
+      const roleOrder: Record<UserRole, number> = { superadmin: 0, admin: 1, dispatcher: 2, responder: 3, user: 4 };
       return roleOrder[a.role] - roleOrder[b.role];
     });
   }, [users, searchQuery]);
@@ -563,6 +565,7 @@ export default function AdminScreen() {
     const suspendedUsers = users.filter(u => u.status === 'suspended').length;
     const deactivatedUsers = users.filter(u => u.status === 'deactivated').length;
     const byRole = {
+      superadmin: users.filter(u => u.role === 'superadmin').length,
       admin: users.filter(u => u.role === 'admin').length,
       dispatcher: users.filter(u => u.role === 'dispatcher').length,
       responder: users.filter(u => u.role === 'responder').length,
@@ -646,7 +649,7 @@ export default function AdminScreen() {
               </Text>
             )}
             <View style={styles.roleGrid}>
-              {(['admin', 'dispatcher', 'responder', 'user'] as UserRole[]).map(role => (
+              {((user?.role === 'superadmin' ? ['superadmin', 'admin', 'dispatcher', 'responder', 'user'] : ['admin', 'dispatcher', 'responder', 'user']) as UserRole[]).map(role => (
                 <TouchableOpacity
                   key={role}
                   style={[
@@ -774,7 +777,7 @@ export default function AdminScreen() {
               {/* Role selector */}
               <Text style={styles.formLabel}>Rôle</Text>
               <View style={styles.roleSelector}>
-                {(['user', 'responder', 'dispatcher', 'admin'] as UserRole[]).map(r => (
+                {((user?.role === 'superadmin' ? ['user', 'responder', 'dispatcher', 'admin', 'superadmin'] : ['user', 'responder', 'dispatcher', 'admin']) as UserRole[]).map(r => (
                   <TouchableOpacity
                     key={r}
                     style={[
