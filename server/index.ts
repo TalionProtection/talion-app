@@ -2720,18 +2720,16 @@ app.get('/api/geocode', async (req, res) => {
   }
 });
 
-// NOT org-scoped, deliberately, unlike the rest of Phase 1: this route has
-// no requireAuth (role/userId are unverified query params, a pre-existing
-// gap not fixed here) AND at least one real caller — app/dispatcher.tsx's
-// useAlerts({ userRole: 'dispatcher' }) — never sends userId at all, so a
-// fail-closed org filter here would silently empty the dispatcher's live
-// alert feed. Needs a coordinated frontend+backend fix (always send an
-// identity, ideally a real Bearer token) before it can be scoped safely —
-// tracked as a follow-up, not fixed in this pass.
+// Gated by the 'app.use(\'/alerts\', requireAuth)' prefix middleware near
+// the top of the file — req.supabaseUser is always populated by the time
+// this handler runs, so it's safe to org-scope via the verified caller
+// rather than the unverified role/userId query params below (those are
+// still used for the per-user "own incidents" narrowing further down).
 app.get('/alerts', (req, res) => {
   const userRole = req.query.role as string;
   const userId = req.query.userId as string;
   const visibleAlerts = Array.from(alerts.values()).filter(a => {
+    if (!canAccessOrg(req.supabaseUser!, a.organizationId)) return false;
     if (a.status === 'resolved') return false;
     if (userRole === 'user') {
       // User voit ses propres incidents + incidents créés par Dispatch le concernant
@@ -6857,6 +6855,7 @@ async function loadAlertsFromSupabase(): Promise<void> {
           isDuress: a.is_duress || false,
           acknowledgedAt: a.acknowledged_at || undefined,
           resolvedAt: a.resolved_at || undefined,
+          organizationId: a.organization_id || undefined,
         });
       });
       console.log(`[Supabase] Loaded ${data.length} alerts`);
@@ -6892,6 +6891,7 @@ async function saveAlertToSupabase(alert: Alert): Promise<void> {
       is_duress: alert.isDuress || false,
       acknowledged_at: alert.acknowledgedAt || null,
       resolved_at: alert.resolvedAt || null,
+      organization_id: alert.organizationId || null,
     });
     if (error) console.error('[Supabase] saveAlertToSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] saveAlertToSupabase error:', e); }
