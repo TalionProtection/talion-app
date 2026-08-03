@@ -5,6 +5,7 @@ import * as Device from 'expo-device';
 import Constants from 'expo-constants';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
+import { authHeader } from '@/lib/auth-fetch';
 import { useAuth } from '@/hooks/useAuth';
 
 /**
@@ -100,8 +101,8 @@ export function usePushNotifications() {
       const baseUrl = getApiBaseUrl();
       const response = await fetchWithTimeout(`${baseUrl}/api/push-token`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, userId, userRole }),
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({ token }),
         timeout: 10000,
       });
 
@@ -122,7 +123,7 @@ export function usePushNotifications() {
       const baseUrl = getApiBaseUrl();
       await fetchWithTimeout(`${baseUrl}/api/push-token`, {
         method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
         body: JSON.stringify({ token }),
         timeout: 10000,
       });

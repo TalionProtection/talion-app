@@ -505,7 +505,7 @@ export default function FamilyScreen() {
   const fetchMyPresence = useCallback(async () => {
     if (!userId) return;
     try {
-      const res = await fetchWithTimeout(`${BASE}/api/family/presence/${userId}`, { timeout: 10000 });
+      const res = await fetchWithTimeout(`${BASE}/api/family/presence/${userId}`, { headers: await authHeader(), timeout: 10000 });
       const data = await res.json();
       setMyPresenceStatus(data.status || 'unknown');
       setMyPresenceLabel(data.matchedLabel);
@@ -522,7 +522,7 @@ export default function FamilyScreen() {
     try {
       const res = await fetchWithTimeout(`${BASE}/api/family/presence/${userId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
         body: JSON.stringify(placeLabel ? { status, placeLabel } : { status }),
         timeout: 10000,
       });
@@ -873,7 +873,7 @@ export default function FamilyScreen() {
   const fetchPerimeters = useCallback(async () => {
     if (!userId) return;
     try {
-      const res = await fetchWithTimeout(`${BASE}/api/family/perimeters?userId=${userId}`, { timeout: 10000 });
+      const res = await fetchWithTimeout(`${BASE}/api/family/perimeters?userId=${userId}`, { timeout: 10000, headers: await authHeader() });
       const data = await res.json();
       setPerimeters(Array.isArray(data) ? data : []);
     } catch (e) {
@@ -895,7 +895,7 @@ export default function FamilyScreen() {
   const fetchCurfewChecks = useCallback(async () => {
     if (!userId) return;
     try {
-      const res = await fetchWithTimeout(`${BASE}/api/family/curfew-checks?userId=${userId}`, { timeout: 10000 });
+      const res = await fetchWithTimeout(`${BASE}/api/family/curfew-checks?userId=${userId}`, { timeout: 10000, headers: await authHeader() });
       const data = await res.json();
       setCurfewChecksList(Array.isArray(data) ? data : []);
     } catch (e) {
@@ -1014,7 +1014,7 @@ export default function FamilyScreen() {
     try {
       const res = await fetchWithTimeout(`${BASE}/api/family/perimeters`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
         body: JSON.stringify({
           ownerId: userId,
           targetUserId: perimeterTarget.userId,
@@ -1046,7 +1046,7 @@ export default function FamilyScreen() {
     try {
       await fetchWithTimeout(`${BASE}/api/family/perimeters/${perimeter.id}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
         body: JSON.stringify({ active: !perimeter.active }),
         timeout: 10000,
       });
@@ -1067,7 +1067,7 @@ export default function FamilyScreen() {
           text: 'Supprimer', style: 'destructive', onPress: async () => {
             try {
               await fetchWithTimeout(`${BASE}/api/family/perimeters/${perimeter.id}`, {
-                method: 'DELETE', timeout: 10000,
+                method: 'DELETE', timeout: 10000, headers: await authHeader(),
               });
               if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
               fetchPerimeters();
@@ -1100,7 +1100,7 @@ export default function FamilyScreen() {
     try {
       const res = await fetchWithTimeout(`${BASE}/api/family/curfew-checks`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
         body: JSON.stringify({
           ownerId: userId,
           targetUserId: curfewTarget.userId,
@@ -1132,7 +1132,7 @@ export default function FamilyScreen() {
 
   const cancelCurfewCheck = useCallback(async (check: CurfewCheck) => {
     try {
-      await fetchWithTimeout(`${BASE}/api/family/curfew-checks/${check.id}`, { method: 'DELETE', timeout: 10000 });
+      await fetchWithTimeout(`${BASE}/api/family/curfew-checks/${check.id}`, { method: 'DELETE', timeout: 10000, headers: await authHeader() });
       if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       fetchCurfewChecks();
     } catch (e) {

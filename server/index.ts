@@ -1569,7 +1569,7 @@ function notifyPresenceTransition(userId: string, status: 'inside' | 'outside', 
   broadcastToOrgRole(presenceOrgId, 'admin', payload);
   broadcastToOrgRole(presenceOrgId, 'responder', payload);
   broadcastToUsers(parentIds, payload);
-  schedulePresenceChangePush(userId, name, status, matchedLabel, excludeStaffId, parentIds);
+  schedulePresenceChangePush(userId, name, status, matchedLabel, excludeStaffId, parentIds, presenceOrgId);
 }
 
 // GPS readings right at a geofence boundary (arriving/leaving a gate, a large
@@ -1582,22 +1582,22 @@ function notifyPresenceTransition(userId: string, status: 'inside' | 'outside', 
 const pendingPresencePush = new Map<string, ReturnType<typeof setTimeout>>();
 const PRESENCE_PUSH_DEBOUNCE_MS = 90000;
 
-function schedulePresenceChangePush(userId: string, name: string, status: 'inside' | 'outside', matchedLabel: string | undefined, excludeStaffId: string | undefined, parentIds: string[]) {
+function schedulePresenceChangePush(userId: string, name: string, status: 'inside' | 'outside', matchedLabel: string | undefined, excludeStaffId: string | undefined, parentIds: string[], organizationId: string | undefined) {
   const existing = pendingPresencePush.get(userId);
   if (existing) clearTimeout(existing);
   pendingPresencePush.set(userId, setTimeout(() => {
     pendingPresencePush.delete(userId);
     const current = autoPresenceState.get(userId);
     if (current && current.status === status && current.label === matchedLabel) {
-      notifyPresenceChangePush(name, status, matchedLabel, excludeStaffId, parentIds).catch(() => {});
+      notifyPresenceChangePush(name, status, matchedLabel, excludeStaffId, parentIds, organizationId).catch(() => {});
     }
   }, PRESENCE_PUSH_DEBOUNCE_MS));
 }
 
-async function notifyPresenceChangePush(name: string, status: 'inside' | 'outside', matchedLabel: string | undefined, excludeUserId: string | undefined, familyMemberIds: string[]) {
+async function notifyPresenceChangePush(name: string, status: 'inside' | 'outside', matchedLabel: string | undefined, excludeUserId: string | undefined, familyMemberIds: string[], organizationId: string | undefined) {
   const targetTokens: string[] = [];
   for (const [token, entry] of pushTokens) {
-    const isStaff = entry.userRole === 'dispatcher' || entry.userRole === 'responder' || entry.userRole === 'admin';
+    const isStaff = (entry.userRole === 'dispatcher' || entry.userRole === 'responder' || entry.userRole === 'admin') && adminUsers.get(entry.userId)?.organizationId === organizationId;
     const isFamilyMember = familyMemberIds.includes(entry.userId);
     if ((isStaff || isFamilyMember) && entry.userId !== excludeUserId) {
       targetTokens.push(token);
@@ -1756,6 +1756,15 @@ function canAccessOrg(caller: { role: string; organizationId?: string }, targetO
 function canAccessUser(caller: { id: string; role: string; organizationId?: string; assignedFamilyIds?: string[] }, targetUserId: string): boolean {
   const targetOrgId = adminUsers.get(targetUserId)?.organizationId;
   return canAccessOrg(caller, targetOrgId) && canAccessFamily(caller, targetUserId);
+}
+
+// Gate for owner-created family safety records (perimeters, curfew checks)
+// that only their own owner may read/write — organization boundary first,
+// then strict ownership (unlike canAccessUser, staff never gets a bypass
+// here, these are self-service records, not calm-view data staff reads).
+function canAccessOwnedRecord(record: { ownerId: string }, caller: { id: string; role: string; organizationId?: string }): boolean {
+  if (!canAccessOrg(caller, adminUsers.get(record.ownerId)?.organizationId)) return false;
+  return caller.id === record.ownerId;
 }
 
 // POST /api/access/emergency-override — break-glass: temporarily lifts the
@@ -3054,26 +3063,31 @@ app.post('/alerts', requireAuth, async (req, res) => {
 });
 
 // ─── Push Token Registration ────────────────────────────────────────
-app.post('/api/push-token', (req, res) => {
-  const { token, userId, userRole } = req.body;
-  if (!token || !userId) {
-    return res.status(400).json({ error: 'Missing token or userId' });
+app.post('/api/push-token', requireAuth, (req, res) => {
+  const { token } = req.body;
+  if (!token) {
+    return res.status(400).json({ error: 'Missing token' });
   }
-  
+  // userId/userRole are derived from the verified caller, never trusted from
+  // the body — previously anyone could register a token claiming to be any
+  // userId, which the unfiltered push fan-outs would then happily deliver to.
+  const userId = req.supabaseUser!.id;
+  const userRole = req.supabaseUser!.role;
+
   pushTokens.set(token, {
     token,
     userId,
-    userRole: userRole || 'user',
+    userRole,
     registeredAt: Date.now(),
   });
-  savePushTokenToSupabase({ token, userId, userRole: userRole || 'user', registeredAt: Date.now() });
-  
+  savePushTokenToSupabase({ token, userId, userRole, registeredAt: Date.now() });
+
   console.log(`[Push] Token registered for ${userId} (${userRole}). Total tokens: ${pushTokens.size}`);
   res.json({ success: true });
 });
 
 // Debug: list all push tokens
-app.get('/api/debug/push-tokens', (_req, res) => {
+app.get('/api/debug/push-tokens', requireAuth, requireRole('superadmin'), (_req, res) => {
   const tokens = Array.from(pushTokens.values()).map(e => ({
     userId: e.userId,
     userRole: e.userRole,
@@ -3083,9 +3097,13 @@ app.get('/api/debug/push-tokens', (_req, res) => {
   res.json(tokens);
 });
 
-app.delete('/api/push-token', (req, res) => {
+app.delete('/api/push-token', requireAuth, (req, res) => {
   const { token } = req.body;
   if (token) {
+    const entry = pushTokens.get(token);
+    if (entry && entry.userId !== req.supabaseUser!.id) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
     pushTokens.delete(token);
     deletePushTokenFromSupabase(token);
   }
@@ -3147,6 +3165,7 @@ async function sendPushToDispatchersAndResponders(alert: Alert, senderName: stri
   const targetTokens: string[] = [];
   for (const [token, entry] of pushTokens) {
     if (entry.userRole === 'dispatcher' || entry.userRole === 'responder' || entry.userRole === 'admin') {
+      if (adminUsers.get(entry.userId)?.organizationId !== alert.organizationId) continue;
       // Don't send push to the person who triggered the SOS
       if (entry.userId !== alert.createdBy) {
         targetTokens.push(token);
@@ -3221,7 +3240,8 @@ async function sendPushToDispatchersAndResponders(alert: Alert, senderName: stri
  */
 async function sendPushToAllUsers(alert: Alert, senderName: string) {
   const targetTokens: string[] = [];
-  for (const [token, _entry] of pushTokens) {
+  for (const [token, entry] of pushTokens) {
+    if (adminUsers.get(entry.userId)?.organizationId !== alert.organizationId) continue;
     targetTokens.push(token);
   }
 
@@ -3505,8 +3525,14 @@ app.get('/api/family/members', (req, res) => {
 // tells them whether it currently does. The family member list uses
 // computeEffectivePresence(id, false) instead, since family always sees the
 // live automatic value regardless of Ghost.
-app.get('/api/family/presence/:userId', (req, res) => {
-  const presence = computeEffectivePresence(req.params.userId as string, true);
+app.get('/api/family/presence/:userId', requireAuth, (req, res) => {
+  const targetUserId = req.params.userId as string;
+  const caller = req.supabaseUser!;
+  const isSelf = caller.id === targetUserId;
+  const isFamilyMember = getFamilyMemberIds(targetUserId).includes(caller.id);
+  const isStaff = (caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder') && canAccessOrg(caller, adminUsers.get(targetUserId)?.organizationId);
+  if (!isSelf && !isFamilyMember && !isStaff) return res.status(403).json({ error: 'Not authorized' });
+  const presence = computeEffectivePresence(targetUserId, true);
   res.json(presence);
 });
 
@@ -3525,7 +3551,7 @@ app.put('/api/family/presence/:targetUserId', requireAuth, (req, res) => {
   const caller = req.supabaseUser!;
   const isSelf = caller.id === targetUserId;
   const isFamilyOwner = getFamilyMemberIds(targetUserId).includes(caller.id);
-  const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder';
+  const isStaff = (caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder') && canAccessOrg(caller, adminUsers.get(targetUserId)?.organizationId);
   if (!isSelf && !isFamilyOwner && !isStaff) {
     return res.status(403).json({ error: 'Not authorized to set this presence status' });
   }
@@ -3565,7 +3591,7 @@ app.put('/api/family/presence/:targetUserId', requireAuth, (req, res) => {
   broadcastToOrgRole(presenceOrgId2, 'responder', payload);
   broadcastToUsers(getFamilyParentIds(targetUserId).filter(id => id !== targetUserId), payload);
   if (previousStatus !== entry.status) {
-    notifyPresenceChangePush(name, entry.status, matchedLabel, isStaff ? caller.id : undefined, getFamilyParentIds(targetUserId).filter(id => id !== targetUserId)).catch(() => {});
+    notifyPresenceChangePush(name, entry.status, matchedLabel, isStaff ? caller.id : undefined, getFamilyParentIds(targetUserId).filter(id => id !== targetUserId), presenceOrgId2).catch(() => {});
   }
   res.json({ success: true });
 });
@@ -3601,9 +3627,10 @@ app.post('/api/presence/geofence-event', requireAuth, (req, res) => {
 // ─── Family Perimeter CRUD ───────────────────────────────────────────
 
 // GET /api/family/perimeters - list perimeters for a user (owner)
-app.get('/api/family/perimeters', (req, res) => {
+app.get('/api/family/perimeters', requireAuth, (req, res) => {
   const userId = req.query.userId as string;
   if (!userId) return res.status(400).json({ error: 'userId required' });
+  if (!canAccessOwnedRecord({ ownerId: userId }, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
   const userPerimeters = Array.from(familyPerimeters.values())
     .filter(p => p.ownerId === userId)
     .sort((a, b) => b.createdAt - a.createdAt);
@@ -3611,11 +3638,12 @@ app.get('/api/family/perimeters', (req, res) => {
 });
 
 // POST /api/family/perimeters - create a new perimeter
-app.post('/api/family/perimeters', (req, res) => {
+app.post('/api/family/perimeters', requireAuth, (req, res) => {
   const { ownerId, targetUserId, center, radiusMeters } = req.body;
   if (!ownerId || !targetUserId || !center?.latitude || !center?.longitude || !radiusMeters) {
     return res.status(400).json({ error: 'ownerId, targetUserId, center {latitude, longitude}, and radiusMeters required' });
   }
+  if (!canAccessOwnedRecord({ ownerId }, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
   // Verify the target is a family member of the owner
   const familyIds = getFamilyMemberIds(ownerId);
   if (!familyIds.includes(targetUserId)) {
@@ -3640,9 +3668,10 @@ app.post('/api/family/perimeters', (req, res) => {
 });
 
 // PUT /api/family/perimeters/:id - update a perimeter
-app.put('/api/family/perimeters/:id', (req, res) => {
-  const perimeter = familyPerimeters.get(req.params.id);
+app.put('/api/family/perimeters/:id', requireAuth, (req, res) => {
+  const perimeter = familyPerimeters.get(req.params.id as string);
   if (!perimeter) return res.status(404).json({ error: 'Perimeter not found' });
+  if (!canAccessOwnedRecord(perimeter, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
   const { center, radiusMeters, active } = req.body;
   if (center) {
     perimeter.center = { latitude: center.latitude, longitude: center.longitude, address: center.address || perimeter.center.address };
@@ -3656,18 +3685,23 @@ app.put('/api/family/perimeters/:id', (req, res) => {
 });
 
 // DELETE /api/family/perimeters/:id - delete a perimeter
-app.delete('/api/family/perimeters/:id', (req, res) => {
-  const existed = familyPerimeters.delete(req.params.id);
-  if (existed) deleteFamilyPerimeterFromSupabase(req.params.id);
-  perimeterState.delete(req.params.id);
+app.delete('/api/family/perimeters/:id', requireAuth, (req, res) => {
+  const perimeterId = req.params.id as string;
+  const perimeter = familyPerimeters.get(perimeterId);
+  if (!perimeter) return res.status(404).json({ error: 'Perimeter not found' });
+  if (!canAccessOwnedRecord(perimeter, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
+  const existed = familyPerimeters.delete(perimeterId);
+  if (existed) deleteFamilyPerimeterFromSupabase(perimeterId);
+  perimeterState.delete(perimeterId);
   if (existed) persistPerimeters();
   res.json({ success: existed });
 });
 
 // GET /api/family/curfew-checks - list a user's curfew checks (owner)
-app.get('/api/family/curfew-checks', (req, res) => {
+app.get('/api/family/curfew-checks', requireAuth, (req, res) => {
   const userId = req.query.userId as string;
   if (!userId) return res.status(400).json({ error: 'userId required' });
+  if (!canAccessOwnedRecord({ ownerId: userId }, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
   const userChecks = Array.from(curfewChecks.values())
     .filter(c => c.ownerId === userId)
     .sort((a, b) => b.createdAt - a.createdAt);
@@ -3675,11 +3709,12 @@ app.get('/api/family/curfew-checks', (req, res) => {
 });
 
 // POST /api/family/curfew-checks - create a one-off or daily curfew check
-app.post('/api/family/curfew-checks', (req, res) => {
+app.post('/api/family/curfew-checks', requireAuth, (req, res) => {
   const { ownerId, targetUserId, center, radiusMeters, hour, minute, recurrence, alertWhen } = req.body;
   if (!ownerId || !targetUserId || !center?.latitude || !center?.longitude || !radiusMeters) {
     return res.status(400).json({ error: 'ownerId, targetUserId, center {latitude, longitude}, and radiusMeters required' });
   }
+  if (!canAccessOwnedRecord({ ownerId }, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
   if (hour == null || minute == null || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
     return res.status(400).json({ error: 'hour (0-23) and minute (0-59) required' });
   }
@@ -3717,9 +3752,13 @@ app.post('/api/family/curfew-checks', (req, res) => {
 });
 
 // DELETE /api/family/curfew-checks/:id - cancel a curfew check
-app.delete('/api/family/curfew-checks/:id', (req, res) => {
-  clearCurfewTimer(req.params.id);
-  const existed = curfewChecks.delete(req.params.id);
+app.delete('/api/family/curfew-checks/:id', requireAuth, (req, res) => {
+  const checkId = req.params.id as string;
+  const check = curfewChecks.get(checkId);
+  if (!check) return res.status(404).json({ error: 'Curfew check not found' });
+  if (!canAccessOwnedRecord(check, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
+  clearCurfewTimer(checkId);
+  const existed = curfewChecks.delete(checkId);
   if (existed) persistCurfewChecks();
   res.json({ success: existed });
 });
@@ -7757,11 +7796,17 @@ function resolveAddressOwner(addressId: string): string | undefined {
   }
   return undefined;
 }
-function canViewAddressAssets(ownerId: string, caller: { id: string; role: string }): boolean {
+// Organization boundary first, hard, no exceptions — derived from the
+// owning AdminUser rather than stored redundantly on every address/
+// known-person/intervention/guest/itinerary row, since all of those are
+// unambiguously scoped to a single real user already.
+function canViewAddressAssets(ownerId: string, caller: { id: string; role: string; organizationId?: string }): boolean {
+  if (!canAccessOrg(caller, adminUsers.get(ownerId)?.organizationId)) return false;
   return caller.id === ownerId || getFamilyMemberIds(ownerId).includes(caller.id) ||
     caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder';
 }
-function canEditAddressAssets(ownerId: string, caller: { id: string; role: string }): boolean {
+function canEditAddressAssets(ownerId: string, caller: { id: string; role: string; organizationId?: string }): boolean {
+  if (!canAccessOrg(caller, adminUsers.get(ownerId)?.organizationId)) return false;
   return caller.id === ownerId || getFamilyMemberIds(ownerId).includes(caller.id) ||
     caller.role === 'dispatcher' || caller.role === 'admin';
 }
@@ -9243,7 +9288,7 @@ app.patch('/api/family/residences/:id/label', requireAuth, async (req, res) => {
   const caller = req.supabaseUser!;
   const isSelf = caller.id === userId;
   const isFamilyMember = getFamilyMemberIds(userId).includes(caller.id);
-  const isDispatchStaff = caller.role === 'dispatcher' || caller.role === 'admin';
+  const isDispatchStaff = (caller.role === 'dispatcher' || caller.role === 'admin') && canAccessOrg(caller, adminUsers.get(userId)?.organizationId);
   if (!isSelf && !isFamilyMember && !isDispatchStaff) return res.status(403).json({ error: 'Not authorized' });
 
   const ownerIds = Array.from(new Set([userId, ...getFamilyMemberIds(userId)]));
@@ -9304,10 +9349,11 @@ app.get('/dispatch/all-residences', (req, res) => {
 });
 
 // POST /api/users/:id/addresses
-app.post('/api/users/:id/addresses', async (req, res) => {
+app.post('/api/users/:id/addresses', requireAuth, async (req, res) => {
   const { label, address, latitude, longitude, placeId, isPrimary, alarmCode, notes, radiusMeters, temporary, expiresAt } = req.body;
   if (!label || !address) return res.status(400).json({ error: 'label and address are required' });
-  const userId = req.params.id;
+  const userId = req.params.id as string;
+  if (!canEditAddressAssets(userId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
   const now = Date.now();
 
   // Géocoder si pas de coordonnées fournies
@@ -9357,9 +9403,10 @@ app.post('/api/users/:id/addresses', async (req, res) => {
 });
 
 // PUT /api/users/:id/addresses/:addressId
-app.put('/api/users/:id/addresses/:addressId', async (req, res) => {
+app.put('/api/users/:id/addresses/:addressId', requireAuth, async (req, res) => {
   const { label, address, latitude, longitude, placeId, isPrimary, alarmCode, notes, radiusMeters, temporary, expiresAt, occupancyStatus } = req.body;
-  const userId = req.params.id;
+  const userId = req.params.id as string;
+  if (!canEditAddressAssets(userId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
   const addresses = userAddresses.get(userId) || [];
   const idx = addresses.findIndex(a => a.id === req.params.addressId);
   if (idx === -1) return res.status(404).json({ error: 'Address not found' });
@@ -9418,8 +9465,9 @@ app.patch('/api/users/:id/addresses/:addressId/occupancy', requireAuth, async (r
 });
 
 // DELETE /api/users/:id/addresses/:addressId
-app.delete('/api/users/:id/addresses/:addressId', async (req, res) => {
-  const userId = req.params.id;
+app.delete('/api/users/:id/addresses/:addressId', requireAuth, async (req, res) => {
+  const userId = req.params.id as string;
+  if (!canEditAddressAssets(userId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
   const addresses = userAddresses.get(userId) || [];
   const idx = addresses.findIndex(a => a.id === req.params.addressId);
   if (idx === -1) return res.status(404).json({ error: 'Address not found' });
@@ -9431,7 +9479,7 @@ app.delete('/api/users/:id/addresses/:addressId', async (req, res) => {
 
 
 // POST /api/admin/geocode-addresses — géocode rétroactivement toutes les adresses sans coords
-app.post('/api/admin/geocode-addresses', async (req, res) => {
+app.post('/api/admin/geocode-addresses', requireAuth, requireRole('admin'), async (req, res) => {
   let processed = 0, updated = 0, failed = 0;
   for (const [userId, addrs] of userAddresses) {
     for (const addr of addrs) {
@@ -9455,9 +9503,10 @@ app.post('/api/admin/geocode-addresses', async (req, res) => {
 });
 
 // GET /api/alerts/:id/context - get full client context for an alert
-app.get('/api/alerts/:id/context', async (req, res) => {
-  const alert = alerts.get(req.params.id);
+app.get('/api/alerts/:id/context', requireAuth, async (req, res) => {
+  const alert = alerts.get(req.params.id as string);
   if (!alert) return res.status(404).json({ error: 'Alert not found' });
+  if (!canAccessOrg(req.supabaseUser!, alert.organizationId)) return res.status(403).json({ error: 'Not authorized' });
 
   // Find the user who triggered the alert
   const createdBy = alert.createdBy;

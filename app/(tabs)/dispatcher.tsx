@@ -435,7 +435,7 @@ export default function DispatcherScreen() {
     setProfileResidenceContext(null);
     try {
       const baseUrl = getApiBaseUrl();
-      const res = await fetchWithTimeout(`${baseUrl}/api/alerts/${alertId}/context`, { timeout: 10000 });
+      const res = await fetchWithTimeout(`${baseUrl}/api/alerts/${alertId}/context`, { timeout: 10000, headers: await authHeader() });
       if (res.ok) {
         const data = await res.json();
         setProfileUser(data.user || null);
