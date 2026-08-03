@@ -49,6 +49,7 @@ export interface WebSocketMessage {
   type: WebSocketMessageType;
   userId?: string;
   userRole?: string;
+  token?: string;
   data?: any;
   message?: string;
   timestamp?: number;
@@ -61,6 +62,7 @@ export class WebSocketManager {
   private url: string;
   private userId: string | null = null;
   private userRole: string | null = null;
+  private getToken: (() => Promise<string | null>) | null = null;
   private messageHandlers: Map<WebSocketMessageType, Set<MessageHandler>> = new Map();
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
@@ -83,7 +85,7 @@ export class WebSocketManager {
   /**
    * Connect to WebSocket server
    */
-  async connect(userId: string, userRole: string): Promise<void> {
+  async connect(userId: string, userRole: string, getToken: () => Promise<string | null>): Promise<void> {
     if (this.isConnecting || this.ws?.readyState === WebSocket.OPEN) {
       console.warn('Already connected or connecting');
       return;
@@ -92,6 +94,13 @@ export class WebSocketManager {
     this.isConnecting = true;
     this.userId = userId;
     this.userRole = userRole;
+    this.getToken = getToken;
+
+    // Fetched fresh on every connect/reconnect — Supabase access tokens
+    // expire (~1h), and the server now verifies this token rather than
+    // trusting userId/userRole outright, so a stale token would just fail
+    // auth silently on a long-lived reconnect.
+    const token = await getToken();
 
     return new Promise((resolve, reject) => {
       try {
@@ -107,6 +116,7 @@ export class WebSocketManager {
             type: 'auth',
             userId,
             userRole,
+            token: token || undefined,
           });
 
           this.startPing();
@@ -313,8 +323,8 @@ export class WebSocketManager {
     console.log(`Attempting to reconnect in ${delay}ms (attempt ${this.reconnectAttempts})`);
 
     setTimeout(() => {
-      if (this.userId && this.userRole) {
-        this.connect(this.userId, this.userRole).catch((error) => {
+      if (this.userId && this.userRole && this.getToken) {
+        this.connect(this.userId, this.userRole, this.getToken).catch((error) => {
           console.error('Reconnection failed:', error);
         });
       }

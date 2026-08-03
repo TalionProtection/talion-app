@@ -116,8 +116,11 @@ function connectWebSocket() {
     console.log('[WS] Connected');
     wsReconnectDelay = 2000;
     updateWsStatus('online');
-    // Auth as dispatch-console
-    ws.send(JSON.stringify({ type: 'auth', userId: 'dispatch-console', userRole: 'dispatcher' }));
+    // Server verifies this token against Supabase and derives the real
+    // identity/role from it — it no longer trusts a client-asserted userId/
+    // userRole (previously every dispatch console tab claimed the same
+    // fake shared identity "dispatch-console", not the actual logged-in user).
+    ws.send(JSON.stringify({ type: 'auth', token: localStorage.getItem('talion_token') }));
     // Request current data
     ws.send(JSON.stringify({ type: 'getAlerts' }));
     ws.send(JSON.stringify({ type: 'getResponders' }));

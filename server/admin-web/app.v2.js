@@ -91,7 +91,11 @@ function connectWebSocket() {
   ws.onopen = () => {
     wsReconnectDelay = 2000;
     updateWsStatus('online');
-    ws.send(JSON.stringify({ type: 'auth', userId: 'admin-console', userRole: 'admin' }));
+    // Server verifies this token against Supabase and derives the real
+    // identity/role from it — it no longer trusts a client-asserted userId/
+    // userRole (previously every admin console tab claimed the same fake
+    // shared identity "admin-console", not the actual logged-in user).
+    ws.send(JSON.stringify({ type: 'auth', token: localStorage.getItem('talion_token') }));
     ws.send(JSON.stringify({ type: 'getAlerts' }));
     refreshData();
   };

@@ -3,6 +3,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { wsManager, type WebSocketMessage } from '@/services/websocket-manager';
 import { websocketService } from '@/services/websocket';
 import { getWsUrl } from '@/lib/server-url';
+import { supabase } from '@/lib/auth-context';
 
 /**
  * WebSocket Provider
@@ -54,8 +55,15 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     wsManager.setUrl(wsUrl);
     websocketService.setUrl(wsUrl);
 
-    // Connect the protocol-correct wsManager
-    wsManager.connect(userId, userRole).then(() => {
+    // Connect the protocol-correct wsManager — the server verifies this
+    // token against Supabase before trusting the userId/userRole claims
+    // (see handleAuth in server/index.ts), so it must be fetched fresh on
+    // every connect/reconnect, not captured once at mount time.
+    const getToken = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      return session?.access_token || null;
+    };
+    wsManager.connect(userId, userRole, getToken).then(() => {
       connectedRef.current = true;
       setIsConnected(true);
       console.log('[WebSocketProvider] Connected via wsManager');

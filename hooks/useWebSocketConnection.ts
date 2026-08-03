@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { wsManager } from '@/services/websocket-manager';
 import type { WebSocketMessage } from '@/services/websocket-manager';
+import { supabase } from '@/lib/auth-context';
 
 /**
  * Hook to manage WebSocket connection lifecycle
@@ -15,7 +16,11 @@ export function useWebSocketConnection(userId: string | null, userRole: string |
     }
 
     // Connect to WebSocket
-    wsManager.connect(userId, userRole).catch((error) => {
+    const getToken = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      return session?.access_token || null;
+    };
+    wsManager.connect(userId, userRole, getToken).catch((error) => {
       console.error('Failed to connect to WebSocket:', error);
     });
 

@@ -596,6 +596,8 @@ interface WebSocketMessage {
   type: string;
   userId?: string;
   userRole?: string;
+  token?: string; // Supabase access token — verified in handleAuth; userId/userRole
+  // above are otherwise just client-asserted claims, not proof of identity.
   data?: any;
   timestamp?: number;
 }
@@ -1097,14 +1099,20 @@ function handleMessage(
   connUserId?: string | null,
   connUserRole?: string | null
 ) {
-  // Use message-level userId/userRole, falling back to connection-level context
-  const userId = message.userId || connUserId || undefined;
-  const userRole = message.userRole || connUserRole || undefined;
+  // The connection-level identity (connUserId/connUserRole) comes from
+  // handleAuth, which now verifies a real Supabase token — it must win over
+  // message.userId/userRole, which are just claims the client can put in any
+  // message. Falling back to message-level values only matters pre-auth
+  // (there is no connection-level identity yet); once authenticated, trusting
+  // a per-message override would let any connected client silently act as a
+  // different user on every subsequent message despite a legitimate handshake.
+  const userId = connUserId || message.userId || undefined;
+  const userRole = connUserRole || message.userRole || undefined;
   const { type, data, timestamp } = message;
 
   switch (type) {
     case 'auth':
-      handleAuth(ws, userId, userRole, setUserContext);
+      handleAuth(ws, message.token, setUserContext).catch(e => console.error('[WS] handleAuth error:', e));
       break;
 
     case 'sendAlert':
@@ -1191,16 +1199,29 @@ function handleMessage(
   }
 }
 
-// Authentication handler
-function handleAuth(ws: any, userId: string | undefined, userRole: string | undefined, setUserContext: (id: string, role: string) => void) {
-  if (!userId || !userRole) {
-    ws.send(JSON.stringify({ type: 'error', message: 'Missing userId or userRole' }));
+// Authentication handler — verifies the Supabase access token before trusting
+// ANY identity claim. Previously this trusted the client-sent userId/userRole
+// outright with no proof at all: any WebSocket client could claim to be any
+// user, any role (including 'admin'), and receive every broadcast that
+// identity is entitled to. userId/userRole are now derived exclusively from
+// the verified token + admin_users lookup, never from client-sent fields.
+async function handleAuth(ws: any, token: string | undefined, setUserContext: (id: string, role: string) => void) {
+  if (!token) {
+    ws.send(JSON.stringify({ type: 'error', message: 'Missing auth token' }));
     return;
   }
+  const { data: { user: verifiedUser }, error } = await supabaseAdmin.auth.getUser(token);
+  if (error || !verifiedUser) {
+    ws.send(JSON.stringify({ type: 'error', message: 'Invalid or expired token' }));
+    return;
+  }
+  const userId = verifiedUser.id;
+  const adminUser = adminUsers.get(userId);
+  const userRole = adminUser?.role || 'user';
 
   const user: User = {
     id: userId,
-    email: `${userId}@talion.local`,
+    email: adminUser?.email || verifiedUser.email || `${userId}@talion.local`,
     role: userRole as any,
     status: userRole === 'responder' ? 'available' : undefined,
     lastSeen: Date.now(),
@@ -2501,8 +2522,8 @@ app.get('/admin/login-history', (req, res) => {
 });
 
 // Login history for a specific user
-app.get('/admin/users/:id/login-history', (req, res) => {
-  const userId = req.params.id;
+app.get('/admin/users/:id/login-history', requireAuth, requireRole('admin'), (req, res) => {
+  const userId = req.params.id as string;
   const user = adminUsers.get(userId);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
@@ -2565,7 +2586,7 @@ app.get('/admin/login-stats', (req, res) => {
 });
 
 // Photo upload endpoint
-app.post('/admin/users/:id/photo', upload.single('photo'), (req: any, res) => {
+app.post('/admin/users/:id/photo', requireAuth, requireRole('admin'), upload.single('photo'), (req: any, res) => {
   const user = adminUsers.get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -3879,7 +3900,7 @@ app.get('/admin/kpis', requireAuth, requireRole('dispatcher'), (req, res) => {
 });
 
 // Admin users list
-app.get('/admin/users', (req, res) => {
+app.get('/admin/users', requireAuth, requireRole('admin'), (req, res) => {
   const users = Array.from(adminUsers.values()).map(u => {
     const { passwordHash, ...safeUser } = u;
     return { ...safeUser, hasPassword: !!passwordHash };
@@ -3899,8 +3920,8 @@ app.get('/admin/family-groups', (req, res) => {
 });
 
 // Admin change user role
-app.put('/admin/users/:id/role', (req, res) => {
-  const user = adminUsers.get(req.params.id);
+app.put('/admin/users/:id/role', requireAuth, requireRole('admin'), (req, res) => {
+  const user = adminUsers.get(req.params.id as string);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { role } = req.body;
   if (!['admin', 'dispatcher', 'responder', 'user'].includes(role)) {
@@ -3915,8 +3936,8 @@ app.put('/admin/users/:id/role', (req, res) => {
 });
 
 // Admin change user status
-app.put('/admin/users/:id/status', (req, res) => {
-  const user = adminUsers.get(req.params.id);
+app.put('/admin/users/:id/status', requireAuth, requireRole('admin'), (req, res) => {
+  const user = adminUsers.get(req.params.id as string);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { status } = req.body;
   if (!['active', 'suspended', 'deactivated'].includes(status)) {
@@ -3934,8 +3955,8 @@ app.put('/admin/users/:id/status', (req, res) => {
 // ─── Admin User CRUD ─────────────────────────────────────────────────
 
 // GET single user by ID
-app.get('/admin/users/:id', (req, res) => {
-  const user = adminUsers.get(req.params.id);
+app.get('/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => {
+  const user = adminUsers.get(req.params.id as string);
   if (!user) return res.status(404).json({ error: 'User not found' });
   // Resolve relationship names
   const enrichedRelationships = (user.relationships || []).map(r => {
@@ -3956,7 +3977,7 @@ app.get('/admin/users/:id', (req, res) => {
 });
 
 // POST create new user
-app.post('/admin/users', async (req, res) => {
+app.post('/admin/users', requireAuth, requireRole('admin'), async (req, res) => {
   const { firstName, lastName, email, role, tags, address, addressComponents, phoneLandline, phoneMobile, comments, photoUrl, relationships, password } = req.body;
   if (!firstName || !lastName || !email) {
     return res.status(400).json({ error: 'firstName, lastName, and email are required' });
@@ -4031,8 +4052,8 @@ app.post('/admin/users', async (req, res) => {
 });
 
 // PUT update user
-app.put('/admin/users/:id', (req, res) => {
-  const user = adminUsers.get(req.params.id);
+app.put('/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => {
+  const user = adminUsers.get(req.params.id as string);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { firstName, lastName, email, role, tags, address, addressComponents, phoneLandline, phoneMobile, comments, photoUrl, relationships, status, password, assignedFamilyIds } = req.body;
   // Check email uniqueness if changed
@@ -4094,8 +4115,8 @@ app.put('/admin/users/:id', (req, res) => {
 });
 
 // DELETE user
-app.delete('/admin/users/:id', (req, res) => {
-  const user = adminUsers.get(req.params.id);
+app.delete('/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => {
+  const user = adminUsers.get(req.params.id as string);
   if (!user) return res.status(404).json({ error: 'User not found' });
   // Remove reciprocal relationships
   (user.relationships || []).forEach(rel => {
@@ -4112,8 +4133,8 @@ app.delete('/admin/users/:id', (req, res) => {
 });
 
 // GET users at same address
-app.get('/admin/users/:id/cohabitants', (req, res) => {
-  const user = adminUsers.get(req.params.id);
+app.get('/admin/users/:id/cohabitants', requireAuth, requireRole('admin'), (req, res) => {
+  const user = adminUsers.get(req.params.id as string);
   if (!user) return res.status(404).json({ error: 'User not found' });
   if (!user.address) return res.json([]);
   const cohabitants: AdminUser[] = [];
@@ -4126,8 +4147,8 @@ app.get('/admin/users/:id/cohabitants', (req, res) => {
 });
 
 // GET user family/relationships
-app.get('/admin/users/:id/relationships', (req, res) => {
-  const user = adminUsers.get(req.params.id);
+app.get('/admin/users/:id/relationships', requireAuth, requireRole('admin'), (req, res) => {
+  const user = adminUsers.get(req.params.id as string);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const enriched = (user.relationships || []).map(r => {
     const relUser = adminUsers.get(r.userId);

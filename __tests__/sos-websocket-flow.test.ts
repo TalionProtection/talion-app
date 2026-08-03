@@ -159,7 +159,7 @@ describe('WebSocket Manager protocol', () => {
     const { WebSocketManager } = await import('@/services/websocket-manager');
     const manager = new WebSocketManager('ws://localhost:3000');
 
-    const connectPromise = manager.connect('test-user', 'user');
+    const connectPromise = manager.connect('test-user', 'user', async () => 'test-token');
 
     // Wait for setTimeout to propagate event handlers, then trigger open
     await new Promise(r => setTimeout(r, 10));
@@ -172,6 +172,7 @@ describe('WebSocket Manager protocol', () => {
     expect(authMsg.type).toBe('auth');
     expect(authMsg.userId).toBe('test-user');
     expect(authMsg.userRole).toBe('user');
+    expect(authMsg.token).toBe('test-token');
 
     manager.disconnect();
   });
@@ -180,7 +181,7 @@ describe('WebSocket Manager protocol', () => {
     const { WebSocketManager } = await import('@/services/websocket-manager');
     const manager = new WebSocketManager('ws://localhost:3000');
 
-    const connectPromise = manager.connect('test-user', 'user');
+    const connectPromise = manager.connect('test-user', 'user', async () => 'test-token');
     await new Promise(r => setTimeout(r, 10));
     mockWs.simulateOpen();
     await connectPromise;
@@ -214,7 +215,7 @@ describe('WebSocket Manager protocol', () => {
     const { WebSocketManager } = await import('@/services/websocket-manager');
     const manager = new WebSocketManager('ws://localhost:3000');
 
-    const connectPromise = manager.connect('resp-1', 'responder');
+    const connectPromise = manager.connect('resp-1', 'responder', async () => 'test-token');
     await new Promise(r => setTimeout(r, 10));
     mockWs.simulateOpen();
     await connectPromise;
