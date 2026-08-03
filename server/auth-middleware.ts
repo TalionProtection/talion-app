@@ -15,17 +15,22 @@ function getSupabaseAdmin() {
   return _supabaseAdmin;
 }
 
-export type UserRole = 'user' | 'responder' | 'dispatcher' | 'admin';
+export type UserRole = 'user' | 'responder' | 'dispatcher' | 'admin' | 'superadmin';
 
 declare global {
   namespace Express {
     interface Request {
-      supabaseUser?: { id: string; email: string; role: UserRole; };
+      // organizationId is the tenant this account belongs to. It is
+      // undefined for 'superadmin' (Talion staff, cross-organization) and
+      // for legacy rows not yet backfilled — every org-scoping check must
+      // treat that as "deny", never "sees everything". See canAccessOrg
+      // in index.ts.
+      supabaseUser?: { id: string; email: string; role: UserRole; organizationId?: string; };
     }
   }
 }
 
-const ROLE_HIERARCHY: Record<UserRole, number> = { user: 0, responder: 1, dispatcher: 2, admin: 3 };
+const ROLE_HIERARCHY: Record<UserRole, number> = { user: 0, responder: 1, dispatcher: 2, admin: 3, superadmin: 4 };
 
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
@@ -35,9 +40,10 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     const supabase = getSupabaseAdmin();
     const { data: { user }, error } = await supabase.auth.getUser(token);
     if (error || !user) return res.status(401).json({ error: 'Invalid or expired token' });
-    const { data: adminUser } = await supabase.from('admin_users').select('role').eq('id', user.id).single();
-    const role: UserRole = adminUser?.role ?? 'user';
-    req.supabaseUser = { id: user.id, email: user.email!, role };
+    const { data: adminUser }: { data: any } = await supabase.from('admin_users').select('role, organization_id').eq('id', user.id).single();
+    const role: UserRole = (adminUser?.role as UserRole) ?? 'user';
+    const organizationId = (adminUser?.organization_id as string | undefined) ?? undefined;
+    req.supabaseUser = { id: user.id, email: user.email!, role, organizationId };
     next();
   } catch (err) {
     console.error('[requireAuth] Error:', err);
@@ -64,9 +70,10 @@ export async function optionalAuth(req: Request, res: Response, next: NextFuncti
     const supabase = getSupabaseAdmin();
     const { data: { user } } = await supabase.auth.getUser(token);
     if (user) {
-      const { data: adminUser } = await supabase.from('admin_users').select('role').eq('id', user.id).single();
-      const role: UserRole = adminUser?.role ?? 'user';
-      req.supabaseUser = { id: user.id, email: user.email!, role };
+      const { data: adminUser }: { data: any } = await supabase.from('admin_users').select('role, organization_id').eq('id', user.id).single();
+      const role: UserRole = (adminUser?.role as UserRole) ?? 'user';
+      const organizationId = (adminUser?.organization_id as string | undefined) ?? undefined;
+      req.supabaseUser = { id: user.id, email: user.email!, role, organizationId };
     }
   } catch { }
   next();

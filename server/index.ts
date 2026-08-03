@@ -238,7 +238,7 @@ function handleSoftEscalation(alertId: string, responderId: string) {
     }
   }
 
-  broadcastMessage({
+  broadcastToOrg(alert.organizationId, {
     type: 'escalationSoft',
     alertId,
     responderId,
@@ -251,7 +251,7 @@ function handleSoftEscalation(alertId: string, responderId: string) {
     timestamp: Date.now(),
   });
 
-  broadcastMessage({
+  broadcastToOrg(alert.organizationId, {
     type: 'alertUpdate',
     data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) },
   });
@@ -293,7 +293,7 @@ function handleHardEscalation(alertId: string, responderId: string) {
     }
   }
   // Broadcast WebSocket event for real-time console update
-  broadcastMessage({
+  broadcastToOrg(alert.organizationId, {
     type: 'acceptanceTimeout',
     alertId,
     responderId,
@@ -307,7 +307,7 @@ function handleHardEscalation(alertId: string, responderId: string) {
   alerts.set(alertId, alert);
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[HardEscalation] Supabase save error:', e));
-  broadcastMessage({
+  broadcastToOrg(alert.organizationId, {
     type: 'alertUpdate',
     data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) },
   });
@@ -395,10 +395,23 @@ app.use('/console-login', serveConsoleDynamic(path.join(PROJECT_ROOT, 'server', 
 interface User {
   id: string;
   email: string;
-  role: 'user' | 'responder' | 'dispatcher' | 'admin';
+  role: 'user' | 'responder' | 'dispatcher' | 'admin' | 'superadmin';
   status?: 'available' | 'on_duty' | 'off_duty' | 'responding';
   location?: { latitude: number; longitude: number };
   lastSeen?: number;
+  // The organization this connection belongs to, resolved once at WS auth
+  // time from adminUsers.get(userId)?.organizationId — used by
+  // broadcastToOrg/broadcastToOrgRole to keep every real-time event within
+  // its own tenant. superadmin (Talion staff) has no organizationId and
+  // sees across all of them.
+  organizationId?: string;
+}
+
+interface Organization {
+  id: string;
+  name: string;
+  status: 'active' | 'suspended';
+  createdAt: number;
 }
 
 interface AdminUser {
@@ -407,7 +420,12 @@ interface AdminUser {
   firstName: string;
   lastName: string;
   email: string;
-  role: 'user' | 'responder' | 'dispatcher' | 'admin';
+  role: 'user' | 'responder' | 'dispatcher' | 'admin' | 'superadmin';
+  // The tenant this account belongs to. Undefined only for legacy rows not
+  // yet backfilled, or for superadmin (Talion-only, cross-organization).
+  // Every access-control check treats a missing organizationId as "deny",
+  // never "sees everything" — see canAccessOrg.
+  organizationId?: string;
   status: 'active' | 'suspended' | 'deactivated';
   lastLogin: number;
   createdAt: number;
@@ -529,6 +547,7 @@ interface Alert {
   description: string;
   createdBy: string; // display name/label shown in the UI — not reliably a user id (varies by creation route)
   reporterId?: string; // actual reporting user's id when known; used for duplicate-detection matching
+  organizationId?: string; // tenant this alert belongs to — set at creation, never bypassed even for role 'admin'
   createdAt: number;
   status: 'active' | 'acknowledged' | 'resolved' | 'cancelled';
   respondingUsers: string[];
@@ -607,11 +626,12 @@ interface PTTChannelServer {
   id: string;
   name: string;
   description: string;
-  allowedRoles: ('user' | 'responder' | 'dispatcher' | 'admin')[];
+  allowedRoles: ('user' | 'responder' | 'dispatcher' | 'admin' | 'superadmin')[];
   isActive: boolean;
   isDefault: boolean; // cannot be deleted
   createdBy: string;
   createdAt: number;
+  organizationId?: string;
   members?: string[]; // specific user IDs for custom groups
 }
 
@@ -653,6 +673,7 @@ interface Sector {
   createdBy: string;
   createdAt: number;
   updatedAt: number;
+  organizationId?: string;
 }
 
 // ─── Family Perimeter types ────────────────────────────────────────────
@@ -800,6 +821,9 @@ const alerts = new Map<string, Alert>();
 const userConnections = new Map<string, Set<any>>();
 // Reverse map: ws client -> userId for efficient PTT broadcast
 const wsClientMap = new Map<any, string>();
+
+// Organizations (tenants) — source of truth for AdminUser.organizationId.
+const organizations = new Map<string, Organization>();
 
 // Admin storage
 const adminUsers = new Map<string, AdminUser>();
@@ -1218,6 +1242,7 @@ async function handleAuth(ws: any, token: string | undefined, setUserContext: (i
   const userId = verifiedUser.id;
   const adminUser = adminUsers.get(userId);
   const userRole = adminUser?.role || 'user';
+  const organizationId = adminUser?.organizationId;
 
   const user: User = {
     id: userId,
@@ -1225,6 +1250,7 @@ async function handleAuth(ws: any, token: string | undefined, setUserContext: (i
     role: userRole as any,
     status: userRole === 'responder' ? 'available' : undefined,
     lastSeen: Date.now(),
+    organizationId,
   };
 
   users.set(userId, user);
@@ -1253,10 +1279,12 @@ async function handleAuth(ws: any, token: string | undefined, setUserContext: (i
   // Log auth event
   addAuditEntry('auth', 'User Login', userId, `${userRole} login via WebSocket`);
 
-  const activeAlerts = Array.from(alerts.values()).filter(a => a.status === 'active').map(a => ({
-    ...a,
-    respondingNames: (a.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid),
-  }));
+  const activeAlerts = Array.from(alerts.values())
+    .filter(a => a.status === 'active' && canAccessOrg({ role: userRole, organizationId }, a.organizationId))
+    .map(a => ({
+      ...a,
+      respondingNames: (a.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid),
+    }));
   ws.send(JSON.stringify({
     type: 'alertsSnapshot',
     data: activeAlerts,
@@ -1275,6 +1303,7 @@ async function handleCreateAlert(ws: any, userId: string, userRole: string, aler
     description: alertData.description || '',
     createdBy: userId,
     reporterId: userId,
+    organizationId: adminUsers.get(userId)?.organizationId,
     origin: 'mobile',
     createdAt: Date.now(),
     status: 'active',
@@ -1290,7 +1319,7 @@ async function handleCreateAlert(ws: any, userId: string, userRole: string, aler
 
   addAuditEntry('incident', 'Incident Created', userId, `Created ${alert.id}: ${alert.type} at ${alert.location.address}`);
 
-  broadcastMessage({ type: 'newAlert', data: alert });
+  broadcastToOrg(alert.organizationId, { type: 'newAlert', data: alert });
   ws.send(JSON.stringify({ type: 'alertCreated', alertId: alert.id, timestamp: Date.now() }));
 }
 
@@ -1359,7 +1388,7 @@ function checkGeofences(userId: string, location: { latitude: number; longitude:
       };
       geofenceEvents.unshift(event);
       addAuditEntry('broadcast', 'Geofence Entry', userId, `${responderName} entered zone ${zoneId} (${zone.severity} — ${zone.radiusKm}km)`);
-      broadcastMessage({
+      broadcastToOrg(adminUsers.get(userId)?.organizationId, {
         type: 'geofenceEntry',
         data: { ...event, zone: { id: zone.id, severity: zone.severity, radiusKm: zone.radiusKm, message: zone.message } },
       });
@@ -1378,7 +1407,7 @@ function checkGeofences(userId: string, location: { latitude: number; longitude:
       };
       geofenceEvents.unshift(event);
       addAuditEntry('broadcast', 'Geofence Exit', userId, `${responderName} exited zone ${zoneId} (${zone.severity} — ${zone.radiusKm}km)`);
-      broadcastMessage({
+      broadcastToOrg(adminUsers.get(userId)?.organizationId, {
         type: 'geofenceExit',
         data: { ...event, zone: { id: zone.id, severity: zone.severity, radiusKm: zone.radiusKm, message: zone.message } },
       });
@@ -1522,9 +1551,10 @@ function notifyPresenceTransition(userId: string, status: 'inside' | 'outside', 
   // Live status (WS) updates immediately — it's just a silent indicator, no
   // harm if it flickers momentarily. The push is what's actually disruptive
   // (a popup per bounce), so it's debounced separately below.
-  broadcastToRole('dispatcher', payload);
-  broadcastToRole('admin', payload);
-  broadcastToRole('responder', payload);
+  const presenceOrgId = adminUsers.get(userId)?.organizationId;
+  broadcastToOrgRole(presenceOrgId, 'dispatcher', payload);
+  broadcastToOrgRole(presenceOrgId, 'admin', payload);
+  broadcastToOrgRole(presenceOrgId, 'responder', payload);
   broadcastToUsers(parentIds, payload);
   schedulePresenceChangePush(userId, name, status, matchedLabel, excludeStaffId, parentIds);
 }
@@ -1694,6 +1724,27 @@ function canAccessFamily(caller: { id: string; role: string; assignedFamilyIds?:
   return caller.assignedFamilyIds.includes(getFamilyGroupId(targetUserId));
 }
 
+// ─── Multi-tenant isolation (organization scoping) ───────────────────────
+// Deliberately fail-closed, unlike canAccessFamily above: a missing
+// organizationId on either side means "deny", never "sees everything".
+// superadmin (Talion staff, no organizationId of their own) is the only
+// cross-organization role. This is a hard partition layered ON TOP of
+// canAccessFamily, not a replacement for it — see canAccessUser.
+function canAccessOrg(caller: { role: string; organizationId?: string }, targetOrgId?: string): boolean {
+  if (caller.role === 'superadmin') return true;
+  if (!caller.organizationId || !targetOrgId) return false;
+  return caller.organizationId === targetOrgId;
+}
+
+// Combined gate: organization boundary first (hard, no exceptions besides
+// superadmin), then the existing family-assignment restriction within that
+// organization. Replaces canAccessFamily at every call site that guards
+// access to another user's data.
+function canAccessUser(caller: { id: string; role: string; organizationId?: string; assignedFamilyIds?: string[] }, targetUserId: string): boolean {
+  const targetOrgId = adminUsers.get(targetUserId)?.organizationId;
+  return canAccessOrg(caller, targetOrgId) && canAccessFamily(caller, targetUserId);
+}
+
 // POST /api/access/emergency-override — break-glass: temporarily lifts the
 // caller's own family-assignment restriction (never affects incidents/alerts,
 // which are already unrestricted for everyone). Every enable/disable is
@@ -1743,8 +1794,9 @@ function ensureFamilyChannel(userId: string): PTTChannelServer | null {
   if (!channel) {
     channel = {
       id: channelId, name: `Famille ${memberNames[0]}`, description: 'Canal familial (privé)',
-      allowedRoles: ['user', 'responder', 'dispatcher', 'admin'], isActive: true, isDefault: false,
+      allowedRoles: ['user', 'responder', 'dispatcher', 'admin', 'superadmin'], isActive: true, isDefault: false,
       createdBy: 'system', createdAt: Date.now(), members: group,
+      organizationId: adminUsers.get(userId)?.organizationId,
     };
     pttChannels.push(channel);
     persistPTTChannels();
@@ -1791,6 +1843,7 @@ function findPossibleDuplicates(alert: Alert): { id: string; confidence: 'same-r
   const matches: { id: string; confidence: 'same-reporter' | 'family' | 'proximity' }[] = [];
   for (const other of alerts.values()) {
     if (other.id === alert.id) continue;
+    if (other.organizationId !== alert.organizationId) continue;
     if (other.status === 'resolved' || other.status === 'cancelled') continue;
     if (!other.location) continue;
     if (Math.abs(other.createdAt - alert.createdAt) > DUPLICATE_TIME_WINDOW_MS) continue;
@@ -1821,7 +1874,7 @@ function linkPossibleDuplicates(alert: Alert): void {
       other.possibleDuplicates.push({ id: alert.id, confidence: match.confidence });
       alerts.set(other.id, other);
       saveAlertToSupabase(other).catch(e => console.error('[LinkDuplicates] Supabase save error:', e));
-      broadcastMessage({ type: 'alertUpdate', data: { ...other, respondingNames: (other.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
+      broadcastToOrg(other.organizationId, { type: 'alertUpdate', data: { ...other, respondingNames: (other.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
     }
   }
 }
@@ -2121,6 +2174,7 @@ async function fireCheckInEscalation(id: string) {
     description: `Check-in manqué — ${checkIn.targetUserName} n'a pas confirmé être en sécurité.`,
     createdBy: 'system',
     reporterId: checkIn.targetUserId,
+    organizationId: adminUsers.get(checkIn.targetUserId)?.organizationId,
     origin: 'mobile',
     createdAt: Date.now(),
     status: 'active',
@@ -2132,7 +2186,7 @@ async function fireCheckInEscalation(id: string) {
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[CheckIn] Supabase save error:', e));
   addAuditEntry('incident', 'Check-in manqué', checkIn.ownerId, `Check-in ${checkIn.id}: ${checkIn.targetUserName}`);
-  broadcastMessage({ type: 'newAlert', data: alert });
+  broadcastToOrg(alert.organizationId, { type: 'newAlert', data: alert });
   sendPushToDispatchersAndResponders(alert, checkIn.targetUserName).catch(() => {});
   rescheduleIfRecurring(checkIn);
 }
@@ -2182,8 +2236,9 @@ function handleLocationUpdate(ws: any, userId: string, userRole: string, locatio
 
   // Broadcast to dispatchers - use appropriate event type based on role
   const userName = adminUsers.get(userId)?.name || userId;
+  const locationOrgId = adminUsers.get(userId)?.organizationId;
   if (user.role === 'responder') {
-    broadcastToRole('dispatcher', {
+    broadcastToOrgRole(locationOrgId, 'dispatcher', {
       type: 'responderLocationUpdate',
       userId,
       name: userName,
@@ -2191,7 +2246,7 @@ function handleLocationUpdate(ws: any, userId: string, userRole: string, locatio
       timestamp: Date.now(),
     });
     // Also broadcast to admins
-    broadcastToRole('admin', {
+    broadcastToOrgRole(locationOrgId, 'admin', {
       type: 'responderLocationUpdate',
       userId,
       name: userName,
@@ -2206,8 +2261,8 @@ function handleLocationUpdate(ws: any, userId: string, userRole: string, locatio
     const isGhosted = adminUsers.get(userId)?.ghostMode && !isRevealedForActiveIncident(userId);
     if (!isGhosted) {
       const msg = { type: 'userLocationUpdate', userId, name: userName, location: locationData, timestamp: Date.now() };
-      broadcastToRole('dispatcher', msg);
-      broadcastToRole('admin', msg);
+      broadcastToOrgRole(locationOrgId, 'dispatcher', msg);
+      broadcastToOrgRole(locationOrgId, 'admin', msg);
     }
   }
   // Family location sharing: broadcast to family members regardless of role
@@ -2232,7 +2287,7 @@ function handleStatusUpdate(ws: any, userId: string, statusData: any) {
     user.lastSeen = Date.now();
     users.set(userId, user);
     console.log(`Responder ${userId} status updated to ${statusData.status}`);
-    broadcastToRole('dispatcher', {
+    broadcastToOrgRole(adminUsers.get(userId)?.organizationId, 'dispatcher', {
       type: 'responderStatusUpdate',
       userId,
       status: statusData.status,
@@ -2255,13 +2310,15 @@ function handleAcknowledgeAlert(ws: any, userId: string, alertData: any) {
     saveAlertToSupabase(alert).catch(e => console.error('[WS Acknowledge] Supabase save error:', e));
     console.log(`Alert ${alert.id} acknowledged by ${userId}`);
     addAuditEntry('incident', 'Alert Acknowledged', userId, `Acknowledged ${alert.id}`);
-    broadcastMessage({ type: 'alertAcknowledged', alertId: alert.id, userId, timestamp: Date.now() });
+    broadcastToOrg(alert.organizationId, { type: 'alertAcknowledged', alertId: alert.id, userId, timestamp: Date.now() });
   }
 }
 
 // Get alerts handler
 function handleGetAlerts(ws: any, userId: string, userRole: string) {
+  const caller = { role: userRole, organizationId: adminUsers.get(userId)?.organizationId };
   const userAlerts = Array.from(alerts.values()).filter(alert => {
+    if (!canAccessOrg(caller, alert.organizationId)) return false;
     if (alert.status === 'resolved' || alert.status === 'cancelled') return false;
     return true;
   });
@@ -2288,17 +2345,24 @@ function handleGetResponders(ws: any) {
   ws.send(JSON.stringify({ type: 'respondersList', data: enriched, timestamp: Date.now() }));
 }
 
-// Broadcast helpers
-function broadcastMessage(message: any) {
+// Broadcast helpers — organization-scoped. Renamed from broadcastMessage/
+// broadcastToRole (rather than adding an optional param) so tsc turns every
+// call site into a compile error until it's given an explicit
+// organizationId — a silently-omitted optional param would be exactly the
+// kind of cross-tenant leak this rename exists to prevent.
+function broadcastToOrg(organizationId: string | undefined, message: any) {
   const data = JSON.stringify(message);
-  wss.clients.forEach((client) => {
-    if (client.readyState === 1) { client.send(data); }
+  wss.clients.forEach((client: any) => {
+    if (client.readyState !== 1) return;
+    const uid = wsClientMap.get(client);
+    const u = uid ? users.get(uid) : undefined;
+    if (u?.organizationId && u.organizationId === organizationId) client.send(data);
   });
 }
 
-function broadcastToRole(role: string, message: any) {
+function broadcastToOrgRole(organizationId: string | undefined, role: string, message: any) {
   const data = JSON.stringify(message);
-  const targetUsers = Array.from(users.values()).filter(u => u.role === role);
+  const targetUsers = Array.from(users.values()).filter(u => u.role === role && u.organizationId === organizationId);
   targetUsers.forEach(user => {
     const connections = userConnections.get(user.id);
     if (connections) {
@@ -2317,8 +2381,9 @@ function broadcastUserStatus(userId: string, status: 'online' | 'offline') {
     status,
     timestamp: Date.now(),
   };
-  broadcastToRole('dispatcher', payload);
-  broadcastToRole('admin', payload);
+  const statusOrgId = adminUsers.get(userId)?.organizationId;
+  broadcastToOrgRole(statusOrgId, 'dispatcher', payload);
+  broadcastToOrgRole(statusOrgId, 'admin', payload);
 }
 
 // ─── REST API endpoints ────────────────────────────────────────────// ─── Authentication ───────────────────────────────────────────────────────
@@ -2655,6 +2720,14 @@ app.get('/api/geocode', async (req, res) => {
   }
 });
 
+// NOT org-scoped, deliberately, unlike the rest of Phase 1: this route has
+// no requireAuth (role/userId are unverified query params, a pre-existing
+// gap not fixed here) AND at least one real caller — app/dispatcher.tsx's
+// useAlerts({ userRole: 'dispatcher' }) — never sends userId at all, so a
+// fail-closed org filter here would silently empty the dispatcher's live
+// alert feed. Needs a coordinated frontend+backend fix (always send an
+// identity, ideally a real Bearer token) before it can be scoped safely —
+// tracked as a follow-up, not fixed in this pass.
 app.get('/alerts', (req, res) => {
   const userRole = req.query.role as string;
   const userId = req.query.userId as string;
@@ -2711,7 +2784,7 @@ app.put('/alerts/:id', (req, res) => {
   alerts.set(alert.id, alert);
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[Unassign] Supabase save error:', e));
-  broadcastMessage({ type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
+  broadcastToOrg(alert.organizationId, { type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
   res.json({ success: true });
 });
 
@@ -2724,7 +2797,7 @@ app.put('/alerts/:id/acknowledge', requireRole('dispatcher'), (req, res) => {
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[Acknowledge] Supabase save error:', e));
   addAuditEntry('incident', 'Alert Acknowledged', req.body?.userId || 'Mobile App', `Acknowledged ${alert.id}`);
-  broadcastMessage({ type: 'alertAcknowledged', alertId: alert.id, timestamp: Date.now() });
+  broadcastToOrg(alert.organizationId, { type: 'alertAcknowledged', alertId: alert.id, timestamp: Date.now() });
   res.json({ success: true });
 });
 
@@ -2738,7 +2811,7 @@ app.put('/alerts/:id/resolve', requireRole('dispatcher'), (req, res) => {
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[Resolve] Supabase save error:', e));
   addAuditEntry('incident', 'Incident Resolved', req.body?.userId || 'Mobile App', `Resolved ${alert.id}: ${alert.type} at ${alert.location.address}`);
-  broadcastMessage({ type: 'alertResolved', alertId: alert.id, timestamp: Date.now() });
+  broadcastToOrg(alert.organizationId, { type: 'alertResolved', alertId: alert.id, timestamp: Date.now() });
   res.json({ success: true });
 });
 
@@ -2754,7 +2827,7 @@ app.put('/alerts/:id/archive', requireRole('dispatcher'), (req, res) => {
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[Archive] Supabase save error:', e));
   addAuditEntry('incident', 'Incident Archived', req.supabaseUser?.id || 'Dispatch Console', `Archived ${alert.id}`);
-  broadcastMessage({ type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
+  broadcastToOrg(alert.organizationId, { type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
   res.json({ success: true });
 });
 
@@ -2767,7 +2840,7 @@ app.put('/alerts/:id/unarchive', requireRole('dispatcher'), (req, res) => {
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[Unarchive] Supabase save error:', e));
   addAuditEntry('incident', 'Incident Unarchived', req.supabaseUser?.id || 'Dispatch Console', `Unarchived ${alert.id}`);
-  broadcastMessage({ type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
+  broadcastToOrg(alert.organizationId, { type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
   res.json({ success: true });
 });
 
@@ -2814,8 +2887,8 @@ app.post('/alerts/:id/link/:otherId', requireRole('dispatcher'), (req, res) => {
   saveAlertToSupabase(alert).catch(e => console.error('[Link] Supabase save error:', e));
   saveAlertToSupabase(other).catch(e => console.error('[Link] Supabase save error:', e));
   addAuditEntry('incident', 'Incidents Linked', req.supabaseUser?.id || 'Dispatch Console', `Linked ${alert.id} and ${other.id} as the same event`);
-  broadcastMessage({ type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
-  broadcastMessage({ type: 'alertUpdate', data: { ...other, respondingNames: (other.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
+  broadcastToOrg(alert.organizationId, { type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
+  broadcastToOrg(other.organizationId, { type: 'alertUpdate', data: { ...other, respondingNames: (other.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
   res.json({ success: true });
 });
 
@@ -2836,8 +2909,8 @@ app.delete('/alerts/:id/duplicate-suggestion/:otherId', requireRole('dispatcher'
     saveAlertToSupabase(other).catch(e => console.error('[DismissDuplicate] Supabase save error:', e));
   }
   persistAlerts();
-  broadcastMessage({ type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
-  if (other) broadcastMessage({ type: 'alertUpdate', data: { ...other, respondingNames: (other.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
+  broadcastToOrg(alert.organizationId, { type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
+  if (other) broadcastToOrg(other.organizationId, { type: 'alertUpdate', data: { ...other, respondingNames: (other.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
   res.json({ success: true });
 });
 
@@ -2870,7 +2943,7 @@ app.delete('/alerts/:id', requireRole('admin'), async (req, res) => {
   persistAlerts();
   await deleteAlertFromSupabase(id);
   addAuditEntry('incident', 'Incident Deleted', req.supabaseUser?.id || 'Dispatch Console', `Deleted ${id}: ${alert.type} at ${alert.location?.address || 'unknown'}`);
-  broadcastMessage({ type: 'alertDeleted', alertId: id });
+  broadcastToOrg(alert.organizationId, { type: 'alertDeleted', alertId: id });
   res.json({ success: true });
 });
 
@@ -2879,7 +2952,9 @@ app.get('/responders', (req, res) => {
   res.json(responders);
 });
 
-// Dispatch console: create incident without auth (internal use)
+// Dispatch console: create incident (auth via the '/dispatch' prefix
+// middleware at the top of the file, not repeated here — the "without
+// auth" in this comment predates that middleware and is stale)
 app.post('/dispatch/incidents', async (req, res) => {
   const { type, severity, location, description, createdBy, visibilityRadiusMeters } = req.body;
   const alert: Alert = {
@@ -2889,6 +2964,7 @@ app.post('/dispatch/incidents', async (req, res) => {
     location: location || { latitude: 0, longitude: 0, address: 'Unknown' },
     description: description || '',
     createdBy: createdBy || 'Dispatch Console',
+    organizationId: req.supabaseUser?.organizationId,
     origin: 'dispatch',
     createdAt: Date.now(),
     status: 'active',
@@ -2900,7 +2976,7 @@ app.post('/dispatch/incidents', async (req, res) => {
   linkPossibleDuplicates(alert);
   persistAlerts();
   saveAlertToSupabase(alert).catch(() => {});
-  broadcastMessage({ type: 'newAlert', data: alert });
+  broadcastToOrg(alert.organizationId, { type: 'newAlert', data: alert });
   sendPushToDispatchersAndResponders(alert, alert.createdBy).catch(() => {});
   // Push aussi aux users
   for (const [token, entry] of pushTokens) {
@@ -2937,6 +3013,7 @@ app.post('/alerts', requireAuth, async (req, res) => {
     description: description || '',
     createdBy: createdBy || 'system',
     reporterId: req.supabaseUser?.id || createdBy || undefined,
+    organizationId: req.supabaseUser?.organizationId,
     origin: 'mobile',
     createdAt: Date.now(),
     status: 'active',
@@ -2946,7 +3023,7 @@ app.post('/alerts', requireAuth, async (req, res) => {
   linkPossibleDuplicates(alert);
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[Alerts] Supabase save error:', e));
-  broadcastMessage({ type: 'newAlert', data: alert });
+  broadcastToOrg(alert.organizationId, { type: 'newAlert', data: alert });
 
   // Send push notifications for the new incident
   if (alert.type === 'sos') {
@@ -3201,6 +3278,10 @@ app.post('/api/sos', async (req, res) => {
     description: description || `SOS Alert from ${userName || 'Unknown'}`,
     createdBy: userName || userId || 'mobile-user',
     reporterId: userId || undefined,
+    // No requireAuth on this route by design (SOS must go through even if a
+    // token refresh has failed) — best-effort org resolution from the
+    // client-supplied userId, same reliability trade-off as reporterId above.
+    organizationId: userId ? adminUsers.get(userId)?.organizationId : undefined,
     origin: 'mobile',
     createdAt: Date.now(),
     status: 'active',
@@ -3215,7 +3296,7 @@ app.post('/api/sos', async (req, res) => {
   addAuditEntry('incident', 'SOS Alert Created (REST)', userId || 'unknown', `SOS ${alert.id}: ${alert.location.address}`);
 
   // Broadcast to ALL connected WebSocket clients (Dispatch console, admin, etc.)
-  broadcastMessage({ type: 'newAlert', data: alert });
+  broadcastToOrg(alert.organizationId, { type: 'newAlert', data: alert });
   
   // Send push notifications to dispatchers and responders
   sendPushToDispatchersAndResponders(alert, userName || userId || 'Unknown').catch(err => {
@@ -3241,7 +3322,7 @@ app.post('/api/alerts/:id/photos', upload.array('photos', 4), (req: any, res) =>
   console.log(`[Alert Photos] ${photoUrls.length} photo(s) uploaded to alert ${alert.id}`);
 
   // Broadcast photo update to all connected clients
-  broadcastMessage({ type: 'alertPhotosUpdated', data: { alertId: alert.id, photos: alert.photos } });
+  broadcastToOrg(alert.organizationId, { type: 'alertPhotosUpdated', data: { alertId: alert.id, photos: alert.photos } });
 
   res.json({ success: true, photos: alert.photos });
 });
@@ -3292,7 +3373,7 @@ setInterval(() => {
       user.location = undefined;
       users.set(userId, user);
     }
-    broadcastToRole('dispatcher', {
+    broadcastToOrgRole(adminUsers.get(userId)?.organizationId, 'dispatcher', {
       type: 'userLocationRemoved',
       userId,
       timestamp: Date.now(),
@@ -3318,7 +3399,7 @@ function handleStopSharing(userId: string, res: any) {
   }
   console.log(`[Location REST] Removed ${userId} from users map entirely`);
   // Broadcast removal to dispatchers so they remove the marker
-  broadcastToRole('dispatcher', {
+  broadcastToOrgRole(adminUsers.get(userId)?.organizationId, 'dispatcher', {
     type: 'userLocationRemoved',
     userId,
     timestamp: Date.now(),
@@ -3446,9 +3527,10 @@ app.put('/api/family/presence/:targetUserId', requireAuth, (req, res) => {
     persistManualPresence();
     deleteManualPresenceFromSupabase(targetUserId).catch(() => {});
     const payload = { type: 'presenceUpdated', targetUserId, name, status: 'auto', setBy: caller.id, setAt: Date.now() };
-    broadcastToRole('dispatcher', payload);
-    broadcastToRole('admin', payload);
-    broadcastToRole('responder', payload);
+    const presenceOrgId = adminUsers.get(targetUserId)?.organizationId;
+    broadcastToOrgRole(presenceOrgId, 'dispatcher', payload);
+    broadcastToOrgRole(presenceOrgId, 'admin', payload);
+    broadcastToOrgRole(presenceOrgId, 'responder', payload);
     broadcastToUsers(getFamilyParentIds(targetUserId).filter(id => id !== targetUserId), payload);
     return res.json({ success: true });
   }
@@ -3464,9 +3546,10 @@ app.put('/api/family/presence/:targetUserId', requireAuth, (req, res) => {
   persistManualPresence();
   const matchedLabel = status === 'inside' ? placeLabel : autoPresenceState.get(targetUserId)?.label;
   const payload = { type: 'presenceUpdated', targetUserId, name, status: entry.status, matchedLabel, setBy: entry.setBy, setAt: entry.setAt };
-  broadcastToRole('dispatcher', payload);
-  broadcastToRole('admin', payload);
-  broadcastToRole('responder', payload);
+  const presenceOrgId2 = adminUsers.get(targetUserId)?.organizationId;
+  broadcastToOrgRole(presenceOrgId2, 'dispatcher', payload);
+  broadcastToOrgRole(presenceOrgId2, 'admin', payload);
+  broadcastToOrgRole(presenceOrgId2, 'responder', payload);
   broadcastToUsers(getFamilyParentIds(targetUserId).filter(id => id !== targetUserId), payload);
   if (previousStatus !== entry.status) {
     notifyPresenceChangePush(name, entry.status, matchedLabel, isStaff ? caller.id : undefined, getFamilyParentIds(targetUserId).filter(id => id !== targetUserId)).catch(() => {});
@@ -4167,13 +4250,17 @@ function getReciprocalRelType(type: string): string {
   return map[type] || 'other';
 }
 
-// Admin incidents list (formatted for dashboard)
-app.get('/admin/incidents', (req, res) => {
+// Admin incidents list (formatted for dashboard). Previously had no auth
+// check at all despite returning full incident data — both consoles
+// already attach a Bearer token to every fetch (see the window.fetch
+// wrapper in admin-web/app.v2.js and dispatch-web/app.v2.js), so adding
+// the check here is not a breaking change for either caller.
+app.get('/admin/incidents', requireAuth, requireRole('dispatcher'), (req, res) => {
   // NOTE: this list is also what the 30s polling refresh replaces `incidents` with
   // client-side — it must carry every field the card/table rendering and the
   // duplicate-suggestion UI read, or those otherwise-live-updated fields flicker
   // away on the next poll.
-  const incidents: AdminIncident[] = Array.from(alerts.values()).map(a => ({
+  const incidents: AdminIncident[] = Array.from(alerts.values()).filter(a => canAccessOrg(req.supabaseUser!, a.organizationId)).map(a => ({
     id: a.id,
     type: a.type,
     severity: a.severity,
@@ -4224,10 +4311,10 @@ app.get('/dispatch', (req, res) => {
 // Family groups overview: every family unit (connected component over the
 // parent/child/sibling/spouse graph, across ALL admin users — not scoped to
 // one owner), each member's residences and effective presence status.
-function buildFamilyGroupsOverview(caller?: { id: string; role: string; assignedFamilyIds?: string[] }) {
+function buildFamilyGroupsOverview(caller?: { id: string; role: string; organizationId?: string; assignedFamilyIds?: string[] }) {
   const groups = computeFamilyGroups();
   return groups
-    .filter(memberIds => !caller || canAccessFamily(caller, memberIds[0]))
+    .filter(memberIds => !caller || canAccessUser(caller, memberIds[0]))
     .map((memberIds) => ({
     id: getFamilyGroupId(memberIds[0]), // stable across calls, unlike the previous array-index id
     members: memberIds.map(uid => {
@@ -4253,7 +4340,7 @@ function buildFamilyGroupsOverview(caller?: { id: string; role: string; assigned
 
 app.get('/dispatch/family-groups', (req, res) => {
   const caller = req.supabaseUser!;
-  res.json(buildFamilyGroupsOverview({ id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds }));
+  res.json(buildFamilyGroupsOverview({ id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds }));
 });
 
 // Same overview, reachable from the mobile app for staff roles (responders
@@ -4264,7 +4351,7 @@ app.get('/api/family-groups', requireAuth, (req, res) => {
   if (caller.role !== 'responder' && caller.role !== 'dispatcher' && caller.role !== 'admin') {
     return res.status(403).json({ error: 'Not authorized' });
   }
-  res.json(buildFamilyGroupsOverview({ id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds }));
+  res.json(buildFamilyGroupsOverview({ id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds }));
 });
 
 // Dispatch responders list (with location and assignment info)
@@ -4357,7 +4444,7 @@ app.put('/dispatch/responders/:id/status', (req, res) => {
   addAuditEntry('responder', 'Status Changed', 'Dispatch Console', `${responderName} status changed to ${status}`, responderId);
   
   // Broadcast status change to all dispatchers
-  broadcastToRole('dispatcher', {
+  broadcastToOrgRole(adminUser?.organizationId, 'dispatcher', {
     type: 'responderStatusUpdate',
     userId: responderId,
     status,
@@ -4377,7 +4464,7 @@ app.put('/dispatch/incidents/:id/acknowledge', (req, res) => {
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[DispatchAcknowledge] Supabase save error:', e));
   addAuditEntry('incident', 'Alert Acknowledged', 'Dispatch Console', `Acknowledged ${alert.id}`);
-  broadcastMessage({ type: 'alertAcknowledged', alertId: alert.id, timestamp: Date.now() });
+  broadcastToOrg(alert.organizationId, { type: 'alertAcknowledged', alertId: alert.id, timestamp: Date.now() });
   res.json({ success: true });
 });
 
@@ -4422,7 +4509,7 @@ app.put('/dispatch/incidents/:id/assign', (req, res) => {
     ...alert,
     respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid),
   };
-  broadcastMessage({ type: 'alertUpdate', data: enrichedAlert });
+  broadcastToOrg(alert.organizationId, { type: 'alertUpdate', data: enrichedAlert });
 
   // Send push notification to the assigned responder
   const TYPE_LABELS: Record<string, string> = {
@@ -4475,7 +4562,7 @@ app.put('/dispatch/incidents/:id/unassign', (req, res) => {
     ...alert,
     respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid),
   };
-  broadcastMessage({ type: 'alertUpdate', data: enrichedAlert });
+  broadcastToOrg(alert.organizationId, { type: 'alertUpdate', data: enrichedAlert });
   res.json({ success: true, responderName });
 });
 
@@ -4629,7 +4716,7 @@ app.put('/dispatch/incidents/:id/resolve', (req, res) => {
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[DispatchResolve] Supabase save error:', e));
   addAuditEntry('incident', 'Incident Resolved', 'Dispatch Console', `Resolved ${alert.id}: ${alert.type} at ${alert.location.address}`);
-  broadcastMessage({ type: 'alertResolved', alertId: alert.id, timestamp: Date.now() });
+  broadcastToOrg(alert.organizationId, { type: 'alertResolved', alertId: alert.id, timestamp: Date.now() });
   res.json({ success: true });
 });
 
@@ -4686,7 +4773,7 @@ app.put('/alerts/:id/respond', requireRole('responder'), (req, res) => {
     ...alert,
     respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid),
   };
-  broadcastMessage({ type: 'alertUpdate', data: enrichedAlert });
+  broadcastToOrg(alert.organizationId, { type: 'alertUpdate', data: enrichedAlert });
   // Notify dispatchers via push
   for (const [token, entry] of pushTokens) {
     if (entry.userRole === 'dispatcher' || entry.userRole === 'admin') {
@@ -4718,8 +4805,9 @@ app.post('/alerts/:id/reveal', (req, res) => {
   const runtimeUser = users.get(userId);
   if (runtimeUser?.location) {
     const msg = { type: 'userLocationUpdate', userId, location: runtimeUser.location, timestamp: Date.now() };
-    broadcastToRole('dispatcher', msg);
-    broadcastToRole('admin', msg);
+    const revealOrgId = adminUsers.get(userId)?.organizationId;
+    broadcastToOrgRole(revealOrgId, 'dispatcher', msg);
+    broadcastToOrgRole(revealOrgId, 'admin', msg);
   }
 
   addAuditEntry('incident', 'Utilisateur révélé', adminUsers.get(userId)?.name || userId, `Position partagée pour l'incident ${alert.id}`, userId);
@@ -4743,6 +4831,7 @@ app.post('/dispatch/broadcast', async (req, res) => {
     },
     description: message,
     createdBy: by || 'Dispatch Console',
+    organizationId: req.supabaseUser?.organizationId,
     origin: 'dispatch',
     createdAt: Date.now(),
     status: 'active',
@@ -4755,9 +4844,9 @@ app.post('/dispatch/broadcast', async (req, res) => {
   addAuditEntry('broadcast', 'Zone Broadcast Sent', by || 'Dispatch Console', `[${sev.toUpperCase()}] ${message} (${radiusKm || 5}km radius)`);
 
   // Broadcast as newAlert so all WS clients (including mobile) receive it
-  broadcastMessage({ type: 'newAlert', data: alert });
+  broadcastToOrg(alert.organizationId, { type: 'newAlert', data: alert });
   // Also send the legacy zoneBroadcast event for dispatch console UI
-  broadcastMessage({ type: 'zoneBroadcast', data: { message, severity: sev, radiusKm, by, timestamp: Date.now() } });
+  broadcastToOrg(alert.organizationId, { type: 'zoneBroadcast', data: { message, severity: sev, radiusKm, by, timestamp: Date.now() } });
 
   // Send push notifications to ALL users (broadcasts are for everyone)
   sendPushToAllUsers(alert, by || 'Dispatch Console').catch(err => {
@@ -4803,7 +4892,7 @@ app.post('/dispatch/geofence/zones', (req, res) => {
   });
 
   addAuditEntry('broadcast', 'Geofence Zone Created', zone.createdBy, `Zone ${zone.id}: ${zone.severity} — ${zone.radiusKm}km radius`);
-  broadcastMessage({ type: 'geofenceZoneCreated', data: zone });
+  broadcastToOrg(req.supabaseUser?.organizationId, { type: 'geofenceZoneCreated', data: zone });
   res.json({ success: true, zone });
 });
 
@@ -4823,7 +4912,7 @@ app.delete('/dispatch/geofence/zones/:id', (req, res) => {
   geofenceZones.delete(zoneId);
   responderZoneState.delete(zoneId);
   addAuditEntry('broadcast', 'Geofence Zone Deleted', 'Dispatch Console', `Zone ${zoneId} removed`);
-  broadcastMessage({ type: 'geofenceZoneDeleted', data: { zoneId } });
+  broadcastToOrg(req.supabaseUser?.organizationId, { type: 'geofenceZoneDeleted', data: { zoneId } });
   res.json({ success: true });
 });
 
@@ -4852,7 +4941,7 @@ app.post('/dispatch/geofence/simulate-move', (req, res) => {
   checkGeofences(responderId, { latitude, longitude });
 
   // Broadcast location update
-  broadcastMessage({
+  broadcastToOrg(adminUsers.get(responderId)?.organizationId, {
     type: 'responderLocationUpdate',
     userId: responderId,
     location: { latitude, longitude },
@@ -4897,11 +4986,12 @@ app.post('/dispatch/sectors', requireRole('admin'), (req, res) => {
     createdBy: req.supabaseUser!.id,
     createdAt: now,
     updatedAt: now,
+    organizationId: req.supabaseUser!.organizationId,
   };
   sectors.set(sector.id, sector);
   persistSectors();
-  broadcastToRole('dispatcher', { type: 'sectorCreated', sector });
-  broadcastToRole('admin', { type: 'sectorCreated', sector });
+  broadcastToOrgRole(sector.organizationId, 'dispatcher', { type: 'sectorCreated', sector });
+  broadcastToOrgRole(sector.organizationId, 'admin', { type: 'sectorCreated', sector });
   console.log(`[Sector] Created ${sector.id} "${sector.name}" (${shape}) by ${req.supabaseUser!.id}`);
   res.json(sector);
 });
@@ -4926,19 +5016,20 @@ app.put('/dispatch/sectors/:id', requireRole('admin'), (req, res) => {
   sector.updatedAt = Date.now();
   sectors.set(sector.id, sector);
   persistSectors();
-  broadcastToRole('dispatcher', { type: 'sectorUpdated', sector });
-  broadcastToRole('admin', { type: 'sectorUpdated', sector });
+  broadcastToOrgRole(sector.organizationId, 'dispatcher', { type: 'sectorUpdated', sector });
+  broadcastToOrgRole(sector.organizationId, 'admin', { type: 'sectorUpdated', sector });
   res.json(sector);
 });
 
 app.delete('/dispatch/sectors/:id', requireRole('admin'), (req, res) => {
   const sectorId = req.params.id as string;
+  const sectorOrgId = sectors.get(sectorId)?.organizationId;
   const existed = sectors.delete(sectorId);
   if (existed) {
     persistSectors();
     deleteSectorFromSupabase(sectorId).catch(() => {});
-    broadcastToRole('dispatcher', { type: 'sectorDeleted', sectorId });
-    broadcastToRole('admin', { type: 'sectorDeleted', sectorId });
+    broadcastToOrgRole(sectorOrgId, 'dispatcher', { type: 'sectorDeleted', sectorId });
+    broadcastToOrgRole(sectorOrgId, 'admin', { type: 'sectorDeleted', sectorId });
   }
   res.json({ success: existed });
 });
@@ -4949,11 +5040,11 @@ app.delete('/dispatch/sectors/:id', requireRole('admin'), (req, res) => {
 app.get('/dispatch/map/users', (req, res) => {
   const now = Date.now();
   const caller = req.supabaseUser!;
-  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  const callerAccess = { id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
   const connectedUsersList = Array.from(users.values())
     .filter(u => u.location && u.role !== 'responder')
     .filter(u => !(adminUsers.get(u.id)?.ghostMode && !isRevealedForActiveIncident(u.id)))
-    .filter(u => canAccessFamily(callerAccess, u.id))
+    .filter(u => canAccessUser(callerAccess, u.id))
     .map(u => {
       const adminUser = adminUsers.get(u.id);
       const name = adminUser ? `${adminUser.firstName} ${adminUser.lastName}`.trim() : u.id;
@@ -4973,7 +5064,7 @@ app.get('/dispatch/map/users', (req, res) => {
 // Map: all entities combined (incidents + responders + users)
 app.get('/dispatch/map/all', (req, res) => {
   const now = Date.now();
-  const allAlerts = Array.from(alerts.values()).map(a => ({
+  const allAlerts = Array.from(alerts.values()).filter(a => canAccessOrg(req.supabaseUser!, a.organizationId)).map(a => ({
     entityType: 'incident',
     id: a.id,
     type: a.type,
@@ -5081,14 +5172,14 @@ app.put('/api/users/:id/ghost-mode', requireAuth, (req, res) => {
   // should still hold even if they happen to re-toggle Ghost mode while it's active.)
   if (user.ghostMode && !isRevealedForActiveIncident(targetId)) {
     const removeMsg = { type: 'userLocationRemoved', userId: targetId, timestamp: Date.now() };
-    broadcastToRole('dispatcher', removeMsg);
-    broadcastToRole('admin', removeMsg);
+    broadcastToOrgRole(user.organizationId, 'dispatcher', removeMsg);
+    broadcastToOrgRole(user.organizationId, 'admin', removeMsg);
   } else if (!user.ghostMode) {
     const runtimeUser = users.get(targetId);
     if (runtimeUser?.location) {
       const showMsg = { type: 'userLocationUpdate', userId: targetId, name: user.name, location: runtimeUser.location, timestamp: Date.now() };
-      broadcastToRole('dispatcher', showMsg);
-      broadcastToRole('admin', showMsg);
+      broadcastToOrgRole(user.organizationId, 'dispatcher', showMsg);
+      broadcastToOrgRole(user.organizationId, 'admin', showMsg);
     }
   }
 
@@ -5194,6 +5285,7 @@ app.post('/api/sos/duress-check', requireAuth, (req, res) => {
         description: `Code de contrainte activé par ${user.name}.`,
         createdBy: user.name,
         reporterId: user.id,
+        organizationId: user.organizationId,
         origin: 'mobile',
         createdAt: Date.now(),
         status: 'active',
@@ -5217,21 +5309,22 @@ app.post('/api/sos/duress-check', requireAuth, (req, res) => {
     const runtimeUser = users.get(user.id);
     if (runtimeUser?.location) {
       const showMsg = { type: 'userLocationUpdate', userId: user.id, name: user.name, location: runtimeUser.location, timestamp: Date.now() };
-      broadcastToRole('dispatcher', showMsg);
-      broadcastToRole('admin', showMsg);
+      broadcastToOrgRole(user.organizationId, 'dispatcher', showMsg);
+      broadcastToOrgRole(user.organizationId, 'admin', showMsg);
     }
 
-    // Deliberately role-scoped rather than the usual broadcastMessage() fan-out
-    // to every connected client — that would also reach the reporter's own
-    // phone (which stays connected) and could trigger a siren/visible update
-    // on the exact device this whole feature exists to keep quiet.
+    // Deliberately role-scoped rather than the usual broadcastToOrg() fan-out
+    // to every connected client in the organization — that would also reach
+    // the reporter's own phone (which stays connected) and could trigger a
+    // siren/visible update on the exact device this whole feature exists to
+    // keep quiet.
     const duressMsg = {
       type: isNew ? 'newAlert' : 'alertUpdate',
       data: { ...alert, respondingNames: alert.respondingUsers.map(uid => adminUsers.get(uid)?.name || uid) },
     };
-    broadcastToRole('dispatcher', duressMsg);
-    broadcastToRole('admin', duressMsg);
-    broadcastToRole('responder', duressMsg);
+    broadcastToOrgRole(user.organizationId, 'dispatcher', duressMsg);
+    broadcastToOrgRole(user.organizationId, 'admin', duressMsg);
+    broadcastToOrgRole(user.organizationId, 'responder', duressMsg);
     sendPushToDispatchersAndResponders(alert, user.name).catch(() => {});
 
     return res.json({ result: 'duress' });
@@ -5866,8 +5959,8 @@ app.post('/api/patrol/reports', (req, res) => {
         notes: report.notes,
       },
     };
-    broadcastToRole('dispatcher', alertMsg);
-    broadcastToRole('admin', alertMsg);
+    broadcastToOrgRole(user.organizationId, 'dispatcher', alertMsg);
+    broadcastToOrgRole(user.organizationId, 'admin', alertMsg);
 
     // Also send push notifications to dispatchers and admins
     const pushTitle = `\u26A0\uFE0F Ronde ${statusConf.label}`;
@@ -5998,6 +6091,7 @@ app.post('/api/patrol/reports/:id/escalate-to-incident', async (req, res) => {
     description: `Ronde escaladée — ${severityConfig.label} (rapport ${report.id})`,
     createdBy: report.createdByName,
     reporterId: report.createdBy,
+    organizationId: adminUsers.get(report.createdBy)?.organizationId,
     origin: 'dispatch',
     createdAt: Date.now(),
     status: 'active',
@@ -6007,7 +6101,7 @@ app.post('/api/patrol/reports/:id/escalate-to-incident', async (req, res) => {
   linkPossibleDuplicates(alert);
   persistAlerts();
   saveAlertToSupabase(alert).catch(() => {});
-  broadcastMessage({ type: 'newAlert', data: alert });
+  broadcastToOrg(alert.organizationId, { type: 'newAlert', data: alert });
   sendPushToDispatchersAndResponders(alert, alert.createdBy).catch(() => {});
 
   report.escalatedIncidentId = alert.id;
@@ -6382,17 +6476,18 @@ app.post('/api/ptt/channels', requireAuth, (req, res) => {
     id: `custom-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
     name,
     description: description || '',
-    allowedRoles: ['user', 'responder', 'dispatcher', 'admin'],
+    allowedRoles: ['user', 'responder', 'dispatcher', 'admin', 'superadmin'],
     isActive: true,
     isDefault: false,
     createdBy: caller.id,
     createdAt: Date.now(),
     members: Array.isArray(members) ? members : [],
+    organizationId: caller.organizationId,
   };
 
   pttChannels.push(channel);
   persistPTTChannels();
-  broadcastMessage({ type: 'pttChannelCreated', data: channel });
+  broadcastToOrg(channel.organizationId, { type: 'pttChannelCreated', data: channel });
   console.log(`[PTT] Channel "${name}" created by ${callerUser?.name || caller.id}`);
   res.json(channel);
 });
@@ -6415,7 +6510,7 @@ app.delete('/api/ptt/channels/:id', requireAuth, (req, res) => {
   pttMessages = pttMessages.filter(m => m.channelId !== id);
   persistPTTMessages();
 
-  broadcastMessage({ type: 'pttChannelDeleted', channelId: id });
+  broadcastToOrg(removed.organizationId, { type: 'pttChannelDeleted', channelId: id });
   console.log(`[PTT] Channel "${removed.name}" deleted`);
   res.json({ success: true });
 });
@@ -6445,16 +6540,17 @@ app.post('/api/ptt/channels/direct', requireAuth, (req, res) => {
     id: `direct-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
     name: `${name1} ↔ ${name2}`,
     description: `Appel direct entre ${name1} et ${name2}`,
-    allowedRoles: ['user', 'responder', 'dispatcher', 'admin'],
+    allowedRoles: ['user', 'responder', 'dispatcher', 'admin', 'superadmin'],
     isActive: true,
     isDefault: false,
     createdBy: caller.id,
     createdAt: Date.now(),
     members: [caller.id, userId2],
+    organizationId: caller.organizationId,
   };
   pttChannels.push(channel);
   persistPTTChannels();
-  broadcastMessage({ type: 'pttChannelCreated', data: channel });
+  broadcastToOrg(channel.organizationId, { type: 'pttChannelCreated', data: channel });
   console.log(`[PTT] Direct channel created: ${name1} ↔ ${name2}`);
   res.json(channel);
 });
@@ -6472,7 +6568,7 @@ app.post('/api/ptt/emergency', requireAuth, async (req, res) => {
   }
   const senderName = adminUsers.get(caller.id)?.name || caller.id;
   const payload = { type: 'pttEmergencyTriggered', data: { channelId: 'emergency', senderId: caller.id, senderName, senderRole: caller.role, timestamp: Date.now() } };
-  broadcastMessage(payload);
+  broadcastToOrg(caller.organizationId, payload);
 
   const targetTokens: string[] = [];
   for (const [token, entry] of pushTokens) {
@@ -6536,8 +6632,12 @@ app.post('/api/ptt/transmit', (req, res) => {
   if (pttMessages.length > 200) pttMessages = pttMessages.slice(-200);
   persistPTTMessages();
 
-  // Broadcast via WebSocket to all eligible clients
-  broadcastMessage({
+  // Broadcast via WebSocket to all eligible clients. Uses the sender's own
+  // organization rather than channel.organizationId — the default seeded
+  // channels (emergency/dispatch/responders/general) have no organizationId
+  // of their own (a Phase 3 cleanup item, not yet per-organization), so
+  // falling back to the channel's id would silently broadcast to nobody.
+  broadcastToOrg(adminUsers.get(senderId)?.organizationId, {
     type: 'pttMessage',
     data: {
       id: pttMsg.id,
@@ -6565,6 +6665,8 @@ server.headersTimeout = 66000;   // slightly > keepAliveTimeout
 server.listen(Number(PORT), '0.0.0.0', async () => {
   console.log(`Talion's Eye Server running on port ${PORT}`);
   // Charger toutes les données depuis Supabase avant d'accepter les requêtes
+  // organizations avant admin_users : chaque AdminUser référence son organizationId.
+  await loadOrganizationsFromSupabase();
   await Promise.all([
     loadAdminUsersFromSupabase(),
     loadAlertsFromSupabase(),
@@ -6653,11 +6755,43 @@ async function loadAdminUsersFromSupabase(): Promise<void> {
           normalPinHash: u.normal_pin_hash || undefined,
           duressPinHash: u.duress_pin_hash || undefined,
           assignedFamilyIds: u.assigned_family_ids || [],
+          organizationId: u.organization_id || undefined,
         });
       });
       console.log(`[Supabase] Loaded ${data.length} users from admin_users`);
     }
   } catch (e) { console.error('[Supabase] loadAdminUsersFromSupabase error:', e); }
+}
+
+// ─── Sync organizations from Supabase on startup ─────────────────────────
+async function loadOrganizationsFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('organizations').select('*');
+    if (error) { console.error('[Supabase] Failed to load organizations:', error.message); return; }
+    if (data && data.length > 0) {
+      organizations.clear();
+      data.forEach((o: any) => {
+        organizations.set(o.id, { id: o.id, name: o.name, status: o.status || 'active', createdAt: o.created_at || Date.now() });
+      });
+      console.log(`[Supabase] Loaded ${data.length} organizations`);
+    }
+  } catch (e) { console.error('[Supabase] loadOrganizationsFromSupabase error:', e); }
+}
+
+async function saveOrganizationToSupabase(org: Organization): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('organizations').upsert({
+      id: org.id, name: org.name, status: org.status, created_at: org.createdAt,
+    });
+    if (error) console.error('[Supabase] saveOrganizationToSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] saveOrganizationToSupabase error:', e); }
+}
+
+async function deleteOrganizationFromSupabase(orgId: string): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('organizations').delete().eq('id', orgId);
+    if (error) console.error('[Supabase] deleteOrganizationFromSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] deleteOrganizationFromSupabase error:', e); }
 }
 
 async function saveAdminUserToSupabase(user: AdminUser): Promise<void> {
@@ -6676,6 +6810,7 @@ async function saveAdminUserToSupabase(user: AdminUser): Promise<void> {
       normal_pin_hash: user.normalPinHash || null,
       duress_pin_hash: user.duressPinHash || null,
       assigned_family_ids: user.assignedFamilyIds || [],
+      organization_id: user.organizationId || null,
     });
     if (error) console.error('[Supabase] saveAdminUserToSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] saveAdminUserToSupabase error:', e); }
@@ -6809,6 +6944,7 @@ async function loadPTTChannelsFromSupabase(): Promise<void> {
         allowedRoles: c.allowed_roles || [], isActive: c.is_active,
         isDefault: c.is_default, createdBy: c.created_by,
         createdAt: c.created_at, members: c.members || [],
+        organizationId: c.organization_id || undefined,
       }));
       console.log(`[Supabase] Loaded ${data.length} PTT channels`);
     }
@@ -6822,6 +6958,7 @@ async function savePTTChannelToSupabase(channel: PTTChannelServer): Promise<void
       allowed_roles: channel.allowedRoles, is_active: channel.isActive,
       is_default: channel.isDefault, created_by: channel.createdBy,
       created_at: channel.createdAt, members: channel.members || [],
+      organization_id: channel.organizationId || null,
     });
     if (error) console.error('[Supabase] savePTTChannelToSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] savePTTChannelToSupabase error:', e); }
@@ -6883,6 +7020,7 @@ async function loadSectorsFromSupabase(): Promise<void> {
         center: s.center || undefined, radiusMeters: s.radius_meters ?? undefined,
         points: s.points || undefined,
         createdBy: s.created_by, createdAt: s.created_at, updatedAt: s.updated_at,
+        organizationId: s.organization_id || undefined,
       }));
       console.log(`[Supabase] Loaded ${data.length} sectors`);
     }
@@ -6896,6 +7034,7 @@ async function saveSectorToSupabase(s: Sector): Promise<void> {
       center: s.center || null, radius_meters: s.radiusMeters ?? null,
       points: s.points || null,
       created_by: s.createdBy, created_at: s.createdAt, updated_at: s.updatedAt,
+      organization_id: s.organizationId || null,
     });
     if (error) console.error('[Supabase] saveSectorToSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] saveSectorToSupabase error:', e); }
@@ -7790,10 +7929,10 @@ app.get('/api/itineraries/upcoming', requireAuth, (req, res) => {
   if (!isStaff) return res.status(403).json({ error: 'Staff only' });
   const from = req.query.from ? Number(req.query.from) : Date.now();
   const to = req.query.to ? Number(req.query.to) : from + 7 * 24 * 60 * 60 * 1000;
-  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  const callerAccess = { id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
   const results: TravelItinerary[] = [];
   for (const [userId, list] of travelItineraries) {
-    if (!canAccessFamily(callerAccess, userId)) continue;
+    if (!canAccessUser(callerAccess, userId)) continue;
     for (const it of list) {
       const end = it.returnAt ?? it.departureAt;
       if (it.departureAt <= to && end >= from) results.push(it);
@@ -7812,11 +7951,11 @@ app.get('/api/known-people/all', requireAuth, (req, res) => {
   const caller = req.supabaseUser!;
   const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder';
   if (!isStaff) return res.status(403).json({ error: 'Staff only' });
-  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  const callerAccess = { id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
   const result: any[] = [];
   for (const [addressId, people] of knownPeople) {
     for (const p of people) {
-      if (!canAccessFamily(callerAccess, p.userId)) continue;
+      if (!canAccessUser(callerAccess, p.userId)) continue;
       const owner = adminUsers.get(p.userId);
       const addr = (userAddresses.get(p.userId) || []).find(a => a.id === addressId);
       result.push({
@@ -7843,14 +7982,14 @@ app.get('/api/entity-search', requireAuth, (req, res) => {
   if (!isStaff) return res.status(403).json({ error: 'Staff only' });
   const query = ((req.query.q as string) || '').trim().toLowerCase();
   if (query.length < 2) return res.json([]);
-  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  const callerAccess = { id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
 
   const results: any[] = [];
 
   for (const entry of blackbookEntries.values()) {
     // Entries not linked to any specific family are general threats, not
     // confidential to one client — only gate entries that ARE linked.
-    if (entry.linkedUserId && !canAccessFamily(callerAccess, entry.linkedUserId)) continue;
+    if (entry.linkedUserId && !canAccessUser(callerAccess, entry.linkedUserId)) continue;
     const haystacks = [
       `${entry.firstName} ${entry.lastName}`,
       ...entry.aliases,
@@ -7871,7 +8010,7 @@ app.get('/api/entity-search', requireAuth, (req, res) => {
 
   for (const [addressId, people] of knownPeople) {
     for (const p of people) {
-      if (!canAccessFamily(callerAccess, p.userId)) continue;
+      if (!canAccessUser(callerAccess, p.userId)) continue;
       const haystack = [p.name, p.company, p.phone, p.vehiclePlate].filter(Boolean).join(' ').toLowerCase();
       if (haystack.includes(query)) {
         const owner = adminUsers.get(p.userId);
@@ -7891,7 +8030,7 @@ app.get('/api/entity-search', requireAuth, (req, res) => {
     // Only civilian ('user') accounts are family-confidential data; staff
     // directory entries (dispatcher/responder/admin) aren't a client's
     // private information and stay visible to any staff searching.
-    if (u.role === 'user' && !canAccessFamily(callerAccess, u.id)) continue;
+    if (u.role === 'user' && !canAccessUser(callerAccess, u.id)) continue;
     const haystack = [u.name, u.email, u.phoneMobile, u.phoneLandline].filter(Boolean).join(' ').toLowerCase();
     if (haystack.includes(query)) {
       results.push({
@@ -7916,13 +8055,13 @@ app.get('/api/interventions/upcoming', requireAuth, (req, res) => {
   if (!isStaff) return res.status(403).json({ error: 'Staff only' });
   const from = req.query.from ? Number(req.query.from) : Date.now();
   const to = req.query.to ? Number(req.query.to) : from + 7 * 24 * 60 * 60 * 1000;
-  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  const callerAccess = { id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
   const occurrences: any[] = [];
 
   for (const [addressId, list] of plannedInterventions) {
     for (const iv of list) {
       if (iv.status === 'cancelled') continue;
-      if (!canAccessFamily(callerAccess, iv.userId)) continue;
+      if (!canAccessUser(callerAccess, iv.userId)) continue;
       const owner = adminUsers.get(iv.userId);
       const addr = (userAddresses.get(iv.userId) || []).find(a => a.id === addressId);
       const person = iv.personId ? (knownPeople.get(addressId) || []).find(p => p.id === iv.personId) : undefined;
@@ -8218,8 +8357,8 @@ app.get('/api/main-courante', requireAuth, async (req, res) => {
   if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
   const userId = req.query.userId as string;
   if (!userId) return res.status(400).json({ error: 'userId required' });
-  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
-  if (!canAccessFamily(callerAccess, userId)) return res.status(403).json({ error: 'Not authorized for this family' });
+  const callerAccess = { id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  if (!canAccessUser(callerAccess, userId)) return res.status(403).json({ error: 'Not authorized for this family' });
   const days = Math.min(Number(req.query.days) || 30, 365);
   const now = Date.now();
   const ownerIds = Array.from(new Set([userId, ...getFamilyMemberIds(userId)]));
@@ -8232,8 +8371,8 @@ app.post('/api/main-courante', requireAuth, async (req, res) => {
   if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
   const { userId, residenceId, residenceLabel, text } = req.body;
   if (!userId || !text || !String(text).trim()) return res.status(400).json({ error: 'userId and text required' });
-  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
-  if (!canAccessFamily(callerAccess, userId)) return res.status(403).json({ error: 'Not authorized for this family' });
+  const callerAccess = { id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  if (!canAccessUser(callerAccess, userId)) return res.status(403).json({ error: 'Not authorized for this family' });
   const note: MainCouranteNote = {
     id: uuidv4(), timestamp: Date.now(), ownerId: userId,
     residenceId: residenceId || undefined, residenceLabel: residenceLabel || undefined,
@@ -8360,8 +8499,8 @@ app.post('/admin/threat-analysis/generate', requireAuth, requireRole('dispatcher
   const caller = req.supabaseUser!;
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: 'userId required' });
-  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
-  if (!canAccessFamily(callerAccess, userId)) return res.status(403).json({ error: 'Not authorized for this family' });
+  const callerAccess = { id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  if (!canAccessUser(callerAccess, userId)) return res.status(403).json({ error: 'Not authorized for this family' });
 
   const owner = adminUsers.get(userId);
   if (!owner) return res.status(404).json({ error: 'User not found' });
@@ -8399,8 +8538,8 @@ app.get('/admin/threat-analysis', requireAuth, requireRole('dispatcher'), (req, 
   const caller = req.supabaseUser!;
   const userId = req.query.userId as string;
   if (!userId) return res.status(400).json({ error: 'userId required' });
-  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
-  if (!canAccessFamily(callerAccess, userId)) return res.status(403).json({ error: 'Not authorized for this family' });
+  const callerAccess = { id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  if (!canAccessUser(callerAccess, userId)) return res.status(403).json({ error: 'Not authorized for this family' });
   const limit = Math.min(Number(req.query.limit) || 20, 100);
   const list = Array.from(threatAnalyses.values())
     .filter(a => a.ownerId === userId)
@@ -8414,8 +8553,8 @@ app.put('/admin/threat-analysis/:id/items/:itemId/acknowledge', requireAuth, req
   const caller = req.supabaseUser!;
   const analysis = threatAnalyses.get(req.params.id as string);
   if (!analysis) return res.status(404).json({ error: 'Analysis not found' });
-  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
-  if (!canAccessFamily(callerAccess, analysis.ownerId)) return res.status(403).json({ error: 'Not authorized for this family' });
+  const callerAccess = { id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  if (!canAccessUser(callerAccess, analysis.ownerId)) return res.status(403).json({ error: 'Not authorized for this family' });
   const item = analysis.flaggedItems.find(i => i.id === req.params.itemId);
   if (!item) return res.status(404).json({ error: 'Item not found' });
   item.acknowledged = true;
@@ -8435,11 +8574,11 @@ function enrichBlackbookEntry(entry: BlackbookEntry) {
 app.get('/api/blackbook', requireAuth, (req, res) => {
   const caller = req.supabaseUser!;
   if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
-  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  const callerAccess = { id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
   // Entries not linked to any specific family are general threats, not
   // confidential to one client — only gate entries that ARE linked.
   const entries = Array.from(blackbookEntries.values())
-    .filter(e => !e.linkedUserId || canAccessFamily(callerAccess, e.linkedUserId))
+    .filter(e => !e.linkedUserId || canAccessUser(callerAccess, e.linkedUserId))
     .sort((a, b) => b.updatedAt - a.updatedAt).map(enrichBlackbookEntry);
   res.json(entries);
 });
@@ -8450,8 +8589,8 @@ app.get('/api/blackbook/:id', requireAuth, (req, res) => {
   if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
   const entry = blackbookEntries.get(req.params.id as string);
   if (!entry) return res.status(404).json({ error: 'Entry not found' });
-  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
-  if (entry.linkedUserId && !canAccessFamily(callerAccess, entry.linkedUserId)) return res.status(403).json({ error: 'Not authorized for this entry' });
+  const callerAccess = { id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  if (entry.linkedUserId && !canAccessUser(callerAccess, entry.linkedUserId)) return res.status(403).json({ error: 'Not authorized for this entry' });
   res.json(enrichBlackbookEntry(entry));
 });
 
@@ -8589,8 +8728,12 @@ function checkBlackbookCrossResidencePattern(entry: BlackbookEntry, priorDistinc
     type: 'blackbookPatternDetected',
     data: { entryId: entry.id, name, riskLevel: entry.riskLevel, residenceCount: distinctResidences.size, residences: Array.from(distinctResidences.values()), title, body },
   };
-  broadcastToRole('dispatcher', payload);
-  broadcastToRole('admin', payload);
+  // BlackbookEntry has no organizationId of its own yet (Blackbook org-scoping
+  // is deferred, see Phase 1 plan section 5) — best-effort via the entry's
+  // creator, since residence-linked sightings should belong to one org.
+  const blackbookOrgId = adminUsers.get(entry.createdBy)?.organizationId;
+  broadcastToOrgRole(blackbookOrgId, 'dispatcher', payload);
+  broadcastToOrgRole(blackbookOrgId, 'admin', payload);
   notifyStaffBlackbookPatternPush(title, body).catch(() => {});
   console.log(`[Blackbook] Cross-residence pattern detected for ${name}: ${distinctResidences.size} residences`);
 }
@@ -8751,15 +8894,15 @@ app.get('/api/users/:id/addresses', requireAuth, (req, res) => {
   const isSelf = caller.id === targetId;
   const isFamilyMember = getFamilyMemberIds(targetId).includes(caller.id);
   const isStaff = caller.role === 'dispatcher' || caller.role === 'responder' || caller.role === 'admin';
-  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
-  if (!isSelf && !isFamilyMember && !(isStaff && canAccessFamily(callerAccess, targetId))) {
+  const callerAccess = { id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  if (!isSelf && !isFamilyMember && !(isStaff && canAccessUser(callerAccess, targetId))) {
     return res.status(403).json({ error: 'Not authorized' });
   }
   const addresses = userAddresses.get(targetId) || [];
   res.json(addresses);
 });
 
-function computeAllResidences(caller?: { id: string; role: string; assignedFamilyIds?: string[] }): { id: string; userId: string; latitude: number; longitude: number; label: string; address: string; userName: string }[] {
+function computeAllResidences(caller?: { id: string; role: string; organizationId?: string; assignedFamilyIds?: string[] }): { id: string; userId: string; latitude: number; longitude: number; label: string; address: string; userName: string }[] {
   const now = Date.now();
   const result: { id: string; userId: string; latitude: number; longitude: number; label: string; address: string; userName: string }[] = [];
   for (const [userId, addresses] of userAddresses) {
@@ -8769,7 +8912,7 @@ function computeAllResidences(caller?: { id: string; role: string; assignedFamil
     // deleted account's old address isn't useful data anyway.
     const owner = adminUsers.get(userId);
     if (!owner) continue;
-    if (caller && !canAccessFamily(caller, userId)) continue;
+    if (caller && !canAccessUser(caller, userId)) continue;
     const userName = owner.name;
     for (const a of addresses) {
       if (a.latitude == null || a.longitude == null) continue;
@@ -8955,8 +9098,8 @@ app.get('/api/family/residences', requireAuth, (req, res) => {
 // the house-pin detail view on the dispatch console's map tab.
 app.get('/dispatch/residences-detailed', (req, res) => {
   const caller = req.supabaseUser!;
-  const callerAccess = { id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
-  const ownerIds = Array.from(userAddresses.keys()).filter(ownerId => canAccessFamily(callerAccess, ownerId));
+  const callerAccess = { id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
+  const ownerIds = Array.from(userAddresses.keys()).filter(ownerId => canAccessUser(callerAccess, ownerId));
   res.json(computeResidenceSummaries(ownerIds, true));
 });
 
@@ -8966,7 +9109,7 @@ app.get('/dispatch/residences-detailed', (req, res) => {
 app.get('/api/all-residences', requireAuth, (req, res) => {
   const caller = req.supabaseUser!;
   if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
-  res.json(computeAllResidences({ id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds }));
+  res.json(computeAllResidences({ id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds }));
 });
 
 // GET /dispatch/all-residences — every geocoded address across every user
@@ -8975,7 +9118,7 @@ app.get('/api/all-residences', requireAuth, (req, res) => {
 // instead of a hardcoded city.
 app.get('/dispatch/all-residences', (req, res) => {
   const caller = req.supabaseUser!;
-  res.json(computeAllResidences({ id: caller.id, role: caller.role, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds }));
+  res.json(computeAllResidences({ id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds }));
 });
 
 // POST /api/users/:id/addresses
