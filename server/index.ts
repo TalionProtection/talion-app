@@ -2525,10 +2525,13 @@ app.post('/auth/login', async (req, res) => {
 // user on the platform. An admin resetting someone else's password already
 // has PUT /admin/users/:id for that (protected since Phase 0/2), so this
 // route has no legitimate reason to ever target anyone but the caller.
-app.put('/auth/change-password', requireAuth, (req, res) => {
+app.put('/auth/change-password', requireAuth, async (req, res) => {
   const { currentPassword, newPassword } = req.body;
   if (!newPassword) {
     return res.status(400).json({ error: 'newPassword is required' });
+  }
+  if (newPassword.length < 6) {
+    return res.status(400).json({ error: 'Password must be at least 6 characters' });
   }
   const userId = req.supabaseUser!.id;
   const user = adminUsers.get(userId);
@@ -2539,6 +2542,15 @@ app.put('/auth/change-password', requireAuth, (req, res) => {
     if (!currentPassword || !bcrypt.compareSync(currentPassword, user.passwordHash)) {
       return res.status(401).json({ error: 'Current password is incorrect' });
     }
+  }
+  // The bcrypt hash below only backs the legacy /auth/login REST route — the
+  // app itself signs in directly against Supabase Auth
+  // (supabase.auth.signInWithPassword), so THAT password is the one that
+  // actually has to change for this to take effect on the next login.
+  const { error: authUpdateError } = await supabaseAdmin.auth.admin.updateUserById(userId, { password: newPassword });
+  if (authUpdateError) {
+    console.error('[ChangePassword] Supabase Auth update error:', authUpdateError.message);
+    return res.status(500).json({ error: 'Impossible de mettre à jour le mot de passe. Réessayez.' });
   }
   user.passwordHash = bcrypt.hashSync(newPassword, 10);
   adminUsers.set(user.id, user);
