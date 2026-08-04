@@ -4555,7 +4555,7 @@ app.get('/dispatch/family-groups', (req, res) => {
 // /dispatch prefix's requireRole('dispatcher') would otherwise block them).
 app.get('/api/family-groups', requireAuth, (req, res) => {
   const caller = req.supabaseUser!;
-  if (caller.role !== 'responder' && caller.role !== 'dispatcher' && caller.role !== 'admin') {
+  if (caller.role !== 'responder' && caller.role !== 'dispatcher' && caller.role !== 'admin' && caller.role !== 'superadmin') {
     return res.status(403).json({ error: 'Not authorized' });
   }
   res.json(buildFamilyGroupsOverview({ id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds }));
@@ -6803,7 +6803,7 @@ app.get('/api/ptt/channels', requireAuth, (req, res) => {
 // "dispatch decides who's in the group."
 app.post('/api/ptt/channels', requireAuth, (req, res) => {
   const caller = req.supabaseUser!;
-  if (caller.role !== 'dispatcher' && caller.role !== 'admin') {
+  if (caller.role !== 'dispatcher' && caller.role !== 'admin' && caller.role !== 'superadmin') {
     return res.status(403).json({ error: 'Only dispatchers and admins can create channels' });
   }
   const { name, description, members } = req.body;
@@ -6833,7 +6833,7 @@ app.post('/api/ptt/channels', requireAuth, (req, res) => {
 // DELETE /api/ptt/channels/:id - delete a custom channel (dispatcher/admin only)
 app.delete('/api/ptt/channels/:id', requireAuth, (req, res) => {
   const caller = req.supabaseUser!;
-  if (caller.role !== 'dispatcher' && caller.role !== 'admin') {
+  if (caller.role !== 'dispatcher' && caller.role !== 'admin' && caller.role !== 'superadmin') {
     return res.status(403).json({ error: 'Only dispatchers and admins can delete channels' });
   }
   const id = req.params.id as string;
@@ -6901,7 +6901,7 @@ app.post('/api/ptt/channels/direct', requireAuth, (req, res) => {
 // which every client gets pushed to open.
 app.post('/api/ptt/emergency', requireAuth, async (req, res) => {
   const caller = req.supabaseUser!;
-  if (caller.role !== 'dispatcher' && caller.role !== 'admin') {
+  if (caller.role !== 'dispatcher' && caller.role !== 'admin' && caller.role !== 'superadmin') {
     return res.status(403).json({ error: 'Only dispatchers and admins can trigger emergency PTT' });
   }
   const senderName = adminUsers.get(caller.id)?.name || caller.id;
