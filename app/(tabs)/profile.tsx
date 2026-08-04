@@ -58,6 +58,12 @@ export default function ProfileScreen() {
   const [setupDuressPin, setSetupDuressPin] = useState('');
   const [duressSaving, setDuressSaving] = useState(false);
 
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [currentPasswordInput, setCurrentPasswordInput] = useState('');
+  const [newPasswordInput, setNewPasswordInput] = useState('');
+  const [confirmPasswordInput, setConfirmPasswordInput] = useState('');
+  const [passwordSaving, setPasswordSaving] = useState(false);
+
   const markChanged = useCallback(() => setHasChanges(true), []);
 
   const fetchDuressSettings = useCallback(async () => {
@@ -145,6 +151,50 @@ export default function ProfileScreen() {
       },
     ]);
   }, [user]);
+
+  const resetPasswordModal = useCallback(() => {
+    setShowPasswordModal(false);
+    setCurrentPasswordInput('');
+    setNewPasswordInput('');
+    setConfirmPasswordInput('');
+  }, []);
+
+  const handleChangePassword = useCallback(async () => {
+    if (!currentPasswordInput) {
+      Alert.alert('Erreur', 'Veuillez saisir votre mot de passe actuel.');
+      return;
+    }
+    if (newPasswordInput.length < 6) {
+      Alert.alert('Erreur', 'Le nouveau mot de passe doit contenir au moins 6 caractères.');
+      return;
+    }
+    if (newPasswordInput !== confirmPasswordInput) {
+      Alert.alert('Erreur', 'Les deux mots de passe ne correspondent pas.');
+      return;
+    }
+    setPasswordSaving(true);
+    try {
+      const res = await fetchWithTimeout(`${getApiBaseUrl()}/auth/change-password`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(await authHeader()),
+        },
+        body: JSON.stringify({ currentPassword: currentPasswordInput, newPassword: newPasswordInput }),
+        timeout: 10000,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+      resetPasswordModal();
+      if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      Alert.alert('Succès', 'Votre mot de passe a été mis à jour.');
+    } catch (e: any) {
+      Alert.alert('Erreur', e?.message || 'Impossible de modifier le mot de passe.');
+    }
+    setPasswordSaving(false);
+  }, [currentPasswordInput, newPasswordInput, confirmPasswordInput, resetPasswordModal]);
 
   const handleToggleGhostMode = useCallback(async (value: boolean) => {
     if (!user) return;
@@ -532,11 +582,22 @@ export default function ProfileScreen() {
           </View>
         )}
 
-        {/* Security: duress code */}
-        {user.role === 'user' && (
-          <View style={styles.formSection}>
-            <Text style={styles.sectionTitle}>Sécurité</Text>
-            <View style={styles.fieldGroup}>
+        {/* Security: password + duress code */}
+        <View style={styles.formSection}>
+          <Text style={styles.sectionTitle}>Sécurité</Text>
+          <View style={styles.fieldGroup}>
+            <Text style={styles.fieldLabel}>Mot de passe</Text>
+            <Text style={styles.fieldHint}>Modifiez le mot de passe de votre compte.</Text>
+            <Pressable
+              onPress={() => setShowPasswordModal(true)}
+              style={({ pressed }) => [styles.historyRow, { marginTop: 8 }, pressed && { opacity: 0.7 }]}
+            >
+              <Text style={[styles.fieldLabel, { color: '#1e3a5f' }]}>Changer</Text>
+            </Pressable>
+          </View>
+
+          {user.role === 'user' && (
+            <View style={[styles.fieldGroup, { marginTop: 4 }]}>
               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
                 <View style={{ flex: 1, marginRight: 12 }}>
                   <Text style={styles.fieldLabel}>Code de sécurité SOS</Text>
@@ -565,8 +626,8 @@ export default function ProfileScreen() {
                 </Pressable>
               )}
             </View>
-          </View>
-        )}
+          )}
+        </View>
 
         {/* History: archived alerts */}
         <View style={styles.formSection}>
@@ -665,6 +726,60 @@ export default function ProfileScreen() {
               disabled={duressSaving}
             >
               {duressSaving ? <ActivityIndicator color="#fff" /> : <Text style={{ color: '#fff', fontWeight: '700' }}>Enregistrer</Text>}
+            </Pressable>
+          </View>
+        </View>
+      </View>
+    </Modal>
+
+    <Modal visible={showPasswordModal} transparent animationType="fade" onRequestClose={resetPasswordModal}>
+      <View style={styles.duressModalOverlay}>
+        <View style={styles.duressModalContent}>
+          <Text style={styles.duressModalTitle}>Changer le mot de passe</Text>
+          <Text style={[styles.fieldLabel, { marginTop: 16 }]}>Mot de passe actuel</Text>
+          <TextInput
+            style={styles.duressPinInput}
+            value={currentPasswordInput}
+            onChangeText={setCurrentPasswordInput}
+            placeholder="Mot de passe actuel"
+            placeholderTextColor="#9CA3AF"
+            secureTextEntry
+            autoCapitalize="none"
+          />
+          <Text style={styles.fieldLabel}>Nouveau mot de passe</Text>
+          <TextInput
+            style={styles.duressPinInput}
+            value={newPasswordInput}
+            onChangeText={setNewPasswordInput}
+            placeholder="Au moins 6 caractères"
+            placeholderTextColor="#9CA3AF"
+            secureTextEntry
+            autoCapitalize="none"
+          />
+          <Text style={styles.fieldLabel}>Confirmer le nouveau mot de passe</Text>
+          <TextInput
+            style={styles.duressPinInput}
+            value={confirmPasswordInput}
+            onChangeText={setConfirmPasswordInput}
+            placeholder="Répétez le nouveau mot de passe"
+            placeholderTextColor="#9CA3AF"
+            secureTextEntry
+            autoCapitalize="none"
+          />
+          <View style={{ flexDirection: 'row', gap: 12, marginTop: 20 }}>
+            <Pressable
+              style={[styles.duressModalBtn, { backgroundColor: '#F3F4F6' }]}
+              onPress={resetPasswordModal}
+              disabled={passwordSaving}
+            >
+              <Text style={{ color: '#374151', fontWeight: '600' }}>Annuler</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.duressModalBtn, { backgroundColor: '#1e3a5f' }]}
+              onPress={handleChangePassword}
+              disabled={passwordSaving}
+            >
+              {passwordSaving ? <ActivityIndicator color="#fff" /> : <Text style={{ color: '#fff', fontWeight: '700' }}>Enregistrer</Text>}
             </Pressable>
           </View>
         </View>
