@@ -5668,8 +5668,15 @@ function closeDetailModal() {
 // MESSAGING SYSTEM
 // ═══════════════════════════════════════════════════════════
 
-const DISPATCH_USER_ID = 'b8044334-a903-4661-9f77-59fe469d67b3'; // Talion HQ // Jean Moreau — dispatcher
-const DISPATCH_USER_NAME = 'Dispatch Console';
+// Was a hardcoded shared identity ('Jean Moreau — dispatcher') used for
+// every dispatcher regardless of who's actually logged in — the server now
+// verifies and derives the real sender from the session token on every
+// messaging route, so a stale/fake id here would silently mismatch and
+// break "is this my message" bubble styling. Reads the real logged-in
+// user set at login (server/console-login), same source admin-web uses.
+function currentDispatchUser() {
+  try { return JSON.parse(localStorage.getItem('talion_user') || '{}'); } catch (e) { return {}; }
+}
 let msgConversations = [];
 let msgCurrentConvId = null;
 let msgCurrentMessages = [];
@@ -5711,7 +5718,10 @@ async function loadMsgUsers() {
 }
 
 async function loadConversations() {
-  const data = await msgFetch(`/api/messaging/conversations?userId=${DISPATCH_USER_ID}`);
+  // No userId -> every conversation in the caller's own organization,
+  // matching what the shared fake identity used to achieve in practice
+  // (it was a participant in every dispatch-initiated conversation).
+  const data = await msgFetch('/api/messaging/conversations');
   if (data) {
     msgConversations = data.conversations || [];
     renderConversationList();
@@ -5780,7 +5790,7 @@ function renderConversationList() {
 function getConvDisplayName(conv) {
   if (conv.type === 'group') return conv.name || 'Group';
   // Direct: find the other participant
-  const other = (conv.participants || []).find(p => p !== DISPATCH_USER_ID);
+  const other = (conv.participants || []).find(p => p !== currentDispatchUser().id);
   if (other) {
     const user = msgUsers.find(u => u.id === other);
     return user ? user.name : other;
@@ -5848,7 +5858,7 @@ function renderMessages() {
   }
 
   container.innerHTML = msgCurrentMessages.map(m => {
-    const isMine = m.senderId === DISPATCH_USER_ID;
+    const isMine = m.senderId === currentDispatchUser().id;
     const sender = msgUsers.find(u => u.id === m.senderId);
     const senderName = sender ? sender.name : (m.senderName || m.senderId);
     const senderInitial = senderName.charAt(0) || '?';
@@ -5920,8 +5930,8 @@ async function sendDispatchMedia(input, mediaType) {
   
   const formData = new FormData();
   formData.append('file', file);
-  formData.append('senderId', DISPATCH_USER_ID);
-  formData.append('senderName', DISPATCH_USER_NAME);
+  formData.append('senderId', currentDispatchUser().id || '');
+  formData.append('senderName', currentDispatchUser().name || 'Dispatch Console');
   formData.append('mediaType', mediaType);
   if (mediaType === 'document') formData.append('fileName', file.name);
 
@@ -5954,8 +5964,8 @@ async function sendChatMessage() {
   const data = await msgFetch(`/api/messaging/conversations/${msgCurrentConvId}/messages`, {
     method: 'POST',
     body: JSON.stringify({
-      senderId: DISPATCH_USER_ID,
-      senderName: DISPATCH_USER_NAME,
+      senderId: currentDispatchUser().id,
+      senderName: currentDispatchUser().name || 'Dispatch Console',
       content,
     }),
   });
@@ -6014,7 +6024,7 @@ function switchNewConvMode(mode) {
 // Direct users list
 function renderNewConvDirectUsers() {
   const list = document.getElementById('newconvDirectUsers');
-  const users = msgUsers.filter(u => u.id !== DISPATCH_USER_ID);
+  const users = msgUsers.filter(u => u.id !== currentDispatchUser().id);
   list.innerHTML = users.map(u => {
     const color = getRoleColor(u.role);
     const tags = (u.tags || []).map(t => `<span class="newconv-tag">${t}</span>`).join('');
@@ -6034,7 +6044,7 @@ function renderNewConvDirectUsers() {
 // Group users list (with checkboxes)
 function renderNewConvGroupUsers() {
   const list = document.getElementById('newconvGroupUsers');
-  const users = msgUsers.filter(u => u.id !== DISPATCH_USER_ID);
+  const users = msgUsers.filter(u => u.id !== currentDispatchUser().id);
   list.innerHTML = users.map(u => {
     const color = getRoleColor(u.role);
     const checked = newConvSelectedUsers.has(u.id);
@@ -6088,7 +6098,7 @@ function selectConvRole(role) {
 async function startDirectConversation(userId) {
   // Check if conversation already exists
   const existing = msgConversations.find(c =>
-    c.type === 'direct' && c.participants?.includes(userId) && c.participants?.includes(DISPATCH_USER_ID)
+    c.type === 'direct' && c.participants?.includes(userId) && c.participants?.includes(currentDispatchUser().id)
   );
   if (existing) {
     closeNewConvModal();
@@ -6100,8 +6110,8 @@ async function startDirectConversation(userId) {
     method: 'POST',
     body: JSON.stringify({
       type: 'direct',
-      createdBy: DISPATCH_USER_ID,
-      participants: [DISPATCH_USER_ID, userId],
+      createdBy: currentDispatchUser().id,
+      participants: [currentDispatchUser().id, userId],
     }),
   });
 
@@ -6117,14 +6127,14 @@ async function createGroupByUsers() {
   if (!name) return alert('Please enter a group name');
   if (newConvSelectedUsers.size === 0) return alert('Please select at least one user');
 
-  const participants = [DISPATCH_USER_ID, ...newConvSelectedUsers];
+  const participants = [currentDispatchUser().id, ...newConvSelectedUsers];
   const data = await msgFetch('/api/messaging/conversations', {
     method: 'POST',
     body: JSON.stringify({
       type: 'group',
       name,
       groupType: 'custom',
-      createdBy: DISPATCH_USER_ID,
+      createdBy: currentDispatchUser().id,
       participants,
     }),
   });
@@ -6144,14 +6154,14 @@ async function createGroupByRole() {
   const roleUsers = msgUsers.filter(u => u.role === newConvSelectedRole).map(u => u.id);
   if (roleUsers.length === 0) return alert(`No users with role "${newConvSelectedRole}"`);
 
-  const participants = [DISPATCH_USER_ID, ...roleUsers];
+  const participants = [currentDispatchUser().id, ...roleUsers];
   const data = await msgFetch('/api/messaging/conversations', {
     method: 'POST',
     body: JSON.stringify({
       type: 'group',
       name,
       groupType: `role:${newConvSelectedRole}`,
-      createdBy: DISPATCH_USER_ID,
+      createdBy: currentDispatchUser().id,
       participants,
     }),
   });
@@ -6174,7 +6184,7 @@ async function createGroupByTags() {
       type: 'group',
       name,
       groupType: `tags:${[...newConvSelectedTags].join(',')}`,
-      createdBy: DISPATCH_USER_ID,
+      createdBy: currentDispatchUser().id,
       tags: [...newConvSelectedTags],
     }),
   });

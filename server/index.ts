@@ -539,6 +539,7 @@ interface Conversation {
   createdAt: number;
   lastMessageTime: number;
   lastMessage: string;
+  organizationId?: string;
 }
 
 type ResponderStatus = 'assigned' | 'accepted' | 'en_route' | 'on_scene';
@@ -1203,15 +1204,20 @@ function handleMessage(
       break;
 
     case 'pttStart':
-    case 'pttEnd':
-      // Diffuser PTT simple à tous les connectés
+    case 'pttEnd': {
+      // Diffuser PTT simple à l'organisation de l'expéditeur uniquement
+      // (auparavant diffusé à tous les clients connectés, toutes
+      // organisations confondues).
+      const pttStartOrgId = userId ? adminUsers.get(userId)?.organizationId : undefined;
       const pttPayload = JSON.stringify({ type: data.type, senderId: data.senderId, senderName: data.senderName, channel: data.channel });
       wss.clients.forEach((client: any) => {
-        if (client !== ws && client.readyState === 1) {
-          client.send(pttPayload);
-        }
+        if (client === ws || client.readyState !== 1) return;
+        const connUid = wsClientMap.get(client);
+        const connUser = connUid ? users.get(connUid) : undefined;
+        if (connUser?.organizationId === pttStartOrgId) client.send(pttPayload);
       });
       break;
+    }
 
     case 'pttStartTalking':
       if (userId && userRole) {
@@ -1765,6 +1771,18 @@ function canAccessUser(caller: { id: string; role: string; organizationId?: stri
 function canAccessOwnedRecord(record: { ownerId: string }, caller: { id: string; role: string; organizationId?: string }): boolean {
   if (!canAccessOrg(caller, adminUsers.get(record.ownerId)?.organizationId)) return false;
   return caller.id === record.ownerId;
+}
+
+// Organization boundary first, hard, no exceptions. Within it: staff
+// (dispatcher/admin/superadmin) sees every conversation in their own
+// organization — matches the existing behavior of always relaying every
+// message to dispatch/admin for oversight, just no longer crossing the
+// organization boundary to do it. A non-staff caller must actually be a
+// participant (explicit or resolved via role/tag filters).
+function canAccessConversation(conv: Conversation, caller: { id: string; role: string; organizationId?: string }): boolean {
+  if (!canAccessOrg(caller, conv.organizationId)) return false;
+  if (caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'superadmin') return true;
+  return conv.participantIds.includes(caller.id) || resolveGroupParticipants(conv, conv.organizationId).includes(caller.id);
 }
 
 // POST /api/access/emergency-override — break-glass: temporarily lifts the
@@ -5219,18 +5237,22 @@ app.get('/dispatch/map/all', (req, res) => {
 });
 // ─── Messaging REST API ─────────────────────────────────────────────────
 
-// Helper: resolve group participants dynamically
-function resolveGroupParticipants(conv: Conversation): string[] {
+// Helper: resolve group participants dynamically. organizationId is
+// required (not optional) specifically so tsc flags every call site that
+// doesn't pass one — role/tag-filtered groups previously resolved via
+// adminUsers.forEach with no org check at all, silently mixing every
+// tenant's staff into "all dispatchers"/"all tag X" groups.
+function resolveGroupParticipants(conv: Conversation, organizationId: string | undefined): string[] {
   const ids = new Set(conv.participantIds);
   const activeStatuses = ['active', 'available', 'on_duty'];
   if (conv.filterRole) {
     adminUsers.forEach((u) => {
-      if (u.role === conv.filterRole && activeStatuses.includes(u.status)) ids.add(u.id);
+      if (u.organizationId === organizationId && u.role === conv.filterRole && activeStatuses.includes(u.status)) ids.add(u.id);
     });
   }
   if (conv.filterTags && conv.filterTags.length > 0) {
     adminUsers.forEach((u) => {
-      if (activeStatuses.includes(u.status) && u.tags && conv.filterTags!.some(t => u.tags!.includes(t))) ids.add(u.id);
+      if (u.organizationId === organizationId && activeStatuses.includes(u.status) && u.tags && conv.filterTags!.some(t => u.tags!.includes(t))) ids.add(u.id);
     });
   }
   return Array.from(ids);
@@ -5471,13 +5493,21 @@ app.post('/api/sos/duress-check', requireAuth, (req, res) => {
   res.status(401).json({ result: 'invalid' });
 });
 
-// GET /api/conversations?userId=xxx - list conversations for a user
+// GET /api/conversations?userId=xxx - list conversations for a user. userId
+// defaults to the caller; requesting someone else's requires staff + same org.
 app.get('/api/conversations', (req, res) => {
-  const userId = req.query.userId as string;
-  if (!userId) return res.status(400).json({ error: 'userId required' });
+  const caller = req.supabaseUser!;
+  const userId = (req.query.userId as string) || caller.id;
+  if (userId !== caller.id) {
+    const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'superadmin';
+    if (!isStaff || !canAccessOrg(caller, adminUsers.get(userId)?.organizationId)) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+  }
   const userConvos: any[] = [];
   conversations.forEach((conv) => {
-    const allParticipants = resolveGroupParticipants(conv);
+    if (!canAccessOrg(caller, conv.organizationId)) return;
+    const allParticipants = resolveGroupParticipants(conv, conv.organizationId);
     if (allParticipants.includes(userId) || conv.createdBy === userId) {
       const convMessages = messages.get(conv.id) || [];
       const lastMsg = convMessages.length > 0 ? convMessages[convMessages.length - 1] : null;
@@ -5506,17 +5536,24 @@ app.get('/api/conversations', (req, res) => {
 
 // POST /api/conversations - create a conversation (direct or group)
 app.post('/api/conversations', (req, res) => {
-  const { type, name, participantIds, filterRole, filterTags, createdBy } = req.body;
-  if (!createdBy) return res.status(400).json({ error: 'createdBy required' });
+  const { type, name, participantIds, filterRole, filterTags } = req.body;
+  const caller = req.supabaseUser!;
+  const createdBy = caller.id;
   if (!type) return res.status(400).json({ error: 'type required (direct or group)' });
+  // Never trust participantIds from the client beyond filtering to the
+  // caller's own organization — closes both identity spoofing (any id, any
+  // role) and cross-org conversation creation in one pass.
+  const orgParticipantIds = Array.isArray(participantIds)
+    ? participantIds.filter((id: string) => id === createdBy || adminUsers.get(id)?.organizationId === caller.organizationId)
+    : [];
 
   // For direct conversations, check if one already exists between these two users
-  if (type === 'direct' && participantIds && participantIds.length === 2) {
-    const sorted = [...participantIds].sort();
+  if (type === 'direct' && orgParticipantIds.length === 2 && orgParticipantIds.includes(createdBy)) {
+    const sorted = [...orgParticipantIds].sort();
     const existingId = `dm-${sorted[0]}-${sorted[1]}`;
     const existing = conversations.get(existingId);
     if (existing) return res.json(existing);
-    
+
     const conv: Conversation = {
       id: existingId,
       type: 'direct',
@@ -5526,6 +5563,7 @@ app.post('/api/conversations', (req, res) => {
       createdAt: Date.now(),
       lastMessageTime: Date.now(),
       lastMessage: '',
+      organizationId: caller.organizationId,
     };
     conversations.set(conv.id, conv);
     messages.set(conv.id, []);
@@ -5538,13 +5576,14 @@ app.post('/api/conversations', (req, res) => {
     id: convId,
     type: 'group',
     name: name || 'Group Chat',
-    participantIds: participantIds || [createdBy],
+    participantIds: orgParticipantIds.length > 0 ? orgParticipantIds : [createdBy],
     filterRole: filterRole || undefined,
     filterTags: filterTags || undefined,
     createdBy,
     createdAt: Date.now(),
     lastMessageTime: Date.now(),
     lastMessage: '',
+    organizationId: caller.organizationId,
   };
   conversations.set(conv.id, conv);
   messages.set(conv.id, []);
@@ -5570,9 +5609,10 @@ app.post('/api/conversations', (req, res) => {
 app.post('/api/conversations/:id/media', uploadMedia.single('file'), async (req: any, res) => {
   const conv = conversations.get(req.params.id);
   if (!conv) return res.status(404).json({ error: 'Conversation not found' });
+  if (!canAccessConversation(conv, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  const { senderId, senderName, mediaType } = req.body;
-  if (!senderId) return res.status(400).json({ error: 'senderId required' });
+  const { senderName, mediaType } = req.body;
+  const senderId = req.supabaseUser!.id;
 
   const senderUser = adminUsers.get(senderId);
 
@@ -5620,7 +5660,7 @@ app.post('/api/conversations/:id/media', uploadMedia.single('file'), async (req:
   conversations.set(conv.id, conv);
   saveConversationToSupabase(conv).catch(() => {});
 
-  const allParticipants = resolveGroupParticipants(conv);
+  const allParticipants = resolveGroupParticipants(conv, conv.organizationId);
   const wsPayload = JSON.stringify({ type: 'newMessage', data: { ...msg, conversationName: conv.name, conversationType: conv.type } });
   allParticipants.forEach(pid => {
     const conns = userConnections.get(pid);
@@ -5643,8 +5683,8 @@ app.post('/api/conversations/:id/media', uploadMedia.single('file'), async (req:
 app.put('/api/conversations/:id/read', async (req, res) => {
   const conv = conversations.get(req.params.id);
   if (!conv) return res.status(404).json({ error: 'Conversation not found' });
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ error: 'userId required' });
+  if (!canAccessConversation(conv, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
+  const userId = req.supabaseUser!.id;
   const unreadCounts = (conv as any).unreadCounts || {};
   unreadCounts[userId] = 0;
   (conv as any).unreadCounts = unreadCounts;
@@ -5657,6 +5697,7 @@ app.put('/api/conversations/:id/read', async (req, res) => {
 app.get('/api/conversations/:id/messages', async (req, res) => {
   const conv = conversations.get(req.params.id);
   if (!conv) return res.status(404).json({ error: 'Conversation not found' });
+  if (!canAccessConversation(conv, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
   if (!messages.has(conv.id)) {
     try {
       const { data } = await supabaseAdmin.from('messages')
@@ -5683,8 +5724,10 @@ app.get('/api/conversations/:id/messages', async (req, res) => {
 app.post('/api/conversations/:id/messages', (req, res) => {
   const conv = conversations.get(req.params.id);
   if (!conv) return res.status(404).json({ error: 'Conversation not found' });
-  const { senderId, text, type: msgType } = req.body;
-  if (!senderId || !text) return res.status(400).json({ error: 'senderId and text required' });
+  if (!canAccessConversation(conv, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
+  const { text, type: msgType } = req.body;
+  const senderId = req.supabaseUser!.id;
+  if (!text) return res.status(400).json({ error: 'text required' });
 
   const senderUser = adminUsers.get(senderId);
   const msg: ChatMessage = {
@@ -5706,7 +5749,7 @@ app.post('/api/conversations/:id/messages', (req, res) => {
   conv.lastMessage = text;
   conv.lastMessageTime = msg.timestamp;
   // Incrémenter unread pour tous les participants sauf l'expéditeur
-  const allPartsForUnread = resolveGroupParticipants(conv);
+  const allPartsForUnread = resolveGroupParticipants(conv, conv.organizationId);
   const unreadCounts: Record<string, number> = (conv as any).unreadCounts || {};
   for (const pid of allPartsForUnread) {
     if (pid !== senderId) {
@@ -5720,11 +5763,12 @@ app.post('/api/conversations/:id/messages', (req, res) => {
   supabaseAdmin.from('conversations').update({ unread_counts: unreadCounts }).eq('id', conv.id).then(() => {}).catch(() => {});
 
   // Broadcast to all participants via WebSocket
-  const allParticipants = resolveGroupParticipants(conv);
-  const wsPayload = JSON.stringify({
+  const allParticipants = resolveGroupParticipants(conv, conv.organizationId);
+  const wsMessage = {
     type: 'newMessage',
     data: { ...msg, conversationName: conv.name, conversationType: conv.type },
-  });
+  };
+  const wsPayload = JSON.stringify(wsMessage);
   allParticipants.forEach(pid => {
     const conns = userConnections.get(pid);
     if (conns) {
@@ -5733,10 +5777,13 @@ app.post('/api/conversations/:id/messages', (req, res) => {
       });
     }
   });
-  // Also broadcast to all dispatcher connections (so dispatch console always receives)
+  // Also relay to dispatch/admin of this conversation's own organization
+  // (so dispatch console always receives) — previously an unscoped
+  // userConnections.forEach that reached every org's dispatchers/admins.
+  // Skips anyone already reached via allParticipants above, same as before.
   userConnections.forEach((conns, uid) => {
     const u = adminUsers.get(uid);
-    if (u && (u.role === 'dispatcher' || u.role === 'admin') && !allParticipants.includes(uid)) {
+    if (u && (u.role === 'dispatcher' || u.role === 'admin') && u.organizationId === conv.organizationId && !allParticipants.includes(uid)) {
       conns.forEach(ws => {
         try { ws.send(wsPayload); } catch (e) { /* ignore */ }
       });
@@ -5757,33 +5804,38 @@ app.post('/api/conversations/:id/messages', (req, res) => {
 // ─── Messaging Alias Routes (for dispatch console) ─────────────────────
 
 // GET /api/messaging/users - list all users with tags
-app.get('/api/messaging/users', (_req, res) => {
-  const users = Array.from(adminUsers.values()).map(u => ({
-    id: u.id,
-    name: u.name,
-    role: u.role,
-    tags: u.tags || [],
-    status: u.status,
-  }));
+app.get('/api/messaging/users', (req, res) => {
+  const users = Array.from(adminUsers.values())
+    .filter(u => canAccessOrg(req.supabaseUser!, u.organizationId))
+    .map(u => ({
+      id: u.id,
+      name: u.name,
+      role: u.role,
+      tags: u.tags || [],
+      status: u.status,
+    }));
   res.json({ users });
 });
 
 // GET /api/messaging/conversations - alias for /api/conversations
 app.get('/api/messaging/conversations', (req, res) => {
+  const caller = req.supabaseUser!;
   const userId = req.query.userId as string;
-  const allConvs = Array.from(conversations.values());
+  // No userId -> every conversation of the caller's own organization
+  // (previously every conversation of every organization on the platform).
+  const orgConvs = Array.from(conversations.values()).filter(c => canAccessOrg(caller, c.organizationId));
   const filtered = userId
-    ? allConvs.filter(c => {
-        const participants = resolveGroupParticipants(c);
+    ? orgConvs.filter(c => {
+        const participants = resolveGroupParticipants(c, c.organizationId);
         return participants.includes(userId);
       })
-    : allConvs;
+    : orgConvs;
   const result = filtered.map(c => {
     const msgs = messages.get(c.id) || [];
     const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
     return {
       ...c,
-      participants: resolveGroupParticipants(c),
+      participants: resolveGroupParticipants(c, c.organizationId),
       lastMessage: lastMsg ? lastMsg.text : c.lastMessage,
       lastMessageAt: lastMsg ? new Date(lastMsg.timestamp).toISOString() : (c.lastMessageTime ? new Date(c.lastMessageTime).toISOString() : null),
     };
@@ -5795,15 +5847,23 @@ app.get('/api/messaging/conversations', (req, res) => {
 
 // POST /api/messaging/conversations - create conversation
 app.post('/api/messaging/conversations', (req, res) => {
-  const { type, name, groupType, createdBy, participants, tags } = req.body;
-  if (!type || !createdBy) return res.status(400).json({ error: 'type and createdBy required' });
+  const { type, name, groupType, participants, tags } = req.body;
+  if (!type) return res.status(400).json({ error: 'type required' });
+  const caller = req.supabaseUser!;
+  const createdBy = caller.id;
 
-  let finalParticipants = participants || [];
+  // Client-supplied participants are trusted only for org membership —
+  // filtered, never rejected outright, same reasoning as POST /api/conversations.
+  let finalParticipants: string[] = Array.isArray(participants)
+    ? participants.filter((id: string) => id === createdBy || adminUsers.get(id)?.organizationId === caller.organizationId)
+    : [];
 
-  // If tags are provided, resolve participants by tags
+  // If tags are provided, resolve participants by tags — scoped to the
+  // caller's own organization (previously matched tag names across every
+  // organization's staff roster).
   if (tags && tags.length > 0 && (!participants || participants.length <= 1)) {
     const tagUsers = Array.from(adminUsers.values())
-      .filter(u => u.tags && u.tags.some((t: string) => tags.includes(t)))
+      .filter(u => u.organizationId === caller.organizationId && u.tags && u.tags.some((t: string) => tags.includes(t)))
       .map(u => u.id);
     finalParticipants = [...new Set([createdBy, ...tagUsers])];
   }
@@ -5843,6 +5903,7 @@ app.post('/api/messaging/conversations', (req, res) => {
     createdAt: Date.now(),
     lastMessage: '',
     lastMessageTime: Date.now(),
+    organizationId: caller.organizationId,
   };
 
   conversations.set(conv.id, conv);
@@ -5874,6 +5935,7 @@ app.post('/api/messaging/conversations', (req, res) => {
 app.get('/api/messaging/conversations/:id/messages', async (req, res) => {
   const conv = conversations.get(req.params.id);
   if (!conv) return res.status(404).json({ error: 'Conversation not found' });
+  if (!canAccessConversation(conv, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
   // Si pas en mémoire, charger depuis Supabase
   if (!messages.has(conv.id)) {
     try {
@@ -5914,8 +5976,10 @@ app.get('/api/messaging/conversations/:id/messages', async (req, res) => {
 app.post('/api/messaging/conversations/:id/messages', (req, res) => {
   const conv = conversations.get(req.params.id);
   if (!conv) return res.status(404).json({ error: 'Conversation not found' });
-  const { senderId, senderName, content } = req.body;
-  if (!senderId || !content) return res.status(400).json({ error: 'senderId and content required' });
+  if (!canAccessConversation(conv, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
+  const { senderName, content } = req.body;
+  const senderId = req.supabaseUser!.id;
+  if (!content) return res.status(400).json({ error: 'content required' });
 
   const senderUser = adminUsers.get(senderId);
   const msg: ChatMessage = {
@@ -5937,7 +6001,7 @@ app.post('/api/messaging/conversations/:id/messages', (req, res) => {
   conv.lastMessageTime = msg.timestamp;
   // Incrémenter unread pour tous les participants sauf l'expéditeur
   const unreadCountsMsg: Record<string, number> = (conv as any).unreadCounts || {};
-  const allPartsMsg = resolveGroupParticipants(conv);
+  const allPartsMsg = resolveGroupParticipants(conv, conv.organizationId);
   for (const pid of allPartsMsg) {
     if (pid !== senderId) {
       unreadCountsMsg[pid] = (unreadCountsMsg[pid] || 0) + 1;
@@ -5949,7 +6013,7 @@ app.post('/api/messaging/conversations/:id/messages', (req, res) => {
   supabaseAdmin.from('conversations').update({ unread_counts: unreadCountsMsg }).eq('id', conv.id).then(() => {}).catch(() => {});
 
   // Broadcast to all participants via WebSocket
-  const allParticipants = resolveGroupParticipants(conv);
+  const allParticipants = resolveGroupParticipants(conv, conv.organizationId);
   const wsPayload = JSON.stringify({
     type: 'newMessage',
     data: { ...msg, content: msg.text, conversationName: conv.name, conversationType: conv.type },
@@ -5962,10 +6026,11 @@ app.post('/api/messaging/conversations/:id/messages', (req, res) => {
       });
     }
   });
-  // Also broadcast to all dispatcher/admin connections
+  // Also broadcast to dispatcher/admin connections of this conversation's
+  // own organization (previously reached every org's dispatchers/admins).
   userConnections.forEach((conns, uid) => {
     const u = adminUsers.get(uid);
-    if (u && (u.role === 'dispatcher' || u.role === 'admin') && !allParticipants.includes(uid)) {
+    if (u && (u.role === 'dispatcher' || u.role === 'admin') && u.organizationId === conv.organizationId && !allParticipants.includes(uid)) {
       conns.forEach(ws => {
         try { ws.send(wsPayload); } catch (e) { /* ignore */ }
       });
@@ -5987,9 +6052,12 @@ app.post('/api/messaging/conversations/:id/messages', (req, res) => {
 });
 
 // GET /api/messaging/tags - list all available tags
-app.get('/api/messaging/tags', (_req, res) => {
+app.get('/api/messaging/tags', (req, res) => {
+  const caller = req.supabaseUser!;
   const tagSet = new Set<string>();
-  adminUsers.forEach(u => (u.tags || []).forEach((t: string) => tagSet.add(t)));
+  adminUsers.forEach(u => {
+    if (u.organizationId === caller.organizationId) (u.tags || []).forEach((t: string) => tagSet.add(t));
+  });
   res.json({ tags: [...tagSet].sort() });
 });
 // ─── Patrol Reports REST API ─────────────────────────────────────────────────────────────
@@ -6394,8 +6462,14 @@ async function handlePTTTransmit(ws: any, senderId: string, senderRole: string, 
     },
   });
 
-  // Send to all connected clients that have the right role for this channel
-  // Use wsClientMap for O(1) lookup instead of searching userConnections
+  // Send to all connected clients that have the right role for this channel.
+  // Uses the sender's own organization rather than channel.organizationId —
+  // the default seeded channels (emergency/dispatch/responders/general)
+  // have no organizationId of their own (Phase 1, still Phase 3 cleanup
+  // territory), so falling back to the channel's id would silently
+  // broadcast to nobody. Use wsClientMap for O(1) lookup instead of
+  // searching userConnections.
+  const pttTransmitOrgId = adminUsers.get(senderId)?.organizationId;
   wss.clients.forEach((client: any) => {
     if (client.readyState !== 1) return;
     // Don't echo back to sender (they already have it locally)
@@ -6404,6 +6478,7 @@ async function handlePTTTransmit(ws: any, senderId: string, senderRole: string, 
     if (!connUserId) return;
     const connUserData = users.get(connUserId);
     if (!connUserData) return;
+    if (connUserData.organizationId !== pttTransmitOrgId) return;
     const role = connUserData.role || 'user';
     // Admin and dispatcher always receive all PTT messages
     if (role === 'admin' || role === 'dispatcher') {
@@ -6447,9 +6522,12 @@ async function handlePTTTransmit(ws: any, senderId: string, senderRole: string, 
           const targetUser = adminUsers.get(targetUserId);
           if (targetUser) channelUsers = [targetUser];
         } else {
-          // Envoyer à tous les users actifs du canal
-          channelUsers = Array.from(adminUsers.values()).filter(u => 
-            (u.role === 'user' || u.role === 'responder') && u.status === 'active'
+          // Envoyer à tous les users actifs du canal, de l'organisation de
+          // l'expéditeur uniquement — auparavant diffusé à tous les
+          // users/responders actifs de toutes les organisations.
+          const senderOrgId = adminUsers.get(senderId)?.organizationId;
+          channelUsers = Array.from(adminUsers.values()).filter(u =>
+            (u.role === 'user' || u.role === 'responder') && u.status === 'active' && u.organizationId === senderOrgId
           );
         }
         
@@ -6464,6 +6542,7 @@ async function handlePTTTransmit(ws: any, senderId: string, senderRole: string, 
               participantIds: sorted, createdBy: senderId,
               createdAt: Date.now(), lastMessage: '🎙 Message vocal',
               lastMessageTime: Date.now(),
+              organizationId: adminUsers.get(senderId)?.organizationId,
             };
             conversations.set(convId, conv);
             saveConversationToSupabase(conv).catch(() => {});
@@ -6540,6 +6619,9 @@ function handlePTTTalkingState(ws: any, userId: string, userRole: string, data: 
     },
   });
 
+  // Same reasoning as handlePTTTransmit: derive org from the sender, not
+  // channel.organizationId, since the default seeded channels have none.
+  const pttTalkingOrgId = adminUsers.get(userId)?.organizationId;
   wss.clients.forEach((client: any) => {
     if (client.readyState !== 1) return;
     if (client === ws) return;
@@ -6547,6 +6629,7 @@ function handlePTTTalkingState(ws: any, userId: string, userRole: string, data: 
     if (!connUserId) return;
     const connUserData = users.get(connUserId);
     if (!connUserData) return;
+    if (connUserData.organizationId !== pttTalkingOrgId) return;
     const role = connUserData.role || 'user';
     if (role === 'admin' || role === 'dispatcher') {
       client.send(broadcastData);
@@ -6604,14 +6687,23 @@ function handlePTTEmergency(ws: any, userId: string, userRole: string, data: any
     },
   });
 
+  // The 'emergency' channel is a default seeded channel with no
+  // organization of its own (see Phase 1) — scoped to the sender's
+  // organization instead, same as the REST /api/ptt/emergency route and
+  // POST /api/ptt/transmit. Previously reached every connected client and
+  // every registered user's push token, across every organization.
+  const emergencyOrgId = adminUsers.get(userId)?.organizationId;
   wss.clients.forEach((client: any) => {
     if (client.readyState !== 1) return;
     if (client === ws) return;
+    const connUid = wsClientMap.get(client);
+    const connUser = connUid ? users.get(connUid) : undefined;
+    if (connUser?.organizationId !== emergencyOrgId) return;
     client.send(broadcastData);
   });
 
-  // Also send push notifications to everyone
-  const allUserIds = Array.from(users.keys());
+  // Also send push notifications to the sender's own organization
+  const allUserIds = Array.from(users.keys()).filter(uid => adminUsers.get(uid)?.organizationId === emergencyOrgId);
   allUserIds.forEach(uid => {
     if (uid === userId) return;
     sendPushToUser(
@@ -7447,6 +7539,7 @@ async function saveConversationToSupabase(conv: Conversation): Promise<void> {
       filter_tags: conv.filterTags || null, created_by: conv.createdBy,
       created_at: conv.createdAt, last_message: conv.lastMessage || '',
       last_message_time: conv.lastMessageTime || 0,
+      organization_id: conv.organizationId || null,
     });
     if (error) console.error('[Supabase] saveConversation error:', error.message);
   } catch (e) { console.error('[Supabase] saveConversation error:', e); }
@@ -7479,6 +7572,7 @@ async function loadConversationsFromSupabase(): Promise<void> {
           createdAt: c.created_at, lastMessage: c.last_message || '',
           lastMessageTime: c.last_message_time || 0,
           unreadCounts: c.unread_counts || {},
+          organizationId: c.organization_id || undefined,
         };
         conversations.set(c.id, conv);
       });
