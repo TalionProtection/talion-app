@@ -23,6 +23,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
+import { authHeader } from '@/lib/auth-fetch';
 import { supabase } from '@/lib/auth-context';
 
 const ROLE_LABELS: Record<string, string> = {
@@ -174,7 +175,7 @@ export default function ProfileScreen() {
   const fetchFamilyNames = useCallback(async () => {
     if (!user) return;
     try {
-      const res = await fetchWithTimeout(`${getApiBaseUrl()}/api/family/members?userId=${user.id}`, { timeout: 10000 });
+      const res = await fetchWithTimeout(`${getApiBaseUrl()}/api/family/members?userId=${user.id}`, { timeout: 10000, headers: await authHeader() });
       if (!res.ok) return;
       const members = await res.json();
       setFamilyNames((members || []).map((m: any) => m.name).filter(Boolean));

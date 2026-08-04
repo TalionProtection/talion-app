@@ -666,7 +666,7 @@ export default function MapScreen() {
     if (!user?.id) return;
     const fetchFamilyLocations = async () => {
       try {
-        const res = await fetchWithTimeout(`${getApiBaseUrl()}/api/family/locations?userId=${user.id}`, { timeout: 10000 });
+        const res = await fetchWithTimeout(`${getApiBaseUrl()}/api/family/locations?userId=${user.id}`, { timeout: 10000, headers: await authHeader() });
         const data = await res.json();
         if (data.locations) {
           setFamilyLocations(data.locations);

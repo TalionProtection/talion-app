@@ -431,7 +431,7 @@ export default function FamilyScreen() {
     }
     setAddressSearching(true);
     try {
-      const res = await fetch(`${BASE}/api/geocode?q=${encodeURIComponent(query)}`);
+      const res = await fetch(`${BASE}/api/geocode?q=${encodeURIComponent(query)}`, { headers: await authHeader() });
       if (res.ok) {
         const data = await res.json();
         setAddressSuggestions(Array.isArray(data) ? data.slice(0, 5) : []);
@@ -494,7 +494,7 @@ export default function FamilyScreen() {
   const fetchMembers = useCallback(async () => {
     if (!userId) return;
     try {
-      const res = await fetchWithTimeout(`${BASE}/api/family/members?userId=${userId}`, { timeout: 10000 });
+      const res = await fetchWithTimeout(`${BASE}/api/family/members?userId=${userId}`, { timeout: 10000, headers: await authHeader() });
       const data = await res.json();
       setMembers(Array.isArray(data) ? data : []);
     } catch (e) {
@@ -884,7 +884,7 @@ export default function FamilyScreen() {
   const fetchProxAlerts = useCallback(async () => {
     if (!userId) return;
     try {
-      const res = await fetchWithTimeout(`${BASE}/api/family/proximity-alerts?userId=${userId}&limit=50`, { timeout: 10000 });
+      const res = await fetchWithTimeout(`${BASE}/api/family/proximity-alerts?userId=${userId}&limit=50`, { timeout: 10000, headers: await authHeader() });
       const data = await res.json();
       setProxAlerts(Array.isArray(data) ? data : []);
     } catch (e) {
@@ -988,7 +988,7 @@ export default function FamilyScreen() {
       const since = Date.now() - 24 * 60 * 60 * 1000; // last 24h
       const res = await fetchWithTimeout(
         `${BASE}/api/family/location-history?userId=${userId}&targetUserId=${member.userId}&since=${since}`,
-        { timeout: 10000 }
+        { timeout: 10000, headers: await authHeader() }
       );
       const data = await res.json();
       setHistory(Array.isArray(data) ? data : []);
@@ -1286,7 +1286,7 @@ export default function FamilyScreen() {
   const acknowledgeAlert = useCallback(async (alertId: string) => {
     try {
       await fetchWithTimeout(`${BASE}/api/family/proximity-alerts/${alertId}/acknowledge`, {
-        method: 'PUT', timeout: 10000,
+        method: 'PUT', timeout: 10000, headers: await authHeader(),
       });
       if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       fetchProxAlerts();

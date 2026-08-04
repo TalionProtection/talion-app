@@ -221,7 +221,8 @@ function handleSoftEscalation(alertId: string, responderId: string) {
     'Escalade Niveau 1 (Soft)',
     'System',
     `${responderName} n'a pas encore accepté l'incident ${alertId} après 2 minutes.${backupNote}`,
-    responderId
+    responderId,
+    alert.organizationId
   );
 
   const typeLabel = INCIDENT_TYPE_LABELS[alert.type] || alert.type;
@@ -277,7 +278,7 @@ function handleHardEscalation(alertId: string, responderId: string) {
     timestamp: Date.now(),
   });
   // Add audit entry
-  addAuditEntry('incident', 'Acceptance Timeout', 'System', `${responderName} n'a pas accepté l'incident ${alertId} dans les 5 minutes`, responderId);
+  addAuditEntry('incident', 'Acceptance Timeout', 'System', `${responderName} n'a pas accepté l'incident ${alertId} dans les 5 minutes`, responderId, alert.organizationId);
   // Send push notification to all dispatchers
   const typeLabel = INCIDENT_TYPE_LABELS[alert.type] || alert.type;
   const notifiedDispatchers = new Set<string>();
@@ -621,6 +622,9 @@ interface AuditEntry {
   performedBy: string;
   targetUser?: string;
   details: string;
+  // Best-effort — undefined for genuinely ambiguous/system-wide entries, which
+  // means they're only visible to superadmin (fail closed, not fail open).
+  organizationId?: string;
 }
 
 interface WebSocketMessage {
@@ -668,6 +672,7 @@ interface GeofenceZone {
   message: string;
   createdAt: number;
   createdBy: string;
+  organizationId?: string;
 }
 
 // ─── Sector types ───────────────────────────────────────────────────────
@@ -826,6 +831,7 @@ interface GeofenceEvent {
   eventType: 'entry' | 'exit';
   timestamp: number;
   location: { latitude: number; longitude: number };
+  organizationId?: string;
 }
 
 // In-memory storage
@@ -1054,7 +1060,7 @@ function recomputeEscalationLevel(alert: Alert): void {
 }
 
 // ─── Helper: add audit entry ─────────────────────────────────────────
-function addAuditEntry(category: AuditEntry['category'], action: string, performedBy: string, details: string, targetUser?: string) {
+function addAuditEntry(category: AuditEntry['category'], action: string, performedBy: string, details: string, targetUser?: string, organizationId?: string) {
   auditLog.unshift({
     id: uuidv4(),
     timestamp: Date.now(),
@@ -1063,6 +1069,7 @@ function addAuditEntry(category: AuditEntry['category'], action: string, perform
     performedBy,
     targetUser,
     details,
+    organizationId,
   });
 }
 
@@ -1296,7 +1303,7 @@ async function handleAuth(ws: any, token: string | undefined, setUserContext: (i
   console.log(`User ${userId} (${userRole}) authenticated`);
 
   // Log auth event
-  addAuditEntry('auth', 'User Login', userId, `${userRole} login via WebSocket`);
+  addAuditEntry('auth', 'User Login', userId, `${userRole} login via WebSocket`, undefined, organizationId);
 
   const activeAlerts = Array.from(alerts.values())
     .filter(a => a.status === 'active' && canAccessOrg({ role: userRole, organizationId }, a.organizationId))
@@ -1336,7 +1343,7 @@ async function handleCreateAlert(ws: any, userId: string, userRole: string, aler
   saveAlertToSupabase(alert).catch(e => console.error('[WS CreateAlert] Supabase save error:', e));
   console.log(`New alert created: ${alert.id} by ${userId}`);
 
-  addAuditEntry('incident', 'Incident Created', userId, `Created ${alert.id}: ${alert.type} at ${alert.location.address}`);
+  addAuditEntry('incident', 'Incident Created', userId, `Created ${alert.id}: ${alert.type} at ${alert.location.address}`, undefined, alert.organizationId);
 
   broadcastToOrg(alert.organizationId, { type: 'newAlert', data: alert });
   ws.send(JSON.stringify({ type: 'alertCreated', alertId: alert.id, timestamp: Date.now() }));
@@ -1404,9 +1411,10 @@ function checkGeofences(userId: string, location: { latitude: number; longitude:
         eventType: 'entry',
         timestamp: Date.now(),
         location,
+        organizationId: adminUsers.get(userId)?.organizationId,
       };
       geofenceEvents.unshift(event);
-      addAuditEntry('broadcast', 'Geofence Entry', userId, `${responderName} entered zone ${zoneId} (${zone.severity} — ${zone.radiusKm}km)`);
+      addAuditEntry('broadcast', 'Geofence Entry', userId, `${responderName} entered zone ${zoneId} (${zone.severity} — ${zone.radiusKm}km)`, undefined, adminUsers.get(userId)?.organizationId);
       broadcastToOrg(adminUsers.get(userId)?.organizationId, {
         type: 'geofenceEntry',
         data: { ...event, zone: { id: zone.id, severity: zone.severity, radiusKm: zone.radiusKm, message: zone.message } },
@@ -1423,9 +1431,10 @@ function checkGeofences(userId: string, location: { latitude: number; longitude:
         eventType: 'exit',
         timestamp: Date.now(),
         location,
+        organizationId: adminUsers.get(userId)?.organizationId,
       };
       geofenceEvents.unshift(event);
-      addAuditEntry('broadcast', 'Geofence Exit', userId, `${responderName} exited zone ${zoneId} (${zone.severity} — ${zone.radiusKm}km)`);
+      addAuditEntry('broadcast', 'Geofence Exit', userId, `${responderName} exited zone ${zoneId} (${zone.severity} — ${zone.radiusKm}km)`, undefined, adminUsers.get(userId)?.organizationId);
       broadcastToOrg(adminUsers.get(userId)?.organizationId, {
         type: 'geofenceExit',
         data: { ...event, zone: { id: zone.id, severity: zone.severity, radiusKm: zone.radiusKm, message: zone.message } },
@@ -1785,6 +1794,16 @@ function canAccessConversation(conv: Conversation, caller: { id: string; role: s
   return conv.participantIds.includes(caller.id) || resolveGroupParticipants(conv, conv.organizationId).includes(caller.id);
 }
 
+// Shared gate for the /api/family/* "calm view" data (locations, members,
+// proximity alerts, location history, check-ins): the target themselves,
+// any of their family members, or staff of the target's own organization.
+function canAccessFamilyMemberData(targetUserId: string, caller: { id: string; role: string; organizationId?: string }): boolean {
+  if (caller.id === targetUserId) return true;
+  if (getFamilyMemberIds(targetUserId).includes(caller.id)) return true;
+  const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder' || caller.role === 'superadmin';
+  return isStaff && canAccessOrg(caller, adminUsers.get(targetUserId)?.organizationId);
+}
+
 // POST /api/access/emergency-override — break-glass: temporarily lifts the
 // caller's own family-assignment restriction (never affects incidents/alerts,
 // which are already unrestricted for everyone). Every enable/disable is
@@ -1801,11 +1820,11 @@ app.post('/api/access/emergency-override', requireAuth, (req, res) => {
   if (enable) {
     const entry: EmergencyOverride = { enabledAt: Date.now(), expiresAt: Date.now() + EMERGENCY_OVERRIDE_DURATION_MS, reason: reason || undefined };
     emergencyOverrides.set(caller.id, entry);
-    addAuditEntry('access_override', 'Accès d\'urgence activé', callerName, reason || '(aucune raison fournie)');
+    addAuditEntry('access_override', 'Accès d\'urgence activé', callerName, reason || '(aucune raison fournie)', undefined, caller.organizationId);
     return res.json({ success: true, expiresAt: entry.expiresAt });
   } else {
     emergencyOverrides.delete(caller.id);
-    addAuditEntry('access_override', 'Accès d\'urgence désactivé', callerName, reason || '');
+    addAuditEntry('access_override', 'Accès d\'urgence désactivé', callerName, reason || '', undefined, caller.organizationId);
     return res.json({ success: true });
   }
 });
@@ -2225,7 +2244,7 @@ async function fireCheckInEscalation(id: string) {
   linkPossibleDuplicates(alert);
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[CheckIn] Supabase save error:', e));
-  addAuditEntry('incident', 'Check-in manqué', checkIn.ownerId, `Check-in ${checkIn.id}: ${checkIn.targetUserName}`);
+  addAuditEntry('incident', 'Check-in manqué', checkIn.ownerId, `Check-in ${checkIn.id}: ${checkIn.targetUserName}`, undefined, alert.organizationId);
   broadcastToOrg(alert.organizationId, { type: 'newAlert', data: alert });
   sendPushToDispatchersAndResponders(alert, checkIn.targetUserName).catch(() => {});
   rescheduleIfRecurring(checkIn);
@@ -2349,7 +2368,7 @@ function handleAcknowledgeAlert(ws: any, userId: string, alertData: any) {
     persistAlerts();
     saveAlertToSupabase(alert).catch(e => console.error('[WS Acknowledge] Supabase save error:', e));
     console.log(`Alert ${alert.id} acknowledged by ${userId}`);
-    addAuditEntry('incident', 'Alert Acknowledged', userId, `Acknowledged ${alert.id}`);
+    addAuditEntry('incident', 'Alert Acknowledged', userId, `Acknowledged ${alert.id}`, undefined, alert.organizationId);
     broadcastToOrg(alert.organizationId, { type: 'alertAcknowledged', alertId: alert.id, userId, timestamp: Date.now() });
   }
 }
@@ -2473,7 +2492,7 @@ app.post('/auth/login', async (req, res) => {
         const { data: retryData, error: retryError } = await supabaseAuthOnly.auth.signInWithPassword({ email, password });
         if (!retryError && retryData.session) {
           accessToken = retryData.session.access_token;
-          addAuditEntry('auth', 'Supabase Auth Re-sync', user.name, `Password re-synced to Supabase Auth for ${email} after drift detected`, user.id);
+          addAuditEntry('auth', 'Supabase Auth Re-sync', user.name, `Password re-synced to Supabase Auth for ${email} after drift detected`, user.id, user.organizationId);
         }
       }
     }
@@ -2490,7 +2509,7 @@ app.post('/auth/login', async (req, res) => {
   addLoginHistory({ userId: user.id, userName: user.name, email, timestamp: Date.now(), ip, userAgent, status: 'success' });
   user.lastLogin = Date.now();
   adminUsers.set(user.id, user);
-  addAuditEntry('auth', 'User Login', user.name, `Login via email/password from ${parseDevice(userAgent)} (${ip})`, undefined);
+  addAuditEntry('auth', 'User Login', user.name, `Login via email/password from ${parseDevice(userAgent)} (${ip})`, undefined, user.organizationId);
   const { passwordHash, ...safeUser } = user;
   res.json({
     success: true,
@@ -2500,22 +2519,31 @@ app.post('/auth/login', async (req, res) => {
 });
 
 // Change password endpoint
-app.put('/auth/change-password', (req, res) => {
-  const { userId, currentPassword, newPassword } = req.body;
-  if (!userId || !newPassword) {
-    return res.status(400).json({ error: 'userId and newPassword are required' });
+// Self-service only — previously took userId from the body with no auth at
+// all, and silently skipped the current-password check whenever the client
+// simply omitted it, amounting to unauthenticated account takeover of any
+// user on the platform. An admin resetting someone else's password already
+// has PUT /admin/users/:id for that (protected since Phase 0/2), so this
+// route has no legitimate reason to ever target anyone but the caller.
+app.put('/auth/change-password', requireAuth, (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  if (!newPassword) {
+    return res.status(400).json({ error: 'newPassword is required' });
   }
+  const userId = req.supabaseUser!.id;
   const user = adminUsers.get(userId);
   if (!user) return res.status(404).json({ error: 'User not found' });
-  // If user has a current password, verify it
-  if (user.passwordHash && currentPassword) {
-    if (!bcrypt.compareSync(currentPassword, user.passwordHash)) {
+  // Current password is required whenever one is already set — only a
+  // brand-new account with no password yet can skip this.
+  if (user.passwordHash) {
+    if (!currentPassword || !bcrypt.compareSync(currentPassword, user.passwordHash)) {
       return res.status(401).json({ error: 'Current password is incorrect' });
     }
   }
   user.passwordHash = bcrypt.hashSync(newPassword, 10);
   adminUsers.set(user.id, user);
-  addAuditEntry('auth', 'Password Changed', user.name, 'Password updated', undefined);
+  saveAdminUserToSupabase(user).catch(e => console.error('[ChangePassword] Supabase save error:', e));
+  addAuditEntry('auth', 'Password Changed', user.name, 'Password updated', undefined, user.organizationId);
   res.json({ success: true });
 });
 
@@ -2541,7 +2569,7 @@ app.post('/auth/request-password-reset', (req, res) => {
   const expiresAt = Date.now() + 15 * 60 * 1000;
   passwordResetCodes.set(code, { userId: user.id, code, expiresAt });
 
-  addAuditEntry('auth', 'Password Reset Requested', user.name, `Reset code generated for ${user.email}`, undefined);
+  addAuditEntry('auth', 'Password Reset Requested', user.name, `Reset code generated for ${user.email}`, undefined, user.organizationId);
 
   // Broadcast to dispatch/admin consoles so they can relay the code
   wss.clients.forEach((client: any) => {
@@ -2584,21 +2612,21 @@ app.post('/auth/reset-password', (req, res) => {
   adminUsers.set(user.id, user);
   passwordResetCodes.delete(code);
 
-  addAuditEntry('auth', 'Password Reset Completed', user.name, `Password reset via code for ${user.email}`, undefined);
+  addAuditEntry('auth', 'Password Reset Completed', user.name, `Password reset via code for ${user.email}`, undefined, user.organizationId);
   console.log(`[Auth] Password reset completed for ${user.email}`);
   res.json({ success: true, message: 'Mot de passe réinitialisé avec succès.' });
 });
 
 // ─── Login History Endpoints ─────────────────────────────────────────
 // Global login history (all users)
-app.get('/admin/login-history', (req, res) => {
+app.get('/admin/login-history', requireAuth, requireRole('admin'), (req, res) => {
   const page = parseInt(req.query.page as string) || 1;
   const limit = parseInt(req.query.limit as string) || 50;
   const status = req.query.status as string; // filter by status
   const userId = req.query.userId as string; // filter by user
   const search = (req.query.search as string || '').toLowerCase();
 
-  let filtered = [...loginHistory];
+  let filtered = loginHistory.filter(e => canAccessOrg(req.supabaseUser!, adminUsers.get(e.userId)?.organizationId));
   if (status && status !== 'all') {
     filtered = filtered.filter(e => e.status === status);
   }
@@ -2649,10 +2677,11 @@ app.get('/admin/users/:id/login-history', requireAuth, requireRole('admin'), (re
 });
 
 // Login history stats (for dashboard)
-app.get('/admin/login-stats', (req, res) => {
+app.get('/admin/login-stats', requireAuth, requireRole('admin'), (req, res) => {
+  const scopedHistory = loginHistory.filter(e => canAccessOrg(req.supabaseUser!, adminUsers.get(e.userId)?.organizationId));
   const now = Date.now();
-  const last24h = loginHistory.filter(e => e.timestamp > now - 86400000);
-  const last7d = loginHistory.filter(e => e.timestamp > now - 7 * 86400000);
+  const last24h = scopedHistory.filter(e => e.timestamp > now - 86400000);
+  const last7d = scopedHistory.filter(e => e.timestamp > now - 7 * 86400000);
 
   const successCount24h = last24h.filter(e => e.status === 'success').length;
   const failedCount24h = last24h.filter(e => e.status !== 'success').length;
@@ -2687,7 +2716,7 @@ app.get('/admin/login-stats', (req, res) => {
     last7d: { success: successCount7d, failed: failedCount7d },
     topUsers,
     suspiciousIps,
-    totalEntries: loginHistory.length,
+    totalEntries: scopedHistory.length,
   });
 });
 
@@ -2717,7 +2746,7 @@ app.get('/health', (req, res) => {
 // Geocode proxy for Nominatim (avoids CORS/403 issues from browser)
 const geocodeCache = new Map<string, {data: any, ts: number}>();
 
-app.get('/api/geocode', async (req, res) => {
+app.get('/api/geocode', requireAuth, async (req, res) => {
   const q = req.query.q as string;
   if (!q || q.length < 2) return res.json([]);
   // Check cache (5 min TTL)
@@ -2836,7 +2865,7 @@ app.put('/alerts/:id/acknowledge', requireRole('dispatcher'), (req, res) => {
   alerts.set(alert.id, alert);
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[Acknowledge] Supabase save error:', e));
-  addAuditEntry('incident', 'Alert Acknowledged', req.body?.userId || 'Mobile App', `Acknowledged ${alert.id}`);
+  addAuditEntry('incident', 'Alert Acknowledged', req.body?.userId || 'Mobile App', `Acknowledged ${alert.id}`, undefined, alert.organizationId);
   broadcastToOrg(alert.organizationId, { type: 'alertAcknowledged', alertId: alert.id, timestamp: Date.now() });
   res.json({ success: true });
 });
@@ -2850,7 +2879,7 @@ app.put('/alerts/:id/resolve', requireRole('dispatcher'), (req, res) => {
   alerts.set(alert.id, alert);
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[Resolve] Supabase save error:', e));
-  addAuditEntry('incident', 'Incident Resolved', req.body?.userId || 'Mobile App', `Resolved ${alert.id}: ${alert.type} at ${alert.location.address}`);
+  addAuditEntry('incident', 'Incident Resolved', req.body?.userId || 'Mobile App', `Resolved ${alert.id}: ${alert.type} at ${alert.location.address}`, undefined, alert.organizationId);
   broadcastToOrg(alert.organizationId, { type: 'alertResolved', alertId: alert.id, timestamp: Date.now() });
   res.json({ success: true });
 });
@@ -2866,7 +2895,7 @@ app.put('/alerts/:id/archive', requireRole('dispatcher'), (req, res) => {
   alerts.set(alert.id, alert);
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[Archive] Supabase save error:', e));
-  addAuditEntry('incident', 'Incident Archived', req.supabaseUser?.id || 'Dispatch Console', `Archived ${alert.id}`);
+  addAuditEntry('incident', 'Incident Archived', req.supabaseUser?.id || 'Dispatch Console', `Archived ${alert.id}`, undefined, alert.organizationId);
   broadcastToOrg(alert.organizationId, { type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
   res.json({ success: true });
 });
@@ -2879,7 +2908,7 @@ app.put('/alerts/:id/unarchive', requireRole('dispatcher'), (req, res) => {
   alerts.set(alert.id, alert);
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[Unarchive] Supabase save error:', e));
-  addAuditEntry('incident', 'Incident Unarchived', req.supabaseUser?.id || 'Dispatch Console', `Unarchived ${alert.id}`);
+  addAuditEntry('incident', 'Incident Unarchived', req.supabaseUser?.id || 'Dispatch Console', `Unarchived ${alert.id}`, undefined, alert.organizationId);
   broadcastToOrg(alert.organizationId, { type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
   res.json({ success: true });
 });
@@ -2926,7 +2955,7 @@ app.post('/alerts/:id/link/:otherId', requireRole('dispatcher'), (req, res) => {
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[Link] Supabase save error:', e));
   saveAlertToSupabase(other).catch(e => console.error('[Link] Supabase save error:', e));
-  addAuditEntry('incident', 'Incidents Linked', req.supabaseUser?.id || 'Dispatch Console', `Linked ${alert.id} and ${other.id} as the same event`);
+  addAuditEntry('incident', 'Incidents Linked', req.supabaseUser?.id || 'Dispatch Console', `Linked ${alert.id} and ${other.id} as the same event`, undefined, alert.organizationId);
   broadcastToOrg(alert.organizationId, { type: 'alertUpdate', data: { ...alert, respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
   broadcastToOrg(other.organizationId, { type: 'alertUpdate', data: { ...other, respondingNames: (other.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid) } });
   res.json({ success: true });
@@ -2982,13 +3011,13 @@ app.delete('/alerts/:id', requireRole('admin'), async (req, res) => {
   }
   persistAlerts();
   await deleteAlertFromSupabase(id);
-  addAuditEntry('incident', 'Incident Deleted', req.supabaseUser?.id || 'Dispatch Console', `Deleted ${id}: ${alert.type} at ${alert.location?.address || 'unknown'}`);
+  addAuditEntry('incident', 'Incident Deleted', req.supabaseUser?.id || 'Dispatch Console', `Deleted ${id}: ${alert.type} at ${alert.location?.address || 'unknown'}`, undefined, alert.organizationId);
   broadcastToOrg(alert.organizationId, { type: 'alertDeleted', alertId: id });
   res.json({ success: true });
 });
 
-app.get('/responders', (req, res) => {
-  const responders = Array.from(users.values()).filter(u => u.role === 'responder');
+app.get('/responders', requireAuth, (req, res) => {
+  const responders = Array.from(users.values()).filter(u => u.role === 'responder' && canAccessOrg(req.supabaseUser!, u.organizationId));
   res.json(responders);
 });
 
@@ -3344,7 +3373,7 @@ app.post('/api/sos', async (req, res) => {
   linkPossibleDuplicates(alert);
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[SOS REST] Supabase save error:', e));
-  addAuditEntry('incident', 'SOS Alert Created (REST)', userId || 'unknown', `SOS ${alert.id}: ${alert.location.address}`);
+  addAuditEntry('incident', 'SOS Alert Created (REST)', userId || 'unknown', `SOS ${alert.id}: ${alert.location.address}`, undefined, alert.organizationId);
 
   // Broadcast to ALL connected WebSocket clients (Dispatch console, admin, etc.)
   broadcastToOrg(alert.organizationId, { type: 'newAlert', data: alert });
@@ -3360,9 +3389,10 @@ app.post('/api/sos', async (req, res) => {
 
 // ─── Alert Photo Upload ──────────────────────────────────────────────
 // Upload photos to an existing alert (called after alert creation)
-app.post('/api/alerts/:id/photos', upload.array('photos', 4), (req: any, res) => {
+app.post('/api/alerts/:id/photos', requireAuth, upload.array('photos', 4), (req: any, res) => {
   const alert = alerts.get(req.params.id);
   if (!alert) return res.status(404).json({ error: 'Alert not found' });
+  if (!canAccessOrg(req.supabaseUser!, alert.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files uploaded' });
 
   const photoUrls: string[] = req.files.map((f: any) => `/uploads/${f.filename}`);
@@ -3379,29 +3409,30 @@ app.post('/api/alerts/:id/photos', upload.array('photos', 4), (req: any, res) =>
 });
 
 // GET alert photos
-app.get('/api/alerts/:id/photos', (req, res) => {
-  const alert = alerts.get(req.params.id);
+app.get('/api/alerts/:id/photos', requireAuth, (req, res) => {
+  const alert = alerts.get(req.params.id as string);
   if (!alert) return res.status(404).json({ error: 'Alert not found' });
+  if (!canAccessOrg(req.supabaseUser!, alert.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   res.json({ photos: alert.photos || [] });
 });
 
 // ─── Location REST API (reliable fallback for mobile app) ────────────
 // This endpoint lets the mobile app send location updates via HTTP POST
 // when WebSocket is not connected or unreliable (e.g. Expo Go on real devices).
-app.post('/api/location', (req, res) => {
-  const { userId, userRole, latitude, longitude } = req.body;
+app.post('/api/location', requireAuth, (req, res) => {
+  const { latitude, longitude } = req.body;
+  const userId = req.supabaseUser!.id;
+  const userRole = req.supabaseUser!.role;
   console.log(`[Location REST] Received from userId=${userId} (${userRole}): lat=${latitude}, lng=${longitude}`);
   if (latitude == null || longitude == null) {
     return res.status(400).json({ error: 'latitude and longitude required' });
   }
-  // Generate anonymous ID if userId is empty (e.g. web preview without login)
-  const resolvedUserId = userId || `anon-${Date.now()}`;
   const locationData = { latitude: Number(latitude), longitude: Number(longitude) };
   // Reuse the same handler as WebSocket
-  handleLocationUpdate(null as any, resolvedUserId, userRole || 'user', locationData);
-  sharingUsers.add(resolvedUserId);
-  console.log(`[Location REST] Processed for ${resolvedUserId}, now in users map: ${users.has(resolvedUserId)}, sharing: true`);
-  res.json({ success: true, userId: resolvedUserId, location: locationData, timestamp: Date.now() });
+  handleLocationUpdate(null as any, userId, userRole, locationData);
+  sharingUsers.add(userId);
+  console.log(`[Location REST] Processed for ${userId}, now in users map: ${users.has(userId)}, sharing: true`);
+  res.json({ success: true, userId, location: locationData, timestamp: Date.now() });
 });
 
 // ─── Location TTL Cleanup ─────────────────────────────────────────────
@@ -3458,27 +3489,32 @@ function handleStopSharing(userId: string, res: any) {
   res.json({ success: true, userId, timestamp: Date.now() });
 }
 
-// DELETE /api/location - supports body or query param
-app.delete('/api/location', (req, res) => {
-  const userId = req.body?.userId || req.query.userId as string;
-  handleStopSharing(userId, res);
+// DELETE /api/location - supports body or query param. Previously took
+// userId from the client with no auth, letting anyone erase anyone's
+// shared location — for a security company, silently hiding someone's
+// live position is as serious as a spoofing bug.
+app.delete('/api/location', requireAuth, (req, res) => {
+  handleStopSharing(req.supabaseUser!.id, res);
 });
 
 // POST /api/location/stop - more reliable alternative for mobile clients
-app.post('/api/location/stop', (req, res) => {
-  const userId = req.body?.userId || req.query.userId as string;
-  handleStopSharing(userId, res);
+app.post('/api/location/stop', requireAuth, (req, res) => {
+  handleStopSharing(req.supabaseUser!.id, res);
 });
 
-// GET /api/location/live-count - number of users currently sharing location
-app.get('/api/location/live-count', (_req, res) => {
-  res.json({ count: sharingUsers.size, userIds: Array.from(sharingUsers) });
+// GET /api/location/live-count - number of users currently sharing location,
+// scoped to the caller's own organization (previously listed every sharing
+// user's id platform-wide, unauthenticated).
+app.get('/api/location/live-count', requireAuth, (req, res) => {
+  const orgUserIds = Array.from(sharingUsers).filter(uid => canAccessOrg(req.supabaseUser!, adminUsers.get(uid)?.organizationId));
+  res.json({ count: orgUserIds.length, userIds: orgUserIds });
 });
 
 // GET /api/family/locations - get locations of family members for a given user
-app.get('/api/family/locations', (req, res) => {
+app.get('/api/family/locations', requireAuth, (req, res) => {
   const userId = req.query.userId as string;
   if (!userId) return res.status(400).json({ error: 'userId required' });
+  if (!canAccessFamilyMemberData(userId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
   const familyIds = getFamilyMemberIds(userId);
   const familyLocations = familyIds
     .map(fid => {
@@ -3501,9 +3537,10 @@ app.get('/api/family/locations', (req, res) => {
 });
 
 // GET /api/family/members - get family member info for a given user (no location required)
-app.get('/api/family/members', (req, res) => {
+app.get('/api/family/members', requireAuth, (req, res) => {
   const userId = req.query.userId as string;
   if (!userId) return res.status(400).json({ error: 'userId required' });
+  if (!canAccessFamilyMemberData(userId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
   const adminUser = adminUsers.get(userId);
   if (!adminUser) return res.status(404).json({ error: 'User not found' });
   const familyTypes = ['parent', 'child', 'sibling', 'spouse'];
@@ -3785,6 +3822,7 @@ app.delete('/api/family/curfew-checks/:id', requireAuth, (req, res) => {
 app.get('/api/family/checkins', requireAuth, (req, res) => {
   const userId = req.query.userId as string;
   if (!userId) return res.status(400).json({ error: 'userId required' });
+  if (!canAccessFamilyMemberData(userId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
   const userCheckIns = Array.from(scheduledCheckIns.values())
     .filter(c => c.ownerId === userId)
     .sort((a, b) => b.createdAt - a.createdAt);
@@ -3860,9 +3898,10 @@ app.delete('/api/family/checkins/:id', requireAuth, (req, res) => {
 });
 
 // GET /api/family/proximity-alerts - get proximity alerts for a user (owner)
-app.get('/api/family/proximity-alerts', (req, res) => {
+app.get('/api/family/proximity-alerts', requireAuth, (req, res) => {
   const userId = req.query.userId as string;
   if (!userId) return res.status(400).json({ error: 'userId required' });
+  if (!canAccessFamilyMemberData(userId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
   const limit = Math.min(Number(req.query.limit) || 50, 200);
   const userAlerts = proximityAlerts
     .filter(a => a.ownerId === userId)
@@ -3871,9 +3910,10 @@ app.get('/api/family/proximity-alerts', (req, res) => {
 });
 
 // PUT /api/family/proximity-alerts/:id/acknowledge
-app.put('/api/family/proximity-alerts/:id/acknowledge', (req, res) => {
+app.put('/api/family/proximity-alerts/:id/acknowledge', requireAuth, (req, res) => {
   const alert = proximityAlerts.find(a => a.id === req.params.id);
   if (!alert) return res.status(404).json({ error: 'Alert not found' });
+  if (!canAccessFamilyMemberData(alert.ownerId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
   alert.acknowledged = true;
   persistProximityAlerts();
   res.json({ success: true });
@@ -3914,17 +3954,10 @@ function computeLocationEvents(targetUserId: string, history: LocationHistoryEnt
 }
 
 // GET /api/family/location-history - entry/exit events (not raw pings) for a family member
-app.get('/api/family/location-history', (req, res) => {
-  const userId = req.query.userId as string;
+app.get('/api/family/location-history', requireAuth, (req, res) => {
   const targetUserId = req.query.targetUserId as string;
-  if (!userId || !targetUserId) return res.status(400).json({ error: 'userId and targetUserId required' });
-  // Verify the target is a family member (or self)
-  if (userId !== targetUserId) {
-    const familyIds = getFamilyMemberIds(userId);
-    if (!familyIds.includes(targetUserId)) {
-      return res.status(403).json({ error: 'Target user is not a family member' });
-    }
-  }
+  if (!targetUserId) return res.status(400).json({ error: 'targetUserId required' });
+  if (!canAccessFamilyMemberData(targetUserId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
   const history = locationHistory.get(targetUserId) || [];
   const since = Number(req.query.since) || 0;
   const filtered = since > 0 ? history.filter(h => h.timestamp >= since) : history;
@@ -4076,11 +4109,14 @@ app.get('/admin/users', requireAuth, requireRole('admin'), (req, res) => {
 // GET /admin/family-groups — every family unit with its stable assignment id
 // (getFamilyGroupId) and member names, for the "Familles assignées" picker in
 // a dispatcher/responder's user drawer (see canAccessFamily).
-app.get('/admin/family-groups', (req, res) => {
-  const groups = computeFamilyGroups().map(memberIds => ({
-    id: getFamilyGroupId(memberIds[0]),
-    memberNames: memberIds.map(uid => adminUsers.get(uid)?.name || uid),
-  }));
+app.get('/admin/family-groups', requireAuth, requireRole('admin'), (req, res) => {
+  const caller = req.supabaseUser!;
+  const groups = computeFamilyGroups()
+    .filter(memberIds => canAccessUser(caller, memberIds[0]))
+    .map(memberIds => ({
+      id: getFamilyGroupId(memberIds[0]),
+      memberNames: memberIds.map(uid => adminUsers.get(uid)?.name || uid),
+    }));
   res.json(groups);
 });
 
@@ -4100,7 +4136,7 @@ app.put('/admin/users/:id/role', requireAuth, requireRole('admin'), (req, res) =
   user.role = role;
   adminUsers.set(user.id, user);
   saveAdminUserToSupabase(user);
-  addAuditEntry('user', 'Role Changed', 'Admin', `Role changed from ${oldRole} to ${role}`, user.name);
+  addAuditEntry('user', 'Role Changed', 'Admin', `Role changed from ${oldRole} to ${role}`, user.name, user.organizationId);
   res.json({ success: true });
 });
 
@@ -4118,7 +4154,7 @@ app.put('/admin/users/:id/status', requireAuth, requireRole('admin'), (req, res)
   adminUsers.set(user.id, user);
   saveAdminUserToSupabase(user);
   const actionName = status === 'suspended' ? 'User Suspended' : status === 'deactivated' ? 'User Deactivated' : 'User Reactivated';
-  addAuditEntry('user', actionName, 'Admin', `Status changed from ${oldStatus} to ${status}`, user.name);
+  addAuditEntry('user', actionName, 'Admin', `Status changed from ${oldStatus} to ${status}`, user.name, user.organizationId);
   res.json({ success: true });
 });
 
@@ -4235,7 +4271,7 @@ app.post('/admin/users', requireAuth, requireRole('admin'), async (req, res) => 
       }
     }
   });
-  addAuditEntry('user', 'User Created', 'Admin', `New ${role || 'user'}: ${firstName} ${lastName} (${email})`, newUser.name);
+  addAuditEntry('user', 'User Created', 'Admin', `New ${role || 'user'}: ${firstName} ${lastName} (${email})`, newUser.name, newUser.organizationId);
   const { passwordHash: _pwh, ...safeNewUser } = newUser;
   res.status(201).json({ ...safeNewUser, hasPassword: !!newUser.passwordHash });
 });
@@ -4302,7 +4338,7 @@ app.put('/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => {
   }
   adminUsers.set(user.id, user);
   saveAdminUserToSupabase(user);
-  addAuditEntry('user', 'User Updated', 'Admin', `Updated: ${changes.join(', ')}`, user.name);
+  addAuditEntry('user', 'User Updated', 'Admin', `Updated: ${changes.join(', ')}`, user.name, user.organizationId);
   const { passwordHash: _pw, ...safeUpdatedUser } = user;
   res.json({ ...safeUpdatedUser, hasPassword: !!user.passwordHash });
 });
@@ -4322,7 +4358,7 @@ app.delete('/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => 
   });
   adminUsers.delete(user.id);
   deleteAdminUserFromSupabase(user.id);
-  addAuditEntry('user', 'User Deleted', 'Admin', `Deleted user: ${user.name} (${user.email})`, user.name);
+  addAuditEntry('user', 'User Deleted', 'Admin', `Deleted user: ${user.name} (${user.email})`, user.name, user.organizationId);
   res.json({ success: true, deletedUser: user.name });
 });
 
@@ -4377,7 +4413,7 @@ app.post('/admin/organizations', requireAuth, requireRole('superadmin'), (req, r
   };
   organizations.set(org.id, org);
   saveOrganizationToSupabase(org).catch(e => console.error('[Organizations] Supabase save error:', e));
-  addAuditEntry('system', 'Organization Created', req.supabaseUser!.id, `New organization: ${name}`, org.id);
+  addAuditEntry('system', 'Organization Created', req.supabaseUser!.id, `New organization: ${name}`, org.id, org.id);
   res.status(201).json(org);
 });
 
@@ -4392,7 +4428,7 @@ app.put('/admin/organizations/:id', requireAuth, requireRole('superadmin'), (req
   if (status !== undefined) org.status = status;
   organizations.set(org.id, org);
   saveOrganizationToSupabase(org).catch(e => console.error('[Organizations] Supabase save error:', e));
-  addAuditEntry('system', 'Organization Updated', req.supabaseUser!.id, `Organization ${org.id}: ${JSON.stringify({ name, status })}`, org.id);
+  addAuditEntry('system', 'Organization Updated', req.supabaseUser!.id, `Organization ${org.id}: ${JSON.stringify({ name, status })}`, org.id, org.id);
   res.json(org);
 });
 
@@ -4448,8 +4484,11 @@ app.get('/admin/incidents', requireAuth, requireRole('dispatcher'), (req, res) =
 });
 
 // Admin audit log
-app.get('/admin/audit', (req, res) => {
-  res.json(auditLog);
+// requireRole('dispatcher') not 'admin' — the dispatch console's dashboard
+// (dispatcher-tier login) fetches this alongside /admin/health and
+// /admin/incidents, both of which are already dispatcher-accessible.
+app.get('/admin/audit', requireAuth, requireRole('dispatcher'), (req, res) => {
+  res.json(auditLog.filter(e => canAccessOrg(req.supabaseUser!, e.organizationId)));
 });
 
 // Redirect /admin to /admin-console/
@@ -4520,7 +4559,8 @@ app.get('/dispatch/responders', (req, res) => {
   adminUsers.forEach((user) => {
     if (user.role !== 'responder') return;
     if (user.status === 'deactivated') return; // skip deactivated
-    
+    if (!canAccessOrg(req.supabaseUser!, user.organizationId)) return;
+
     // Check if this responder is currently connected (has runtime data)
     const runtimeUser = users.get(user.id);
     
@@ -4597,7 +4637,7 @@ app.put('/dispatch/responders/:id/status', (req, res) => {
   const adminUser = adminUsers.get(responderId);
   const responderName = adminUser?.name || responderId;
   
-  addAuditEntry('responder', 'Status Changed', 'Dispatch Console', `${responderName} status changed to ${status}`, responderId);
+  addAuditEntry('responder', 'Status Changed', 'Dispatch Console', `${responderName} status changed to ${status}`, responderId, adminUser?.organizationId);
   
   // Broadcast status change to all dispatchers
   broadcastToOrgRole(adminUser?.organizationId, 'dispatcher', {
@@ -4614,12 +4654,13 @@ app.put('/dispatch/responders/:id/status', (req, res) => {
 app.put('/dispatch/incidents/:id/acknowledge', (req, res) => {
   const alert = alerts.get(req.params.id);
   if (!alert) return res.status(404).json({ error: 'Incident not found' });
+  if (!canAccessOrg(req.supabaseUser!, alert.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   alert.status = 'acknowledged';
   if (!alert.acknowledgedAt) alert.acknowledgedAt = Date.now();
   alerts.set(alert.id, alert);
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[DispatchAcknowledge] Supabase save error:', e));
-  addAuditEntry('incident', 'Alert Acknowledged', 'Dispatch Console', `Acknowledged ${alert.id}`);
+  addAuditEntry('incident', 'Alert Acknowledged', 'Dispatch Console', `Acknowledged ${alert.id}`, undefined, alert.organizationId);
   broadcastToOrg(alert.organizationId, { type: 'alertAcknowledged', alertId: alert.id, timestamp: Date.now() });
   res.json({ success: true });
 });
@@ -4628,6 +4669,7 @@ app.put('/dispatch/incidents/:id/acknowledge', (req, res) => {
 app.put('/dispatch/incidents/:id/assign', (req, res) => {
   const alert = alerts.get(req.params.id);
   if (!alert) return res.status(404).json({ error: 'Incident not found' });
+  if (!canAccessOrg(req.supabaseUser!, alert.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   const { responderId } = req.body;
   if (responderId && !alert.respondingUsers.includes(responderId)) {
     alert.respondingUsers.push(responderId);
@@ -4660,7 +4702,7 @@ app.put('/dispatch/incidents/:id/assign', (req, res) => {
   alerts.set(alert.id, alert);
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[Assign] Supabase save error:', e));
-  addAuditEntry('incident', 'Responder Assigned', 'Dispatch Console', `Assigned ${responderName} to ${alert.id}`, responderId);
+  addAuditEntry('incident', 'Responder Assigned', 'Dispatch Console', `Assigned ${responderName} to ${alert.id}`, responderId, alert.organizationId);
   const enrichedAlert = {
     ...alert,
     respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid),
@@ -4697,6 +4739,7 @@ app.put('/dispatch/incidents/:id/assign', (req, res) => {
 app.put('/dispatch/incidents/:id/unassign', (req, res) => {
   const alert = alerts.get(req.params.id);
   if (!alert) return res.status(404).json({ error: 'Incident not found' });
+  if (!canAccessOrg(req.supabaseUser!, alert.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   const { responderId } = req.body;
   if (!responderId) return res.status(400).json({ error: 'responderId required' });
   const idx = alert.respondingUsers.indexOf(responderId);
@@ -4713,7 +4756,7 @@ app.put('/dispatch/incidents/:id/unassign', (req, res) => {
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[Unassign] Supabase save error:', e));
   const responderName = adminUsers.get(responderId)?.name || responderId;
-  addAuditEntry('incident', 'Responder Unassigned', 'Dispatch Console', `Unassigned ${responderName} from ${alert.id}`, responderId);
+  addAuditEntry('incident', 'Responder Unassigned', 'Dispatch Console', `Unassigned ${responderName} from ${alert.id}`, responderId, alert.organizationId);
   const enrichedAlert = {
     ...alert,
     respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid),
@@ -4839,6 +4882,7 @@ function findGhostUsersNearLocation(location: { latitude: number; longitude: num
 app.get('/dispatch/incidents/:id/responders-nearby', (req, res) => {
   const alert = alerts.get(req.params.id);
   if (!alert) return res.status(404).json({ error: 'Incident not found' });
+  if (!canAccessOrg(req.supabaseUser!, alert.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   const result = computeNearbyResponders(alert);
   const suggested = result.find(r => r.suggested) || null;
   res.json({
@@ -4855,6 +4899,7 @@ app.get('/dispatch/incidents/:id/responders-nearby', (req, res) => {
 app.get('/dispatch/incidents/:id/nearby-users', (req, res) => {
   const alert = alerts.get(req.params.id);
   if (!alert) return res.status(404).json({ error: 'Incident not found' });
+  if (!canAccessOrg(req.supabaseUser!, alert.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   const radiusMeters = Math.max(50, Math.min(50000, parseFloat(req.query.radius as string) || 200));
   const nearbyUsers = computeNearbyUsers(alert.location, radiusMeters);
   res.json({ incidentId: alert.id, radiusMeters, users: nearbyUsers });
@@ -4864,6 +4909,7 @@ app.get('/dispatch/incidents/:id/nearby-users', (req, res) => {
 app.put('/dispatch/incidents/:id/resolve', (req, res) => {
   const alert = alerts.get(req.params.id);
   if (!alert) return res.status(404).json({ error: 'Incident not found' });
+  if (!canAccessOrg(req.supabaseUser!, alert.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   alert.status = 'resolved';
   if (!alert.resolvedAt) alert.resolvedAt = Date.now();
   // Stop any pending soft/hard escalation timers so a resolved incident can't keep "escalating"
@@ -4871,7 +4917,7 @@ app.put('/dispatch/incidents/:id/resolve', (req, res) => {
   alerts.set(alert.id, alert);
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[DispatchResolve] Supabase save error:', e));
-  addAuditEntry('incident', 'Incident Resolved', 'Dispatch Console', `Resolved ${alert.id}: ${alert.type} at ${alert.location.address}`);
+  addAuditEntry('incident', 'Incident Resolved', 'Dispatch Console', `Resolved ${alert.id}: ${alert.type} at ${alert.location.address}`, undefined, alert.organizationId);
   broadcastToOrg(alert.organizationId, { type: 'alertResolved', alertId: alert.id, timestamp: Date.now() });
   res.json({ success: true });
 });
@@ -4924,7 +4970,7 @@ app.put('/alerts/:id/respond', requireRole('responder'), (req, res) => {
   saveAlertToSupabase(alert).catch(e => console.error('[Respond] Supabase save error:', e));
   const STATUS_LABELS: Record<string, string> = { accepted: 'Accept\u00e9', en_route: 'En route', on_scene: 'Sur place' };
   const statusLabel = STATUS_LABELS[status] || status;
-  addAuditEntry('incident', `Responder ${statusLabel}`, responderName, `${responderName} — ${statusLabel} pour ${alert.id}`, responderId);
+  addAuditEntry('incident', `Responder ${statusLabel}`, responderName, `${responderName} — ${statusLabel} pour ${alert.id}`, responderId, alert.organizationId);
   const enrichedAlert = {
     ...alert,
     respondingNames: (alert.respondingUsers || []).map(uid => adminUsers.get(uid)?.name || uid),
@@ -4966,7 +5012,7 @@ app.post('/alerts/:id/reveal', (req, res) => {
     broadcastToOrgRole(revealOrgId, 'admin', msg);
   }
 
-  addAuditEntry('incident', 'Utilisateur révélé', adminUsers.get(userId)?.name || userId, `Position partagée pour l'incident ${alert.id}`, userId);
+  addAuditEntry('incident', 'Utilisateur révélé', adminUsers.get(userId)?.name || userId, `Position partagée pour l'incident ${alert.id}`, userId, alert.organizationId);
   res.json({ success: true });
 });
 
@@ -4997,7 +5043,7 @@ app.post('/dispatch/broadcast', async (req, res) => {
   alerts.set(alert.id, alert);
   persistAlerts();
   saveAlertToSupabase(alert).catch(e => console.error('[Broadcast] Supabase save error:', e));
-  addAuditEntry('broadcast', 'Zone Broadcast Sent', by || 'Dispatch Console', `[${sev.toUpperCase()}] ${message} (${radiusKm || 5}km radius)`);
+  addAuditEntry('broadcast', 'Zone Broadcast Sent', by || 'Dispatch Console', `[${sev.toUpperCase()}] ${message} (${radiusKm || 5}km radius)`, undefined, alert.organizationId);
 
   // Broadcast as newAlert so all WS clients (including mobile) receive it
   broadcastToOrg(alert.organizationId, { type: 'newAlert', data: alert });
@@ -5032,6 +5078,7 @@ app.post('/dispatch/geofence/zones', (req, res) => {
     message: message || '',
     createdAt: Date.now(),
     createdBy: createdBy || 'Dispatch Console',
+    organizationId: req.supabaseUser?.organizationId,
   };
   geofenceZones.set(zone.id, zone);
   responderZoneState.set(zone.id, new Set());
@@ -5047,34 +5094,39 @@ app.post('/dispatch/geofence/zones', (req, res) => {
     }
   });
 
-  addAuditEntry('broadcast', 'Geofence Zone Created', zone.createdBy, `Zone ${zone.id}: ${zone.severity} — ${zone.radiusKm}km radius`);
+  addAuditEntry('broadcast', 'Geofence Zone Created', zone.createdBy, `Zone ${zone.id}: ${zone.severity} — ${zone.radiusKm}km radius`, undefined, req.supabaseUser?.organizationId);
   broadcastToOrg(req.supabaseUser?.organizationId, { type: 'geofenceZoneCreated', data: zone });
   res.json({ success: true, zone });
 });
 
 // List geofence zones
 app.get('/dispatch/geofence/zones', (req, res) => {
-  const zones = Array.from(geofenceZones.values()).map(z => ({
-    ...z,
-    respondersInside: responderZoneState.get(z.id)?.size || 0,
-  }));
+  const zones = Array.from(geofenceZones.values())
+    .filter(z => canAccessOrg(req.supabaseUser!, z.organizationId))
+    .map(z => ({
+      ...z,
+      respondersInside: responderZoneState.get(z.id)?.size || 0,
+    }));
   res.json(zones);
 });
 
 // Delete geofence zone
 app.delete('/dispatch/geofence/zones/:id', (req, res) => {
   const zoneId = req.params.id;
-  if (!geofenceZones.has(zoneId)) return res.status(404).json({ error: 'Zone not found' });
+  const zone = geofenceZones.get(zoneId);
+  if (!zone) return res.status(404).json({ error: 'Zone not found' });
+  if (!canAccessOrg(req.supabaseUser!, zone.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   geofenceZones.delete(zoneId);
   responderZoneState.delete(zoneId);
-  addAuditEntry('broadcast', 'Geofence Zone Deleted', 'Dispatch Console', `Zone ${zoneId} removed`);
+  addAuditEntry('broadcast', 'Geofence Zone Deleted', 'Dispatch Console', `Zone ${zoneId} removed`, undefined, req.supabaseUser?.organizationId);
   broadcastToOrg(req.supabaseUser?.organizationId, { type: 'geofenceZoneDeleted', data: { zoneId } });
   res.json({ success: true });
 });
 
 // Geofence events log
 app.get('/dispatch/geofence/events', (req, res) => {
-  res.json({ success: true, events: geofenceEvents.slice(0, 100) });
+  const events = geofenceEvents.filter(e => canAccessOrg(req.supabaseUser!, e.organizationId)).slice(0, 100);
+  res.json({ success: true, events });
 });
 
 // Simulate responder movement (for testing geofence entry/exit)
@@ -5082,6 +5134,9 @@ app.post('/dispatch/geofence/simulate-move', (req, res) => {
   const { responderId, latitude, longitude } = req.body;
   if (!responderId || latitude == null || longitude == null) {
     return res.status(400).json({ error: 'responderId, latitude, longitude required' });
+  }
+  if (!canAccessOrg(req.supabaseUser!, adminUsers.get(responderId)?.organizationId)) {
+    return res.status(403).json({ error: 'Not authorized' });
   }
   // Update or create the responder in users map
   let user = users.get(responderId);
@@ -5111,7 +5166,7 @@ app.post('/dispatch/geofence/simulate-move', (req, res) => {
 // Viewable by anyone with console access (dispatcher+, enforced by the
 // app.use('/dispatch', ...) prefix middleware); mutations require admin.
 app.get('/dispatch/sectors', (req, res) => {
-  res.json(Array.from(sectors.values()));
+  res.json(Array.from(sectors.values()).filter(s => canAccessOrg(req.supabaseUser!, s.organizationId)));
 });
 
 app.post('/dispatch/sectors', requireRole('admin'), (req, res) => {
@@ -5259,9 +5314,9 @@ function resolveGroupParticipants(conv: Conversation, organizationId: string | u
 }
 
 // GET /api/users - list all active users (for contact list)
-app.get('/api/users', (req, res) => {
+app.get('/api/users', requireAuth, (req, res) => {
   const allUsers = Array.from(adminUsers.values())
-    .filter(u => u.status === 'active')
+    .filter(u => u.status === 'active' && canAccessOrg(req.supabaseUser!, u.organizationId))
     .map(u => ({ id: u.id, name: u.name, email: u.email, role: u.role, tags: u.tags || [] }));
   res.json(allUsers);
 });
@@ -5272,7 +5327,7 @@ app.get('/api/users', (req, res) => {
 // system already uses), Dispatch (dispatcher + admin, so a responder always has
 // a specific person to reach), and everyone else. Lets the picker show curated
 // sections instead of one flat, undifferentiated list of every user.
-app.get('/api/contacts', (req, res) => {
+app.get('/api/contacts', requireAuth, (req, res) => {
   const callerId = req.query.userId as string;
   const familyIds = new Set(callerId ? getFamilyMemberIds(callerId) : []);
   const toContact = (u: AdminUser) => ({ id: u.id, name: u.name, email: u.email, role: u.role, tags: u.tags || [] });
@@ -5283,6 +5338,7 @@ app.get('/api/contacts', (req, res) => {
 
   adminUsers.forEach((u) => {
     if (u.status !== 'active' || u.id === callerId) return;
+    if (!canAccessOrg(req.supabaseUser!, u.organizationId)) return;
     if (familyIds.has(u.id)) family.push(toContact(u));
     else if (u.role === 'dispatcher' || u.role === 'admin') dispatch.push(toContact(u));
     else others.push(toContact(u));
@@ -5292,16 +5348,17 @@ app.get('/api/contacts', (req, res) => {
 });
 
 // GET /api/tags - list all unique tags
-app.get('/api/tags', (req, res) => {
+app.get('/api/tags', requireAuth, (req, res) => {
   const tagSet = new Set<string>();
-  adminUsers.forEach(u => (u.tags || []).forEach(t => tagSet.add(t)));
+  adminUsers.forEach(u => { if (canAccessOrg(req.supabaseUser!, u.organizationId)) (u.tags || []).forEach(t => tagSet.add(t)); });
   res.json(Array.from(tagSet).sort());
 });
 
 // PUT /api/users/:id/tags - update user tags
-app.put('/api/users/:id/tags', (req, res) => {
-  const user = adminUsers.get(req.params.id);
+app.put('/api/users/:id/tags', requireAuth, (req, res) => {
+  const user = adminUsers.get(req.params.id as string);
   if (!user) return res.status(404).json({ error: 'User not found' });
+  if (!canAccessOrg(req.supabaseUser!, user.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   user.tags = req.body.tags || [];
   adminUsers.set(user.id, user);
   res.json({ success: true, user: { id: user.id, name: user.name, tags: user.tags } });
@@ -5461,7 +5518,7 @@ app.post('/api/sos/duress-check', requireAuth, (req, res) => {
     if (isNew) linkPossibleDuplicates(alert);
     persistAlerts();
     saveAlertToSupabase(alert).catch(e => console.error('[Duress] Supabase save error:', e));
-    addAuditEntry('incident', 'Duress code triggered', user.id, `Alert ${alert.id}`);
+    addAuditEntry('incident', 'Duress code triggered', user.id, `Alert ${alert.id}`, undefined, user.organizationId);
 
     // Auto-reveal: same effect as POST /alerts/:id/reveal, but performed
     // synchronously here rather than waiting on the push+confirm round trip —
@@ -6108,7 +6165,7 @@ app.post('/admin/patrol-sites', requireAuth, requireRole('admin'), (req, res) =>
   const site: PatrolSite = { id: uuidv4(), organizationId: organizationId!, name, createdAt: Date.now() };
   patrolSites.set(site.id, site);
   savePatrolSiteToSupabase(site).catch(e => console.error('[PatrolSites] Supabase save error:', e));
-  addAuditEntry('system', 'Patrol Site Created', req.supabaseUser!.id, `New patrol site: ${name}`, site.id);
+  addAuditEntry('system', 'Patrol Site Created', req.supabaseUser!.id, `New patrol site: ${name}`, site.id, site.organizationId);
   res.status(201).json(site);
 });
 
@@ -6118,7 +6175,7 @@ app.delete('/admin/patrol-sites/:id', requireAuth, requireRole('admin'), (req, r
   if (!canAccessOrg(req.supabaseUser!, site.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   patrolSites.delete(site.id);
   deletePatrolSiteFromSupabase(site.id).catch(e => console.error('[PatrolSites] Supabase delete error:', e));
-  addAuditEntry('system', 'Patrol Site Deleted', req.supabaseUser!.id, `Deleted patrol site: ${site.name}`, site.id);
+  addAuditEntry('system', 'Patrol Site Deleted', req.supabaseUser!.id, `Deleted patrol site: ${site.name}`, site.id, site.organizationId);
   res.json({ success: true });
 });
 
@@ -6351,7 +6408,7 @@ app.post('/api/patrol/reports/:id/escalate-to-incident', async (req, res) => {
 
   report.escalatedIncidentId = alert.id;
   persistPatrolReports();
-  addAuditEntry('incident', 'Ronde escaladée', 'Dispatch Console', `Ronde ${report.id} escaladée vers l'incident ${alert.id}`);
+  addAuditEntry('incident', 'Ronde escaladée', 'Dispatch Console', `Ronde ${report.id} escaladée vers l'incident ${alert.id}`, undefined, alert.organizationId);
 
   res.json({ success: true, incidentId: alert.id, alert });
 });
@@ -8847,7 +8904,7 @@ app.post('/admin/threat-analysis/generate', requireAuth, requireRole('dispatcher
   };
   threatAnalyses.set(analysis.id, analysis);
   await saveThreatAnalysisToSupabase(analysis);
-  addAuditEntry('threat_analysis', 'Analyse IA générée', caller.id, `${owner.name} — ${entries.length} entrées, ${analysis.flaggedItems.length} élément(s) signalé(s)`, userId);
+  addAuditEntry('threat_analysis', 'Analyse IA générée', caller.id, `${owner.name} — ${entries.length} entrées, ${analysis.flaggedItems.length} élément(s) signalé(s)`, userId, owner.organizationId);
   res.json(analysis);
 });
 
@@ -8879,7 +8936,7 @@ app.put('/admin/threat-analysis/:id/items/:itemId/acknowledge', requireAuth, req
   item.acknowledgedBy = adminUsers.get(caller.id)?.name || caller.id;
   item.acknowledgedAt = Date.now();
   await saveThreatAnalysisToSupabase(analysis);
-  addAuditEntry('threat_analysis', 'Élément signalé acquitté', caller.id, `${analysis.ownerName} — ${item.title}`, analysis.ownerId);
+  addAuditEntry('threat_analysis', 'Élément signalé acquitté', caller.id, `${analysis.ownerName} — ${item.title}`, analysis.ownerId, adminUsers.get(analysis.ownerId)?.organizationId);
   res.json(analysis);
 });
 
@@ -8936,7 +8993,7 @@ app.post('/api/blackbook', requireAuth, async (req, res) => {
   };
   blackbookEntries.set(entry.id, entry);
   saveBlackbookEntryToSupabase(entry).catch(() => {});
-  addAuditEntry('system', 'Blackbook: fiche créée', entry.createdByName, `${entry.firstName} ${entry.lastName}`.trim(), caller.id);
+  addAuditEntry('system', 'Blackbook: fiche créée', entry.createdByName, `${entry.firstName} ${entry.lastName}`.trim(), caller.id, entry.organizationId);
   res.status(201).json(entry);
 });
 
@@ -8976,7 +9033,7 @@ app.delete('/api/blackbook/:id', requireAuth, async (req, res) => {
   if (!canAccessOrg(caller, entry.organizationId)) return res.status(403).json({ error: 'Not authorized for this entry' });
   blackbookEntries.delete(entry.id);
   deleteBlackbookEntryFromSupabase(entry.id).catch(() => {});
-  addAuditEntry('system', 'Blackbook: fiche supprimée', adminUsers.get(caller.id)?.name || caller.id, `${entry.firstName} ${entry.lastName}`.trim(), caller.id);
+  addAuditEntry('system', 'Blackbook: fiche supprimée', adminUsers.get(caller.id)?.name || caller.id, `${entry.firstName} ${entry.lastName}`.trim(), caller.id, entry.organizationId);
   res.json({ success: true });
 });
 
@@ -9048,7 +9105,7 @@ function checkBlackbookCrossResidencePattern(entry: BlackbookEntry, priorDistinc
   const title = `⚠️ Pattern Blackbook détecté : ${name}`;
   const body = `Signalé(e) à ${distinctResidences.size} résidences différentes en 90 jours : ${residenceList}`;
 
-  addAuditEntry('system', 'Blackbook - pattern multi-résidences', name, body);
+  addAuditEntry('system', 'Blackbook - pattern multi-résidences', name, body, undefined, entry.organizationId);
   const payload = {
     type: 'blackbookPatternDetected',
     data: { entryId: entry.id, name, riskLevel: entry.riskLevel, residenceCount: distinctResidences.size, residences: Array.from(distinctResidences.values()), title, body },

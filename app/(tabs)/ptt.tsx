@@ -117,7 +117,7 @@ export default function PTTScreen() {
     setShowGroupModal(true);
     try {
       const baseUrl = getApiBaseUrl();
-      const res = await fetchWithTimeout(`${baseUrl}/api/users`, { timeout: 10000 });
+      const res = await fetchWithTimeout(`${baseUrl}/api/users`, { timeout: 10000, headers: await authHeader() });
       if (res.ok) setAllUsers((await res.json()).filter((u: any) => u.id !== user?.id));
     } catch (e) {
       setAllUsers([]);

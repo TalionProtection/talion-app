@@ -2,6 +2,7 @@ import * as TaskManager from 'expo-task-manager';
 import * as Location from 'expo-location';
 import { Platform } from 'react-native';
 import { getApiBaseUrl } from '@/lib/server-url';
+import { authHeader } from '@/lib/auth-fetch';
 
 export const BACKGROUND_LOCATION_TASK = 'talion-background-location';
 
@@ -41,7 +42,7 @@ async function sendBackgroundLocationToServer(latitude: number, longitude: numbe
     const apiBase = getApiBaseUrl();
     await fetch(`${apiBase}/api/location`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
       body: JSON.stringify({ userId: currentUserId, userRole: currentUserRole || 'user', latitude, longitude }),
     });
     console.log('[BackgroundLocation] Sent to server:', latitude.toFixed(6), longitude.toFixed(6));

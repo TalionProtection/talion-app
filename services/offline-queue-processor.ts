@@ -75,7 +75,7 @@ async function executeAction(action: QueuedAction): Promise<boolean> {
       try {
         const res = await fetch(`${baseUrl}/api/location`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
           body: JSON.stringify(action.payload),
         });
         return res.ok;

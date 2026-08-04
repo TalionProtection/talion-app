@@ -180,7 +180,7 @@ export default function HomeScreen() {
       setFamilyPresenceLoading(true);
       try {
         const apiBase = getApiBaseUrl();
-        const res = await fetchWithTimeout(`${apiBase}/api/family/members?userId=${user.id}`, { timeout: 10000 });
+        const res = await fetchWithTimeout(`${apiBase}/api/family/members?userId=${user.id}`, { timeout: 10000, headers: await authHeader() });
         const data = await res.json();
         if (!cancelled) setFamilyPresence(Array.isArray(data) ? data : []);
       } catch {
@@ -319,7 +319,7 @@ export default function HomeScreen() {
     try {
       const res = await fetchWithTimeout(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
         body: JSON.stringify({ userId, userRole, latitude: lat, longitude: lng }),
         timeout: 10000,
       });

@@ -235,7 +235,7 @@ export default function AdminScreen() {
 
   const fetchAudit = useCallback(async () => {
     try {
-      const res = await fetchWithTimeout(`${BASE}/admin/audit`, { timeout: 10000 });
+      const res = await fetchWithTimeout(`${BASE}/admin/audit`, { timeout: 10000, headers: await authHeader() });
       if (res.ok) {
         const data = await res.json();
         setAuditLog(data);
