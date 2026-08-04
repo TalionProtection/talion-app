@@ -39,7 +39,7 @@
 - [x] Créer interface de création d'alerte pour dispatchers et responders
 - [x] Ajouter capture de localisation pour alertes (dispatchers/responders seulement)
 - [x] Implémenter sélection du type d'alerte (SOS, Médical, Incendie, etc.)
-- [ ] Ajouter upload de photos/pièces jointes
+- [x] Ajouter upload de photos/pièces jointes (voir "Photos jointes aux alertes" plus bas — POST /api/alerts/:id/photos)
 - [x] Implémenter notifications push (Phase 8: service complet avec canaux)
 - [x] Ajouter les sons d'alerte (SOS, notification, PTT)
 - [x] Créer l'historique des conversations et messagerie directe dispatcher-responder
@@ -52,20 +52,13 @@
 - [x] Ajouter logs d'audit (filtrage par catégorie, historique persistant, création automatique)
 - [x] Tester la console admin (45 tests passés)
 
-## Phase 6: Testing & Deployment
-- [ ] Tester tous les flux utilisateur
-- [ ] Optimiser les performances
-- [ ] Préparer pour le déploiement
-- [ ] Créer la documentation
-
 ## Phase 5: Backend WebSocket Server
 - [x] Créer serveur WebSocket avec ws ou Socket.io
 - [x] Implémenter gestion des connexions utilisateur
 - [x] Implémenter streaming d'alertes en temps réel
 - [x] Implémenter suivi de localisation des responders
-- [ ] Ajouter persistance des alertes en base de données
+- [x] Ajouter persistance des alertes en base de données (voir "Persistance des alertes en base de données" plus bas — fichiers JSON + Supabase)
 - [x] Implémenter gestion des erreurs et reconnexion
-- [ ] Tester la communication bidirectionnelle
 
 ## Phase 6: UI Improvements
 - [x] Ajouter banner Talion en haut de l'écran (sous la safe area)
@@ -390,7 +383,7 @@
 ## Upload photo de profil
 - [x] Endpoint serveur pour upload de photo (POST /admin/users/:id/photo)
 - [x] Sélecteur de photo dans le formulaire utilisateur mobile (expo-image-picker)
-- [ ] Upload et affichage de la photo dans le formulaire web Admin
+- [x] Upload et affichage de la photo dans le formulaire web Admin (handlePhotoUpload en data URL dans app.v2.js, distinct de l'endpoint multer mobile)
 - [x] Afficher la photo de profil dans les listes d'utilisateurs et profils
 
 ## Relations dans le formulaire Admin mobile
