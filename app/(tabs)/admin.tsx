@@ -65,7 +65,42 @@ interface AuditEntry {
   category: 'auth' | 'incident' | 'user' | 'system' | 'broadcast';
 }
 
-type AdminTab = 'users' | 'incidents' | 'analytics' | 'audit';
+interface LoginHistoryEntry {
+  id: string;
+  userId: string;
+  userName: string;
+  email: string;
+  timestamp: number;
+  ip: string;
+  userAgent: string;
+  device: string;
+  status: 'success' | 'failed_password' | 'failed_email' | 'account_deactivated' | 'account_suspended' | 'no_password' | 'supabase_sync_failed';
+}
+
+interface LoginStats {
+  last24h: { success: number; failed: number; uniqueUsers: number };
+  last7d: { success: number; failed: number };
+  topUsers: { userId: string; name: string; loginCount: number }[];
+  suspiciousIps: { ip: string; failedAttempts: number }[];
+  totalEntries: number;
+}
+
+interface AdminOrganization {
+  id: string;
+  name: string;
+  status: 'active' | 'suspended';
+  createdAt: number;
+  memberCount: number;
+}
+
+interface AdminPatrolSite {
+  id: string;
+  organizationId: string;
+  name: string;
+  createdAt: number;
+}
+
+type AdminTab = 'users' | 'incidents' | 'analytics' | 'audit' | 'login-history' | 'organizations' | 'sites';
 
 const ROLE_COLORS: Record<UserRole, string> = {
   superadmin: '#b91c1c',
@@ -114,6 +149,28 @@ const TYPE_ICONS: Record<string, string> = {
   security: '🔒',
   hazard: '⚠️',
 };
+
+const LOGIN_STATUS_LABELS: Record<string, string> = {
+  success: 'Succès',
+  failed_password: 'Mot de passe incorrect',
+  failed_email: 'Email inconnu',
+  account_deactivated: 'Compte désactivé',
+  account_suspended: 'Compte suspendu',
+  no_password: 'Pas de mot de passe',
+  supabase_sync_failed: 'Erreur de synchronisation',
+};
+
+const LOGIN_STATUS_COLORS: Record<string, string> = {
+  success: '#22c55e',
+  failed_password: '#ef4444',
+  failed_email: '#ef4444',
+  account_deactivated: '#6b7280',
+  account_suspended: '#f59e0b',
+  no_password: '#6b7280',
+  supabase_sync_failed: '#ef4444',
+};
+
+const LOGIN_STATUS_FILTERS = ['all', 'success', 'failed_password', 'failed_email', 'account_deactivated'];
 
 const RELATIONSHIP_TYPES = [
   { value: 'spouse', label: 'Conjoint(e)' },
@@ -194,10 +251,40 @@ export default function AdminScreen() {
   const [incidentFilter, setIncidentFilter] = useState<'all' | 'active' | 'resolved'>('all');
   const [auditFilter, setAuditFilter] = useState<string>('all');
 
+  // ─── Login History state ──────────────────────────────────────────
+  const [loginHistory, setLoginHistory] = useState<LoginHistoryEntry[]>([]);
+  const [lhTotal, setLhTotal] = useState(0);
+  const [lhPage, setLhPage] = useState(1);
+  const [lhTotalPages, setLhTotalPages] = useState(1);
+  const [lhStats, setLhStats] = useState<LoginStats | null>(null);
+  const [lhStatusFilter, setLhStatusFilter] = useState('all');
+  const [lhSearchInput, setLhSearchInput] = useState('');
+  const [lhSearch, setLhSearch] = useState('');
+  const [lhUserFilter, setLhUserFilter] = useState<{ id: string; name: string } | null>(null);
+  const [lhLoaded, setLhLoaded] = useState(false);
+  const [lhLoading, setLhLoading] = useState(false);
+
+  // ─── Organizations state (superadmin only) ────────────────────────
+  const [organizations, setOrganizations] = useState<AdminOrganization[]>([]);
+  const [orgsLoaded, setOrgsLoaded] = useState(false);
+  const [orgsLoading, setOrgsLoading] = useState(false);
+  const [showCreateOrgModal, setShowCreateOrgModal] = useState(false);
+  const [newOrgName, setNewOrgName] = useState('');
+  const [orgSaving, setOrgSaving] = useState(false);
+
+  // ─── Patrol sites state ────────────────────────────────────────────
+  const [patrolSitesAdmin, setPatrolSitesAdmin] = useState<AdminPatrolSite[]>([]);
+  const [sitesLoaded, setSitesLoaded] = useState(false);
+  const [sitesLoading, setSitesLoading] = useState(false);
+  const [showCreateSiteModal, setShowCreateSiteModal] = useState(false);
+  const [newSiteName, setNewSiteName] = useState('');
+  const [newSiteOrgId, setNewSiteOrgId] = useState('');
+  const [siteSaving, setSiteSaving] = useState(false);
+
   // ─── Data Loading (from real server) ──────────────────────────────
   const fetchUsers = useCallback(async () => {
     try {
-      const res = await fetchWithTimeout(`${BASE}/admin/users`, { timeout: 10000 });
+      const res = await fetchWithTimeout(`${BASE}/admin/users`, { timeout: 10000, headers: await authHeader() });
       if (res.ok) {
         const data = await res.json();
         setUsers(data);
@@ -254,6 +341,207 @@ export default function AdminScreen() {
   useEffect(() => {
     loadAllData();
   }, []);
+
+  // ─── Login History ─────────────────────────────────────────────────
+  const fetchLoginHistory = useCallback(async (page: number) => {
+    setLhLoading(true);
+    try {
+      const params = new URLSearchParams({ page: String(page), limit: '20' });
+      if (lhStatusFilter !== 'all') params.set('status', lhStatusFilter);
+      if (lhSearch.trim()) params.set('search', lhSearch.trim());
+      if (lhUserFilter) params.set('userId', lhUserFilter.id);
+      const res = await fetchWithTimeout(`${BASE}/admin/login-history?${params}`, { timeout: 10000, headers: await authHeader() });
+      if (res.ok) {
+        const data = await res.json();
+        setLoginHistory(data.entries || []);
+        setLhTotal(data.total || 0);
+        setLhPage(data.page || page);
+        setLhTotalPages(data.totalPages || 1);
+      }
+    } catch (e) {
+      console.warn('Failed to fetch login history:', e);
+    }
+    setLhLoading(false);
+  }, [BASE, lhStatusFilter, lhSearch, lhUserFilter]);
+
+  const fetchLoginStats = useCallback(async () => {
+    try {
+      const res = await fetchWithTimeout(`${BASE}/admin/login-stats`, { timeout: 10000, headers: await authHeader() });
+      if (res.ok) setLhStats(await res.json());
+    } catch (e) {
+      console.warn('Failed to fetch login stats:', e);
+    }
+  }, [BASE]);
+
+  useEffect(() => {
+    if (activeTab !== 'login-history') return;
+    fetchLoginHistory(1);
+    if (!lhLoaded) {
+      fetchLoginStats();
+      setLhLoaded(true);
+    }
+  }, [activeTab, lhStatusFilter, lhSearch, lhUserFilter]);
+
+  // Debounce the search box so every keystroke doesn't trigger a fetch
+  useEffect(() => {
+    const t = setTimeout(() => setLhSearch(lhSearchInput), 300);
+    return () => clearTimeout(t);
+  }, [lhSearchInput]);
+
+  // ─── Organizations (superadmin only) ───────────────────────────────
+  const fetchOrganizations = useCallback(async () => {
+    setOrgsLoading(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/admin/organizations`, { timeout: 10000, headers: await authHeader() });
+      if (res.ok) setOrganizations(await res.json());
+    } catch (e) {
+      console.warn('Failed to fetch organizations:', e);
+    }
+    setOrgsLoading(false);
+  }, [BASE]);
+
+  useEffect(() => {
+    if ((activeTab === 'organizations' || activeTab === 'sites') && !orgsLoaded && user?.role === 'superadmin') {
+      fetchOrganizations();
+      setOrgsLoaded(true);
+    }
+  }, [activeTab, orgsLoaded, user?.role]);
+
+  const handleCreateOrganization = useCallback(async () => {
+    if (!newOrgName.trim()) {
+      Alert.alert('Erreur', 'Le nom de l\'organisation est obligatoire.');
+      return;
+    }
+    setOrgSaving(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/admin/organizations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({ name: newOrgName.trim() }),
+        timeout: 10000,
+      });
+      if (res.ok) {
+        setShowCreateOrgModal(false);
+        setNewOrgName('');
+        await fetchOrganizations();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        Alert.alert('Erreur', err.error || `Échec (${res.status})`);
+      }
+    } catch (e: any) {
+      Alert.alert('Erreur', e.message || 'Impossible de contacter le serveur.');
+    }
+    setOrgSaving(false);
+  }, [BASE, newOrgName, fetchOrganizations]);
+
+  const handleToggleOrgStatus = useCallback((org: AdminOrganization) => {
+    const newStatus = org.status === 'active' ? 'suspended' : 'active';
+    const label = newStatus === 'suspended' ? 'Suspendre' : 'Réactiver';
+    Alert.alert(
+      `${label} l'organisation`,
+      `Êtes-vous sûr de vouloir ${label.toLowerCase()} ${org.name} ?`,
+      [
+        { text: 'Annuler', style: 'cancel' },
+        {
+          text: label,
+          style: newStatus === 'suspended' ? 'destructive' : 'default',
+          onPress: async () => {
+            try {
+              const res = await fetchWithTimeout(`${BASE}/admin/organizations/${org.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+                body: JSON.stringify({ status: newStatus }),
+                timeout: 10000,
+              });
+              if (res.ok) await fetchOrganizations();
+            } catch {
+              Alert.alert('Erreur', 'Impossible de contacter le serveur.');
+            }
+          },
+        },
+      ]
+    );
+  }, [BASE, fetchOrganizations]);
+
+  // ─── Patrol sites ───────────────────────────────────────────────────
+  const fetchPatrolSitesAdmin = useCallback(async () => {
+    setSitesLoading(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/admin/patrol-sites`, { timeout: 10000, headers: await authHeader() });
+      if (res.ok) setPatrolSitesAdmin(await res.json());
+    } catch (e) {
+      console.warn('Failed to fetch patrol sites:', e);
+    }
+    setSitesLoading(false);
+  }, [BASE]);
+
+  useEffect(() => {
+    if (activeTab === 'sites' && !sitesLoaded) {
+      fetchPatrolSitesAdmin();
+      setSitesLoaded(true);
+    }
+  }, [activeTab, sitesLoaded]);
+
+  const handleCreateSite = useCallback(async () => {
+    if (!newSiteName.trim()) {
+      Alert.alert('Erreur', 'Le nom du site est obligatoire.');
+      return;
+    }
+    if (user?.role === 'superadmin' && !newSiteOrgId) {
+      Alert.alert('Erreur', 'Sélectionnez une organisation.');
+      return;
+    }
+    setSiteSaving(true);
+    try {
+      const payload: any = { name: newSiteName.trim() };
+      if (user?.role === 'superadmin') payload.organizationId = newSiteOrgId;
+      const res = await fetchWithTimeout(`${BASE}/admin/patrol-sites`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify(payload),
+        timeout: 10000,
+      });
+      if (res.ok) {
+        setShowCreateSiteModal(false);
+        setNewSiteName('');
+        setNewSiteOrgId('');
+        await fetchPatrolSitesAdmin();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        Alert.alert('Erreur', err.error || `Échec (${res.status})`);
+      }
+    } catch (e: any) {
+      Alert.alert('Erreur', e.message || 'Impossible de contacter le serveur.');
+    }
+    setSiteSaving(false);
+  }, [BASE, newSiteName, newSiteOrgId, user?.role, fetchPatrolSitesAdmin]);
+
+  const handleDeleteSite = useCallback((site: AdminPatrolSite) => {
+    Alert.alert(
+      'Supprimer le site',
+      `Êtes-vous sûr de vouloir supprimer "${site.name}" ?`,
+      [
+        { text: 'Annuler', style: 'cancel' },
+        {
+          text: 'Supprimer',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const res = await fetchWithTimeout(`${BASE}/admin/patrol-sites/${site.id}`, {
+                method: 'DELETE',
+                headers: await authHeader(),
+                timeout: 10000,
+              });
+              if (res.ok) await fetchPatrolSitesAdmin();
+              else Alert.alert('Erreur', 'Impossible de supprimer ce site.');
+            } catch {
+              Alert.alert('Erreur', 'Impossible de contacter le serveur.');
+            }
+          },
+        },
+      ]
+    );
+  }, [BASE, fetchPatrolSitesAdmin]);
 
   // ─── User CRUD Handlers ───────────────────────────────────────────
   const openCreateForm = useCallback(() => {
@@ -317,7 +605,7 @@ export default function AdminScreen() {
 
       const res = await fetchWithTimeout(url, {
         method,
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
         body: JSON.stringify(payload),
         timeout: 10000,
       });
@@ -341,6 +629,7 @@ export default function AdminScreen() {
             await fetchWithTimeout(`${BASE}/admin/users/${userId}/photo`, {
               method: 'POST',
               body: photoForm,
+              headers: await authHeader(),
               timeout: 15000,
             });
           } catch (photoErr) {
@@ -452,7 +741,7 @@ export default function AdminScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              const res = await fetchWithTimeout(`${BASE}/admin/users/${targetUser.id}`, { method: 'DELETE', timeout: 10000 });
+              const res = await fetchWithTimeout(`${BASE}/admin/users/${targetUser.id}`, { method: 'DELETE', headers: await authHeader(), timeout: 10000 });
               if (res.ok) {
                 await fetchUsers();
                 Alert.alert('Supprimé', `${targetUser.firstName} ${targetUser.lastName} a été supprimé.`);
@@ -476,7 +765,7 @@ export default function AdminScreen() {
     try {
       const res = await fetchWithTimeout(`${BASE}/admin/users/${targetUser.id}/role`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
         body: JSON.stringify({ role: newRole }),
         timeout: 10000,
       });
@@ -511,7 +800,7 @@ export default function AdminScreen() {
             try {
               const res = await fetchWithTimeout(`${BASE}/admin/users/${targetUser.id}/status`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
                 body: JSON.stringify({ status: newStatus }),
                 timeout: 10000,
               });
@@ -600,6 +889,9 @@ export default function AdminScreen() {
     { key: 'incidents', label: 'Incidents', icon: '🚨' },
     { key: 'analytics', label: 'Analytics', icon: '📊' },
     { key: 'audit', label: 'Audit', icon: '📋' },
+    { key: 'login-history', label: 'Connexions', icon: '🔑' },
+    ...(user?.role === 'superadmin' ? [{ key: 'organizations' as AdminTab, label: 'Organisations', icon: '🏢' }] : []),
+    { key: 'sites', label: 'Sites', icon: '📍' },
   ];
 
   if (isLoading) {
@@ -616,26 +908,31 @@ export default function AdminScreen() {
   return (
     <TalionScreen statusText="Admin" statusColor="#7c3aed">
       {/* Sub-tab Navigation */}
-      <View style={styles.tabBar}>
-        {TABS.map(tab => (
-          <TouchableOpacity
-            key={tab.key}
-            style={[styles.tab, activeTab === tab.key && styles.tabActive]}
-            onPress={() => setActiveTab(tab.key)}
-          >
-            <Text style={styles.tabIcon}>{tab.icon}</Text>
-            <Text style={[styles.tabLabel, activeTab === tab.key && styles.tabLabelActive]}>
-              {tab.label}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabBarScroll}>
+        <View style={styles.tabBar}>
+          {TABS.map(tab => (
+            <TouchableOpacity
+              key={tab.key}
+              style={[styles.tab, activeTab === tab.key && styles.tabActive]}
+              onPress={() => setActiveTab(tab.key)}
+            >
+              <Text style={styles.tabIcon}>{tab.icon}</Text>
+              <Text style={[styles.tabLabel, activeTab === tab.key && styles.tabLabelActive]}>
+                {tab.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </ScrollView>
 
       <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
         {activeTab === 'users' && renderUsersTab()}
         {activeTab === 'incidents' && renderIncidentsTab()}
         {activeTab === 'analytics' && renderAnalyticsTab()}
         {activeTab === 'audit' && renderAuditTab()}
+        {activeTab === 'login-history' && renderLoginHistoryTab()}
+        {activeTab === 'organizations' && renderOrganizationsTab()}
+        {activeTab === 'sites' && renderSitesTab()}
       </ScrollView>
 
       {/* Role Change Modal */}
@@ -1012,6 +1309,90 @@ export default function AdminScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* Create Organization Modal */}
+      <Modal visible={showCreateOrgModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Nouvelle organisation</Text>
+            <Text style={styles.formLabel}>Nom</Text>
+            <TextInput
+              style={styles.formInput}
+              value={newOrgName}
+              onChangeText={setNewOrgName}
+              placeholder="Nom de l'organisation"
+              placeholderTextColor="#9ca3af"
+              returnKeyType="done"
+            />
+            <View style={styles.formActions}>
+              <TouchableOpacity
+                style={[styles.formBtn, styles.formBtnPrimary]}
+                onPress={handleCreateOrganization}
+                disabled={orgSaving}
+              >
+                {orgSaving ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.formBtnPrimaryText}>Créer</Text>}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.formBtn, styles.formBtnCancel]}
+                onPress={() => { setShowCreateOrgModal(false); setNewOrgName(''); }}
+              >
+                <Text style={styles.formBtnCancelText}>Annuler</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Create Patrol Site Modal */}
+      <Modal visible={showCreateSiteModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Nouveau site de patrouille</Text>
+            <Text style={styles.formLabel}>Nom / Adresse</Text>
+            <TextInput
+              style={styles.formInput}
+              value={newSiteName}
+              onChangeText={setNewSiteName}
+              placeholder="Nom du site"
+              placeholderTextColor="#9ca3af"
+              returnKeyType="done"
+            />
+            {user?.role === 'superadmin' && (
+              <>
+                <Text style={styles.formLabel}>Organisation</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.relTypeScroll}>
+                  {organizations.map(org => (
+                    <TouchableOpacity
+                      key={org.id}
+                      style={[styles.relTypeChip, newSiteOrgId === org.id && styles.relTypeChipActive]}
+                      onPress={() => setNewSiteOrgId(org.id)}
+                    >
+                      <Text style={[styles.relTypeChipText, newSiteOrgId === org.id && styles.relTypeChipTextActive]}>
+                        {org.name}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </>
+            )}
+            <View style={styles.formActions}>
+              <TouchableOpacity
+                style={[styles.formBtn, styles.formBtnPrimary]}
+                onPress={handleCreateSite}
+                disabled={siteSaving}
+              >
+                {siteSaving ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.formBtnPrimaryText}>Créer</Text>}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.formBtn, styles.formBtnCancel]}
+                onPress={() => { setShowCreateSiteModal(false); setNewSiteName(''); setNewSiteOrgId(''); }}
+              >
+                <Text style={styles.formBtnCancelText}>Annuler</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </TalionScreen>
   );
 
@@ -1336,6 +1717,194 @@ export default function AdminScreen() {
       </View>
     );
   }
+
+  // ─── Login History Tab ─────────────────────────────────────────────
+  function renderLoginHistoryTab() {
+    return (
+      <View>
+        {lhStats && (
+          <View style={styles.miniStatsRow}>
+            <View style={[styles.miniStat, { backgroundColor: '#f0fdf4' }]}>
+              <Text style={[styles.miniStatNumber, { color: '#22c55e' }]}>{lhStats.last24h.success}</Text>
+              <Text style={styles.miniStatLabel}>Succès 24h</Text>
+            </View>
+            <View style={[styles.miniStat, { backgroundColor: '#fef2f2' }]}>
+              <Text style={[styles.miniStatNumber, { color: '#ef4444' }]}>{lhStats.last24h.failed}</Text>
+              <Text style={styles.miniStatLabel}>Échecs 24h</Text>
+            </View>
+            <View style={[styles.miniStat, { backgroundColor: '#eff6ff' }]}>
+              <Text style={[styles.miniStatNumber, { color: '#3b82f6' }]}>{lhStats.last24h.uniqueUsers}</Text>
+              <Text style={styles.miniStatLabel}>Utilisateurs uniques</Text>
+            </View>
+            <View style={[styles.miniStat, { backgroundColor: '#f5f3ff' }]}>
+              <Text style={[styles.miniStatNumber, { color: '#7c3aed' }]}>{lhStats.totalEntries}</Text>
+              <Text style={styles.miniStatLabel}>Total</Text>
+            </View>
+          </View>
+        )}
+
+        {lhStats && lhStats.suspiciousIps.length > 0 && (
+          <View style={styles.suspiciousBanner}>
+            <Text style={styles.suspiciousBannerText}>
+              ⚠️ {lhStats.suspiciousIps.length} IP suspecte(s) : {lhStats.suspiciousIps.map(i => `${i.ip} (${i.failedAttempts})`).join(', ')}
+            </Text>
+          </View>
+        )}
+
+        <TextInput
+          style={styles.searchInput}
+          placeholder="Rechercher par nom, email, IP, appareil..."
+          placeholderTextColor="#9ca3af"
+          value={lhSearchInput}
+          onChangeText={setLhSearchInput}
+          returnKeyType="done"
+        />
+
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterScroll}>
+          <View style={styles.filterRow}>
+            {LOGIN_STATUS_FILTERS.map(f => (
+              <TouchableOpacity
+                key={f}
+                style={[styles.filterChip, lhStatusFilter === f && styles.filterChipActive]}
+                onPress={() => setLhStatusFilter(f)}
+              >
+                <Text style={[styles.filterChipText, lhStatusFilter === f && styles.filterChipTextActive]}>
+                  {f === 'all' ? 'Tous' : LOGIN_STATUS_LABELS[f] || f}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </ScrollView>
+
+        {lhUserFilter && (
+          <TouchableOpacity style={styles.activeUserFilterChip} onPress={() => setLhUserFilter(null)}>
+            <Text style={styles.activeUserFilterChipText}>👤 {lhUserFilter.name} ✕</Text>
+          </TouchableOpacity>
+        )}
+
+        <Text style={styles.sectionTitle}>Connexions ({lhTotal})</Text>
+        {lhLoading && <ActivityIndicator size="small" color="#7c3aed" style={{ marginBottom: 12 }} />}
+        {loginHistory.map(entry => (
+          <View key={entry.id} style={styles.loginHistoryCard}>
+            <View style={styles.loginHistoryHeader}>
+              {entry.userName !== 'Unknown' ? (
+                <TouchableOpacity onPress={() => setLhUserFilter({ id: entry.userId, name: entry.userName })}>
+                  <Text style={styles.loginHistoryUserLink}>{entry.userName}</Text>
+                </TouchableOpacity>
+              ) : (
+                <Text style={styles.loginHistoryUserUnknown}>Inconnu</Text>
+              )}
+              <View style={[styles.loginStatusBadge, { backgroundColor: (LOGIN_STATUS_COLORS[entry.status] || '#6b7280') + '20' }]}>
+                <Text style={[styles.loginStatusBadgeText, { color: LOGIN_STATUS_COLORS[entry.status] || '#6b7280' }]}>
+                  {LOGIN_STATUS_LABELS[entry.status] || entry.status}
+                </Text>
+              </View>
+            </View>
+            <Text style={styles.loginHistoryDetail}>{entry.email}</Text>
+            <Text style={styles.loginHistoryDetail}>{formatDate(entry.timestamp)} · {entry.device} · {entry.ip}</Text>
+            <Text style={styles.loginHistoryUA} numberOfLines={1}>{entry.userAgent}</Text>
+          </View>
+        ))}
+        {loginHistory.length === 0 && !lhLoading && (
+          <Text style={styles.relNoResults}>Aucune connexion trouvée</Text>
+        )}
+
+        {lhTotalPages > 1 && (
+          <View style={styles.paginationRow}>
+            <TouchableOpacity
+              style={[styles.paginationBtn, lhPage <= 1 && styles.paginationBtnDisabled]}
+              disabled={lhPage <= 1}
+              onPress={() => fetchLoginHistory(lhPage - 1)}
+            >
+              <Text style={styles.paginationBtnText}>Précédent</Text>
+            </TouchableOpacity>
+            <Text style={styles.paginationInfo}>Page {lhPage} / {lhTotalPages}</Text>
+            <TouchableOpacity
+              style={[styles.paginationBtn, lhPage >= lhTotalPages && styles.paginationBtnDisabled]}
+              disabled={lhPage >= lhTotalPages}
+              onPress={() => fetchLoginHistory(lhPage + 1)}
+            >
+              <Text style={styles.paginationBtnText}>Suivant</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </View>
+    );
+  }
+
+  // ─── Organizations Tab (superadmin only) ────────────────────────────
+  function renderOrganizationsTab() {
+    return (
+      <View>
+        <View style={styles.searchRow}>
+          <Text style={[styles.sectionTitle, { flex: 1, marginTop: 0, marginBottom: 0 }]}>
+            Organisations ({organizations.length})
+          </Text>
+          <TouchableOpacity style={styles.addBtn} onPress={() => setShowCreateOrgModal(true)}>
+            <Text style={styles.addBtnText}>+ Nouvelle</Text>
+          </TouchableOpacity>
+        </View>
+
+        {orgsLoading && <ActivityIndicator size="small" color="#7c3aed" style={{ marginBottom: 12 }} />}
+        {organizations.map(org => (
+          <View key={org.id} style={styles.orgCard}>
+            <View style={styles.orgCardHeader}>
+              <Text style={styles.orgCardName}>{org.name}</Text>
+              <View style={[styles.orgStatusBadge, { backgroundColor: (org.status === 'active' ? '#22c55e' : '#ef4444') + '20' }]}>
+                <Text style={[styles.orgStatusBadgeText, { color: org.status === 'active' ? '#22c55e' : '#ef4444' }]}>
+                  {org.status === 'active' ? 'Actif' : 'Suspendu'}
+                </Text>
+              </View>
+            </View>
+            <Text style={styles.loginHistoryDetail}>👥 {org.memberCount} membre(s) · Créée le {formatDate(org.createdAt)}</Text>
+            <TouchableOpacity
+              style={[styles.actionBtn, { alignSelf: 'flex-start', marginTop: 10, backgroundColor: org.status === 'active' ? '#f59e0b15' : '#22c55e15' }]}
+              onPress={() => handleToggleOrgStatus(org)}
+            >
+              <Text style={[styles.actionBtnText, { color: org.status === 'active' ? '#f59e0b' : '#22c55e' }]}>
+                {org.status === 'active' ? 'Suspendre' : 'Réactiver'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        ))}
+        {organizations.length === 0 && !orgsLoading && (
+          <Text style={styles.relNoResults}>Aucune organisation</Text>
+        )}
+      </View>
+    );
+  }
+
+  // ─── Patrol Sites Tab ───────────────────────────────────────────────
+  function renderSitesTab() {
+    return (
+      <View>
+        <View style={styles.searchRow}>
+          <Text style={[styles.sectionTitle, { flex: 1, marginTop: 0, marginBottom: 0 }]}>
+            Sites de patrouille ({patrolSitesAdmin.length})
+          </Text>
+          <TouchableOpacity style={styles.addBtn} onPress={() => setShowCreateSiteModal(true)}>
+            <Text style={styles.addBtnText}>+ Ajouter</Text>
+          </TouchableOpacity>
+        </View>
+
+        {sitesLoading && <ActivityIndicator size="small" color="#7c3aed" style={{ marginBottom: 12 }} />}
+        {patrolSitesAdmin.map(site => (
+          <View key={site.id} style={styles.siteCard}>
+            <View style={styles.siteCardInfo}>
+              <Text style={styles.siteCardName}>{site.name}</Text>
+              <Text style={styles.loginHistoryDetail}>Créé le {formatDate(site.createdAt)}</Text>
+            </View>
+            <TouchableOpacity style={styles.siteDeleteBtn} onPress={() => handleDeleteSite(site)}>
+              <Text style={styles.siteDeleteBtnText}>🗑️</Text>
+            </TouchableOpacity>
+          </View>
+        ))}
+        {patrolSitesAdmin.length === 0 && !sitesLoading && (
+          <Text style={styles.relNoResults}>Aucun site de patrouille</Text>
+        )}
+      </View>
+    );
+  }
 }
 
 function getCategoryColor(category: string): string {
@@ -1357,8 +1926,9 @@ const styles = StyleSheet.create({
   scrollContent: { padding: 16, paddingBottom: 40 },
 
   // Tab Bar
-  tabBar: { flexDirection: 'row', backgroundColor: '#ffffff', borderBottomWidth: 1, borderBottomColor: '#e5e7eb', paddingHorizontal: 4 },
-  tab: { flex: 1, alignItems: 'center', paddingVertical: 10, borderBottomWidth: 2, borderBottomColor: 'transparent' },
+  tabBarScroll: { backgroundColor: '#ffffff', borderBottomWidth: 1, borderBottomColor: '#e5e7eb' },
+  tabBar: { flexDirection: 'row', paddingHorizontal: 4 },
+  tab: { alignItems: 'center', paddingVertical: 10, paddingHorizontal: 14, borderBottomWidth: 2, borderBottomColor: 'transparent' },
   tabActive: { borderBottomColor: '#7c3aed' },
   tabIcon: { fontSize: 18, marginBottom: 2 },
   tabLabel: { fontSize: 11, color: '#6b7280', fontWeight: '500' },
@@ -1461,6 +2031,39 @@ const styles = StyleSheet.create({
   auditTarget: { fontSize: 11, color: '#7c3aed', fontWeight: '600', marginBottom: 4 },
   auditCategoryBadge: { alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 },
   auditCategoryText: { fontSize: 9, fontWeight: '800' },
+
+  // Login History
+  suspiciousBanner: { backgroundColor: '#fffbeb', borderWidth: 1, borderColor: '#fde68a', borderRadius: 10, padding: 10, marginBottom: 12 },
+  suspiciousBannerText: { fontSize: 12, color: '#92400e', fontWeight: '600' },
+  activeUserFilterChip: { alignSelf: 'flex-start', backgroundColor: '#7c3aed', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, marginBottom: 12 },
+  activeUserFilterChipText: { color: '#ffffff', fontSize: 12, fontWeight: '700' },
+  loginHistoryCard: { backgroundColor: '#ffffff', borderRadius: 12, padding: 14, marginBottom: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.05, shadowRadius: 3, elevation: 1 },
+  loginHistoryHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+  loginHistoryUserLink: { fontSize: 14, fontWeight: '700', color: '#7c3aed' },
+  loginHistoryUserUnknown: { fontSize: 14, fontWeight: '700', color: '#9ca3af', fontStyle: 'italic' },
+  loginStatusBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 },
+  loginStatusBadgeText: { fontSize: 10, fontWeight: '700' },
+  loginHistoryDetail: { fontSize: 12, color: '#4b5563', marginTop: 2 },
+  loginHistoryUA: { fontSize: 10, color: '#9ca3af', marginTop: 2 },
+  paginationRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 12, marginBottom: 20 },
+  paginationBtn: { backgroundColor: '#f3f4f6', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 10 },
+  paginationBtnDisabled: { opacity: 0.4 },
+  paginationBtnText: { fontSize: 13, fontWeight: '700', color: '#4b5563' },
+  paginationInfo: { fontSize: 12, color: '#6b7280', fontWeight: '600' },
+
+  // Organizations
+  orgCard: { backgroundColor: '#ffffff', borderRadius: 12, padding: 14, marginBottom: 10, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.05, shadowRadius: 3, elevation: 1 },
+  orgCardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  orgCardName: { fontSize: 16, fontWeight: '700', color: '#1f2937' },
+  orgStatusBadge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },
+  orgStatusBadgeText: { fontSize: 11, fontWeight: '700' },
+
+  // Patrol Sites
+  siteCard: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#ffffff', borderRadius: 12, padding: 14, marginBottom: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.05, shadowRadius: 3, elevation: 1 },
+  siteCardInfo: { flex: 1 },
+  siteCardName: { fontSize: 15, fontWeight: '700', color: '#1f2937' },
+  siteDeleteBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#fef2f2', justifyContent: 'center', alignItems: 'center' },
+  siteDeleteBtnText: { fontSize: 16 },
 
   // Modal
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
