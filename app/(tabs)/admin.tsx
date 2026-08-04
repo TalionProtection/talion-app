@@ -1926,7 +1926,7 @@ const styles = StyleSheet.create({
   scrollContent: { padding: 16, paddingBottom: 40 },
 
   // Tab Bar
-  tabBarScroll: { backgroundColor: '#ffffff', borderBottomWidth: 1, borderBottomColor: '#e5e7eb' },
+  tabBarScroll: { flexGrow: 0, flexShrink: 0, height: 56, backgroundColor: '#ffffff', borderBottomWidth: 1, borderBottomColor: '#e5e7eb' },
   tabBar: { flexDirection: 'row', paddingHorizontal: 4 },
   tab: { alignItems: 'center', paddingVertical: 10, paddingHorizontal: 14, borderBottomWidth: 2, borderBottomColor: 'transparent' },
   tabActive: { borderBottomColor: '#7c3aed' },
