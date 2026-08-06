@@ -876,6 +876,24 @@ interface ActivePatrolRound {
   immobilityAlertedAt?: number; // set while an immobility episode is being alerted; cleared once movement resumes
 }
 
+// A responder's live hand-off to native turn-by-turn nav after finishing a
+// round, for the console to mirror. Not durable in Supabase — only
+// patrol_route_history (the geometry actually taken) is; this is a
+// reconnect-friendly live view, same rationale as ActivePatrolRound.
+interface ActiveResponderRoute {
+  responderId: string;
+  responderName: string;
+  organizationId: string;
+  toSiteId: string;
+  toSiteName: string;
+  geometry: { latitude: number; longitude: number }[];
+  distanceMeters: number;
+  durationSeconds: number;
+  rationale: string;
+  mode: 'driving' | 'walking';
+  startedAt: number;
+}
+
 interface ProximityAlert {
   id: string;
   perimeterId: string;
@@ -992,6 +1010,8 @@ const patrolReports: PatrolReport[] = [];
 // restart mid-round, which is an acceptable loss for a live-tracking
 // session, same tradeoff as PTT's talking-state).
 const activePatrolRounds = new Map<string, ActivePatrolRound>();
+// Keyed by responderId — a responder can only navigate to one place at a time.
+const activeResponderRoutes = new Map<string, ActiveResponderRoute>();
 
 // ─── PTT data stores ─────────────────────────────────────────────────────
 const DEFAULT_PTT_CHANNELS: PTTChannelServer[] = [
@@ -1407,6 +1427,13 @@ async function handleAuth(ws: any, token: string | undefined, setUserContext: (i
     data: activeRounds,
   }));
 
+  const activeRoutes = Array.from(activeResponderRoutes.values())
+    .filter(r => canAccessOrg({ role: userRole, organizationId }, r.organizationId));
+  ws.send(JSON.stringify({
+    type: 'activeRoutesSnapshot',
+    data: activeRoutes,
+  }));
+
   if (!wasAlreadyConnected) broadcastUserStatus(userId, 'online');
 }
 
@@ -1539,6 +1566,15 @@ function checkGeofences(userId: string, location: { latitude: number; longitude:
 const MAX_ROUND_TRAIL_POINTS = 2000; // ~5-6h of continuous tracking at typical GPS cadence
 const IMMOBILITY_THRESHOLD_MS = 3 * 60 * 1000; // 3 minutes, per product decision
 const MOVEMENT_NOISE_METERS = 8; // below this, treat consecutive pings as "not moved" (GPS jitter)
+
+// Route-planning tuning constants (post-round "next location" navigation).
+const ROUTE_ARRIVAL_RADIUS_METERS = 100; // auto-clears the active nav once within this of the destination
+const ROUTE_HISTORY_LOOKBACK_DAYS = 45; // how far back to compare candidate routes against past trips
+const ROUTE_HISTORY_MAX_ROWS = 20; // cap on history rows fetched per scoring call
+const BLACKBOOK_PROXIMITY_LOOKBACK_DAYS = 90;
+const BLACKBOOK_PROXIMITY_RADIUS_METERS = 150;
+const ROUTE_GRID_CELL_DEGREES = 0.00068; // ~75m at Geneva's latitude, for coarse route-overlap comparison
+const ROUTE_DURATION_CAP_FACTOR = 1.25; // don't recommend a route more than 25% longer than the fastest option
 
 // "Needs attention" notification for a round in progress — mirrors
 // handleSoftEscalation's pattern (audit + push loop + broadcast), but scopes
@@ -1692,6 +1728,199 @@ function finalizePatrolRound(
   }
 
   return report;
+}
+
+// ─── Post-round route planning: "next location" recommendation ─────────
+// A site has no coordinates of its own (see PatrolSite) — its destination
+// for routing purposes is the centroid of its own checkpoints, which must
+// already exist for the site's round-verification to work at all. Returns
+// null (caller responds 400) rather than guessing when a site has none.
+function resolveSiteDestination(siteId: string): { latitude: number; longitude: number } | null {
+  const checkpoints = Array.from(patrolCheckpoints.values()).filter(c => c.siteId === siteId);
+  if (checkpoints.length === 0) return null;
+  const latitude = checkpoints.reduce((sum, c) => sum + c.latitude, 0) / checkpoints.length;
+  const longitude = checkpoints.reduce((sum, c) => sum + c.longitude, 0) / checkpoints.length;
+  return { latitude, longitude };
+}
+
+async function fetchDirectionsAlternatives(
+  from: { latitude: number; longitude: number },
+  to: { latitude: number; longitude: number },
+  mode: 'driving' | 'walking'
+): Promise<{ geometry: { latitude: number; longitude: number }[]; distanceMeters: number; durationSeconds: number }[]> {
+  const token = process.env.MAPBOX_TOKEN;
+  if (!token) throw new Error('MAPBOX_TOKEN not configured');
+  const coords = `${from.longitude},${from.latitude};${to.longitude},${to.latitude}`;
+  const url = `https://api.mapbox.com/directions/v5/mapbox/${mode}/${coords}?alternatives=true&geometries=geojson&overview=full&access_token=${token}`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Mapbox Directions error: ${response.status}`);
+  const data = await response.json();
+  if (!data.routes || data.routes.length === 0) throw new Error('No route found');
+  return data.routes.map((r: any) => ({
+    geometry: (r.geometry.coordinates as [number, number][]).map(([lon, lat]) => ({ latitude: lat, longitude: lon })),
+    distanceMeters: r.distance,
+    durationSeconds: r.duration,
+  }));
+}
+
+// Coarse grid bucketing (not a precise metric grid — fine for comparing
+// routes that are all local to the same city) used to compare a candidate
+// route's footprint against past trips without needing a geo library.
+function snapGeometryToGrid(geometry: { latitude: number; longitude: number }[]): Set<string> {
+  const cells = new Set<string>();
+  for (const p of geometry) {
+    const cellLat = Math.round(p.latitude / ROUTE_GRID_CELL_DEGREES);
+    const cellLon = Math.round(p.longitude / ROUTE_GRID_CELL_DEGREES);
+    cells.add(`${cellLat}:${cellLon}`);
+  }
+  return cells;
+}
+
+function jaccardOverlap(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let intersection = 0;
+  for (const cell of a) if (b.has(cell)) intersection++;
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+// Reduces a route's point count before it's persisted to patrol_route_history
+// — full-resolution geometry isn't needed for grid-overlap scoring.
+function simplifyGeometry(geometry: { latitude: number; longitude: number }[], maxPoints: number): { latitude: number; longitude: number }[] {
+  if (geometry.length <= maxPoints) return geometry;
+  const step = geometry.length / maxPoints;
+  const result: { latitude: number; longitude: number }[] = [];
+  for (let i = 0; i < maxPoints; i++) result.push(geometry[Math.floor(i * step)]);
+  return result;
+}
+
+async function fetchRecentRouteHistory(organizationId: string, toSiteId: string): Promise<{ geometry: { latitude: number; longitude: number }[] }[]> {
+  try {
+    const cutoff = Date.now() - ROUTE_HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+    const { data, error } = await supabaseAdmin.from('patrol_route_history')
+      .select('geometry')
+      .eq('organization_id', organizationId)
+      .eq('to_site_id', toSiteId)
+      .gte('created_at', cutoff)
+      .order('created_at', { ascending: false })
+      .limit(ROUTE_HISTORY_MAX_ROWS);
+    if (error) { console.error('[RouteHistory] fetch error:', error.message); return []; }
+    return (data || []).map((row: any) => ({
+      geometry: ((row.geometry || []) as [number, number][]).map(([lon, lat]) => ({ latitude: lat, longitude: lon })),
+    }));
+  } catch (e) { console.error('[RouteHistory] fetch error:', e); return []; }
+}
+
+async function saveRouteHistoryToSupabase(row: {
+  id: string; organizationId: string; responderId: string; toSiteId: string;
+  fromLatitude: number; fromLongitude: number; geometry: { latitude: number; longitude: number }[];
+  distanceMeters: number; durationSeconds: number; createdAt: number;
+}): Promise<void> {
+  try {
+    const simplified = simplifyGeometry(row.geometry, 40);
+    const { error } = await supabaseAdmin.from('patrol_route_history').insert({
+      id: row.id, organization_id: row.organizationId, responder_id: row.responderId,
+      to_site_id: row.toSiteId, from_latitude: row.fromLatitude, from_longitude: row.fromLongitude,
+      geometry: simplified.map(p => [p.longitude, p.latitude]),
+      distance_meters: row.distanceMeters, duration_seconds: row.durationSeconds, created_at: row.createdAt,
+    });
+    if (error) console.error('[RouteHistory] save error:', error.message);
+  } catch (e) { console.error('[RouteHistory] save error:', e); }
+}
+
+// Counts distinct Blackbook sightings (this org, recent) that fall within
+// BLACKBOOK_PROXIMITY_RADIUS_METERS of a candidate route — the security-
+// specific signal a generic maps app has no way to factor in.
+function countBlackbookProximity(geometry: { latitude: number; longitude: number }[], organizationId: string): { count: number; mostRecentTimestamp?: number } {
+  const cutoff = Date.now() - BLACKBOOK_PROXIMITY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+  const sampled = geometry.filter((_, i) => i % 4 === 0); // bound the O(points * sightings) cost
+  const nearSightingIds = new Set<string>();
+  let mostRecentTimestamp: number | undefined;
+  for (const entry of blackbookEntries.values()) {
+    if (entry.organizationId !== organizationId) continue;
+    for (const sighting of entry.sightings) {
+      if (sighting.timestamp < cutoff) continue;
+      const lat = sighting.location?.latitude;
+      const lon = sighting.location?.longitude;
+      if (lat === undefined || lon === undefined) continue;
+      const isNear = sampled.some(p => haversineDistance(p.latitude, p.longitude, lat, lon) <= BLACKBOOK_PROXIMITY_RADIUS_METERS);
+      if (isNear) {
+        nearSightingIds.add(sighting.id);
+        if (!mostRecentTimestamp || sighting.timestamp > mostRecentTimestamp) mostRecentTimestamp = sighting.timestamp;
+      }
+    }
+  }
+  return { count: nearSightingIds.size, mostRecentTimestamp };
+}
+
+interface ScoredRouteCandidate {
+  geometry: { latitude: number; longitude: number }[];
+  distanceMeters: number;
+  durationSeconds: number;
+  overlapFraction: number;
+  blackbookNearCount: number;
+  blackbookMostRecentTimestamp?: number;
+  score: number;
+}
+
+// The actual "intelligence": among the routing API's alternatives, prefer
+// the one least similar to recently-taken paths to the same site (anti-
+// routine) and least exposed to recent Blackbook sightings (security),
+// without accepting more than a 25% time penalty for it.
+function scoreRouteCandidates(
+  candidates: { geometry: { latitude: number; longitude: number }[]; distanceMeters: number; durationSeconds: number }[],
+  historyRows: { geometry: { latitude: number; longitude: number }[] }[],
+  organizationId: string
+): { best: ScoredRouteCandidate; rationale: string; alternativesConsidered: number } {
+  const shortestDuration = Math.min(...candidates.map(c => c.durationSeconds));
+  const historyGrids = historyRows.map(h => snapGeometryToGrid(h.geometry));
+
+  const withinTimeBudget = candidates.filter(c => c.durationSeconds <= shortestDuration * ROUTE_DURATION_CAP_FACTOR);
+  const scored: ScoredRouteCandidate[] = withinTimeBudget
+    .map(c => {
+      const grid = snapGeometryToGrid(c.geometry);
+      const overlapFraction = historyGrids.length === 0 ? 0 : Math.max(...historyGrids.map(h => jaccardOverlap(grid, h)));
+      const { count: blackbookNearCount, mostRecentTimestamp } = countBlackbookProximity(c.geometry, organizationId);
+      const score = 0.6 * overlapFraction + 0.4 * Math.min(blackbookNearCount / 3, 1);
+      return { ...c, overlapFraction, blackbookNearCount, blackbookMostRecentTimestamp: mostRecentTimestamp, score };
+    })
+    .sort((a, b) => a.score - b.score || a.durationSeconds - b.durationSeconds);
+
+  const best = scored[0];
+  let rationale: string;
+  if (best.blackbookNearCount > 0) {
+    const dateStr = best.blackbookMostRecentTimestamp
+      ? new Date(best.blackbookMostRecentTimestamp).toLocaleDateString('fr-CH')
+      : '';
+    rationale = `⚠ Passe à proximité de ${best.blackbookNearCount} signalement(s) Blackbook${dateStr ? ` (dernier : ${dateStr})` : ''} — c'était le meilleur compromis parmi les itinéraires disponibles.`;
+  } else if (historyGrids.length === 0) {
+    rationale = 'Itinéraire le plus direct (aucun historique récent pour ce trajet).';
+  } else if (best.overlapFraction < 0.35) {
+    rationale = 'Itinéraire varié — peu ou pas emprunté récemment.';
+  } else {
+    rationale = 'Itinéraire recommandé (peu de variantes disponibles pour ce trajet).';
+  }
+
+  return { best, rationale, alternativesConsidered: candidates.length };
+}
+
+// Auto-clears an active navigation once the responder's position comes
+// within ROUTE_ARRIVAL_RADIUS_METERS of the destination — reuses the
+// existing location-ingestion pipeline, no client "I've arrived" call
+// needed, same approach as checkActivePatrolRound.
+function checkActiveResponderRoute(userId: string, location: { latitude: number; longitude: number }) {
+  const route = activeResponderRoutes.get(userId);
+  if (!route) return;
+  const destination = resolveSiteDestination(route.toSiteId);
+  if (!destination) return;
+  const dist = haversineDistance(location.latitude, location.longitude, destination.latitude, destination.longitude);
+  if (dist <= ROUTE_ARRIVAL_RADIUS_METERS) {
+    activeResponderRoutes.delete(userId);
+    const payload = { type: 'patrolRouteEnded', data: { responderId: userId, toSiteId: route.toSiteId } };
+    broadcastToOrgRole(route.organizationId, 'dispatcher', payload);
+    broadcastToOrgRole(route.organizationId, 'admin', payload);
+    addAuditEntry('system', 'Navigation terminée', route.responderName, `Arrivée à "${route.toSiteName}"`, userId, route.organizationId);
+  }
 }
 
 // Track which users are actively sharing location
@@ -2564,6 +2793,7 @@ function handleLocationUpdate(ws: any, userId: string, userRole: string, locatio
     });
     checkGeofences(userId, locationData);
     checkActivePatrolRound(userId, locationData);
+    checkActiveResponderRoute(userId, locationData);
   } else {
     // Regular user location update - broadcast as userLocationUpdate to dispatch (both
     // dispatcher and admin consoles), unless this user is in Ghost mode and hasn't
@@ -6589,6 +6819,84 @@ app.post('/api/patrol/rounds/:id/finish', requireAuth, requireRole('responder'),
 app.get('/api/patrol/rounds/active', requireAuth, (req, res) => {
   const rounds = Array.from(activePatrolRounds.values()).filter(r => canAccessOrg(req.supabaseUser!, r.organizationId));
   res.json(rounds);
+});
+
+// POST /api/patrol/routes/plan - preview a recommended route to a site,
+// scored for variety (vs recent patrol_route_history) and Blackbook
+// proximity. Pure preview: no persistence, no broadcast — see
+// /routes/confirm for what happens once the responder actually navigates.
+app.post('/api/patrol/routes/plan', requireAuth, requireRole('responder'), async (req, res) => {
+  const { fromLatitude, fromLongitude, toSiteId, mode } = req.body;
+  if (typeof fromLatitude !== 'number' || typeof fromLongitude !== 'number') {
+    return res.status(400).json({ error: 'fromLatitude/fromLongitude are required' });
+  }
+  if (!toSiteId) return res.status(400).json({ error: 'toSiteId is required' });
+  const site = patrolSites.get(toSiteId);
+  if (!site) return res.status(404).json({ error: 'Patrol site not found' });
+  if (!canAccessOrg(req.supabaseUser!, site.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  const travelMode: 'driving' | 'walking' = mode === 'walking' ? 'walking' : 'driving';
+
+  const destination = resolveSiteDestination(toSiteId);
+  if (!destination) return res.status(400).json({ error: "Ce site n'a pas encore de checkpoints configurés — impossible de calculer une destination." });
+
+  try {
+    const candidates = await fetchDirectionsAlternatives({ latitude: fromLatitude, longitude: fromLongitude }, destination, travelMode);
+    const historyRows = await fetchRecentRouteHistory(site.organizationId, toSiteId);
+    const { best, rationale, alternativesConsidered } = scoreRouteCandidates(candidates, historyRows, site.organizationId);
+    res.json({
+      geometry: best.geometry,
+      distanceMeters: best.distanceMeters,
+      durationSeconds: best.durationSeconds,
+      rationale,
+      mode: travelMode,
+      alternativesConsidered,
+      toSiteId,
+      toSiteName: site.name,
+    });
+  } catch (e: any) {
+    console.error('[RoutePlan] error:', e);
+    res.status(502).json({ error: 'Impossible de calculer un itinéraire pour le moment.' });
+  }
+});
+
+// POST /api/patrol/routes/confirm - the responder actually starts
+// navigating: persists the taken geometry to patrol_route_history (so
+// future planning for this site avoids it) and broadcasts the live route
+// to dispatch/admin.
+app.post('/api/patrol/routes/confirm', requireAuth, requireRole('responder'), async (req, res) => {
+  const { toSiteId, geometry, distanceMeters, durationSeconds, rationale, mode, fromLatitude, fromLongitude } = req.body;
+  if (!toSiteId || !Array.isArray(geometry) || geometry.length === 0) {
+    return res.status(400).json({ error: 'toSiteId and geometry are required' });
+  }
+  const site = patrolSites.get(toSiteId);
+  if (!site) return res.status(404).json({ error: 'Patrol site not found' });
+  if (!canAccessOrg(req.supabaseUser!, site.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+
+  const caller = req.supabaseUser!;
+  const responderName = adminUsers.get(caller.id)?.name || caller.id;
+  const now = Date.now();
+  const travelMode: 'driving' | 'walking' = mode === 'walking' ? 'walking' : 'driving';
+
+  saveRouteHistoryToSupabase({
+    id: uuidv4(), organizationId: site.organizationId, responderId: caller.id, toSiteId,
+    fromLatitude: typeof fromLatitude === 'number' ? fromLatitude : geometry[0].latitude,
+    fromLongitude: typeof fromLongitude === 'number' ? fromLongitude : geometry[0].longitude,
+    geometry, distanceMeters: distanceMeters || 0, durationSeconds: durationSeconds || 0, createdAt: now,
+  }).catch(() => {});
+
+  const route: ActiveResponderRoute = {
+    responderId: caller.id, responderName, organizationId: site.organizationId,
+    toSiteId, toSiteName: site.name, geometry, distanceMeters: distanceMeters || 0,
+    durationSeconds: durationSeconds || 0, rationale: rationale || '', mode: travelMode, startedAt: now,
+  };
+  activeResponderRoutes.set(caller.id, route);
+
+  const payload = { type: 'patrolRouteStarted', data: route };
+  broadcastToOrgRole(site.organizationId, 'dispatcher', payload);
+  broadcastToOrgRole(site.organizationId, 'admin', payload);
+  addAuditEntry('system', 'Navigation démarrée', responderName, `Navigation vers "${site.name}" (${travelMode === 'walking' ? 'à pied' : 'en véhicule'})`, caller.id, site.organizationId);
+
+  res.json({ success: true });
 });
 
 // GET /api/patrol/statuses - list predefined patrol statuses
