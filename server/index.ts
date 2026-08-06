@@ -90,20 +90,14 @@ if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
 //                        stricter dispatcher/responder routes tightened below.
 app.use('/dispatch', requireAuth, requireRole('dispatcher'));
 app.use('/api/messaging', requireAuth, requireRole('dispatcher'));
-// TEMPORARY ROLLBACK (see patrol-report routes below for the matching fallback logic):
-// the mobile app's patrol.tsx never sent an Authorization header, so requireRole('responder')
-// here 401'd every real patrol submission as soon as this landed. Reverted to non-blocking
-// until the mobile app fix (auth header added) has shipped and propagated to field agents —
-// re-enable `requireAuth, requireRole('responder')` once confirmed. The warning log below is
-// how we'll confirm that: watch for it to stop appearing before flipping back.
-app.use('/api/patrol', async (req, res, next) => {
-  await optionalAuth(req, res, () => {
-    if (!req.supabaseUser) {
-      console.warn(`[Auth][PatrolRollback] No valid token on ${req.method} ${req.originalUrl} — still on old app build?`);
-    }
-    next();
-  });
-});
+// requireAuth only (not requireRole('responder')) — this prefix also serves
+// GET /api/patrol/statuses (static config, any role) and
+// GET /api/patrol/rounds/active (any staff role, not just responders).
+// Individual routes that need a narrower role add their own requireRole.
+// The mobile app's missing Authorization header (the original reason this
+// was rolled back to optionalAuth) was fixed in this session's earlier
+// auth-header sweep.
+app.use('/api/patrol', requireAuth);
 app.use('/api/conversations', requireAuth);
 app.use('/alerts', requireAuth);
 
@@ -803,6 +797,25 @@ interface PatrolMedia {
   uploadedAt: number;
 }
 
+// Per-checkpoint outcome recorded on a PatrolReport once a GPS round is
+// finalized — a frozen snapshot of the live tracking done in
+// ActivePatrolRound, not the checkpoint config itself (which can be
+// edited/deleted independently afterward).
+interface PatrolCheckpointResult {
+  checkpointId: string;
+  name: string;
+  visited: boolean;
+  dwellSeconds: number;
+  minDwellSeconds?: number;
+  dwellMet: boolean;
+}
+
+interface PatrolTrailPoint {
+  latitude: number;
+  longitude: number;
+  timestamp: number;
+}
+
 interface PatrolReport {
   id: string;
   createdAt: number;
@@ -815,6 +828,49 @@ interface PatrolReport {
   media?: PatrolMedia[];
   escalatedIncidentId?: string; // set once a dispatcher has escalated this report to a real incident
   organizationId?: string;
+  // Present only for reports generated from a GPS-tracked round (see
+  // ActivePatrolRound) — absent for quick/manual reports, which keep
+  // working exactly as before.
+  siteId?: string;
+  checkpoints?: PatrolCheckpointResult[];
+  trail?: PatrolTrailPoint[];
+  roundStatus?: 'completed' | 'interrupted';
+  startedAt?: number;
+  interruptReason?: string;
+}
+
+// Live per-checkpoint tracking state for a round in progress — internal
+// bookkeeping (dwellSeconds/wasInsideLastPing) that gets condensed down to
+// PatrolCheckpointResult once the round finalizes.
+interface ActivePatrolRoundCheckpointState {
+  checkpointId: string;
+  name: string;
+  latitude: number;
+  longitude: number;
+  radiusMeters: number;
+  minDwellSeconds?: number;
+  dwellSeconds: number; // cumulative time spent inside, across possibly-multiple entries
+  wasInsideLastPing: boolean;
+  visited: boolean;
+  dwellMet: boolean;
+}
+
+// A patrol round currently being walked — durable (not just a WS broadcast)
+// so a reconnecting dispatcher/admin still sees it, mirroring how `alerts`
+// backs `alertsSnapshot` on WS handleAuth.
+interface ActivePatrolRound {
+  id: string;
+  siteId: string;
+  siteName: string;
+  responderId: string;
+  responderName: string;
+  organizationId?: string;
+  startedAt: number;
+  checkpoints: ActivePatrolRoundCheckpointState[];
+  trail: PatrolTrailPoint[];
+  lastLocation?: { latitude: number; longitude: number; timestamp: number };
+  lastMovementAt: number;
+  immobilityAlertedAt?: number; // set while an immobility episode is being alerted; cleared once movement resumes
 }
 
 interface ProximityAlert {
@@ -927,6 +983,12 @@ const checkInTimers = new Map<string, ReturnType<typeof setTimeout>>(); // key: 
 
 // Patrol reports storage
 const patrolReports: PatrolReport[] = [];
+
+// Rounds currently being walked (in-memory only — a round either finalizes
+// into a PatrolReport, which IS persisted, or it's abandoned by a server
+// restart mid-round, which is an acceptable loss for a live-tracking
+// session, same tradeoff as PTT's talking-state).
+const activePatrolRounds = new Map<string, ActivePatrolRound>();
 
 // ─── PTT data stores ─────────────────────────────────────────────────────
 const DEFAULT_PTT_CHANNELS: PTTChannelServer[] = [
@@ -1335,6 +1397,13 @@ async function handleAuth(ws: any, token: string | undefined, setUserContext: (i
     data: activeAlerts,
   }));
 
+  const activeRounds = Array.from(activePatrolRounds.values())
+    .filter(r => canAccessOrg({ role: userRole, organizationId }, r.organizationId));
+  ws.send(JSON.stringify({
+    type: 'activePatrolRoundsSnapshot',
+    data: activeRounds,
+  }));
+
   if (!wasAlreadyConnected) broadcastUserStatus(userId, 'online');
 }
 
@@ -1461,6 +1530,149 @@ function checkGeofences(userId: string, location: { latitude: number; longitude:
       console.log(`[Geofence] ${responderName} EXITED zone ${zoneId}`);
     }
   });
+}
+
+// ─── Active patrol round tracking ────────────────────────────────────────
+const MAX_ROUND_TRAIL_POINTS = 2000; // ~5-6h of continuous tracking at typical GPS cadence
+const IMMOBILITY_THRESHOLD_MS = 3 * 60 * 1000; // 3 minutes, per product decision
+const MOVEMENT_NOISE_METERS = 8; // below this, treat consecutive pings as "not moved" (GPS jitter)
+
+// "Needs attention" notification for a round in progress — mirrors
+// handleSoftEscalation's pattern (audit + push loop + broadcast), but scopes
+// the push loop to the round's own organization (handleSoftEscalation's
+// push loop doesn't, an existing gap out of scope here).
+function notifyPatrolRoundAttention(round: ActivePatrolRound, kind: 'immobility' | 'missed_checkpoints', message: string) {
+  addAuditEntry('system', kind === 'immobility' ? 'Ronde: immobilité prolongée' : 'Ronde: checkpoint(s) manqué(s)', round.responderName, message, round.responderId, round.organizationId);
+  const notifiedStaff = new Set<string>();
+  for (const [, entry] of pushTokens) {
+    if ((entry.userRole === 'dispatcher' || entry.userRole === 'admin' || entry.userRole === 'superadmin') && !notifiedStaff.has(entry.userId)) {
+      if (!canAccessOrg({ role: entry.userRole, organizationId: adminUsers.get(entry.userId)?.organizationId }, round.organizationId)) continue;
+      notifiedStaff.add(entry.userId);
+      sendPushToUser(entry.userId, kind === 'immobility' ? '⚠️ Ronde — immobilité prolongée' : '⚠️ Ronde — checkpoint(s) manqué(s)', message, { type: 'patrol_round_attention', roundId: round.id, kind }).catch(() => {});
+    }
+  }
+  const payload = { type: 'patrolRoundAttention', data: { roundId: round.id, kind, message, responderId: round.responderId, responderName: round.responderName, siteName: round.siteName } };
+  broadcastToOrgRole(round.organizationId, 'dispatcher', payload);
+  broadcastToOrgRole(round.organizationId, 'admin', payload);
+}
+
+// Checkpoint proximity + cumulative dwell-time detection, plus prolonged-
+// immobility detection, for a responder's round in progress (if any).
+// Mirrors checkGeofences' haversine-distance approach; called from
+// handleLocationUpdate on every ping, same as checkGeofences.
+function checkActivePatrolRound(userId: string, location: { latitude: number; longitude: number }) {
+  const round = Array.from(activePatrolRounds.values()).find(r => r.responderId === userId);
+  if (!round) return;
+  const now = Date.now();
+  const deltaSeconds = round.lastLocation ? Math.max(0, (now - round.lastLocation.timestamp) / 1000) : 0;
+
+  round.trail.push({ latitude: location.latitude, longitude: location.longitude, timestamp: now });
+  if (round.trail.length > MAX_ROUND_TRAIL_POINTS) round.trail.splice(0, round.trail.length - MAX_ROUND_TRAIL_POINTS);
+
+  const movedMeters = round.lastLocation
+    ? haversineDistance(round.lastLocation.latitude, round.lastLocation.longitude, location.latitude, location.longitude)
+    : Infinity;
+  if (movedMeters > MOVEMENT_NOISE_METERS) {
+    round.lastMovementAt = now;
+    round.immobilityAlertedAt = undefined;
+  }
+  round.lastLocation = { latitude: location.latitude, longitude: location.longitude, timestamp: now };
+
+  let insideAnyCheckpoint = false;
+  const newlySatisfied: ActivePatrolRoundCheckpointState[] = [];
+  round.checkpoints.forEach(cp => {
+    const dist = haversineDistance(location.latitude, location.longitude, cp.latitude, cp.longitude);
+    const insideNow = dist <= cp.radiusMeters;
+    if (insideNow) {
+      insideAnyCheckpoint = true;
+      if (cp.wasInsideLastPing) cp.dwellSeconds += deltaSeconds;
+      cp.visited = true;
+      const wasMet = cp.dwellMet;
+      cp.dwellMet = !cp.minDwellSeconds || cp.dwellSeconds >= cp.minDwellSeconds;
+      if (cp.dwellMet && !wasMet) newlySatisfied.push(cp);
+    }
+    cp.wasInsideLastPing = insideNow;
+  });
+
+  if (!insideAnyCheckpoint && !round.immobilityAlertedAt && (now - round.lastMovementAt) > IMMOBILITY_THRESHOLD_MS) {
+    round.immobilityAlertedAt = now;
+    notifyPatrolRoundAttention(round, 'immobility', `${round.responderName} est immobile depuis plus de 3 minutes pendant la ronde "${round.siteName}".`);
+  }
+
+  const locPayload = { type: 'patrolRoundLocationUpdate', data: { roundId: round.id, location, timestamp: now } };
+  broadcastToOrgRole(round.organizationId, 'dispatcher', locPayload);
+  broadcastToOrgRole(round.organizationId, 'admin', locPayload);
+  newlySatisfied.forEach(cp => {
+    const msg = { type: 'patrolCheckpointVisited', data: { roundId: round.id, checkpointId: cp.checkpointId, name: cp.name } };
+    broadcastToOrgRole(round.organizationId, 'dispatcher', msg);
+    broadcastToOrgRole(round.organizationId, 'admin', msg);
+  });
+}
+
+// Condenses a round in progress into a durable PatrolReport, removes it
+// from activePatrolRounds, and notifies dispatch/admin — shared by both the
+// interrupt and finish routes, which only differ in roundStatus/reason.
+function finalizePatrolRound(round: ActivePatrolRound, roundStatus: 'completed' | 'interrupted', interruptReason?: string): PatrolReport {
+  const checkpointResults: PatrolCheckpointResult[] = round.checkpoints.map(cp => ({
+    checkpointId: cp.checkpointId,
+    name: cp.name,
+    visited: cp.visited,
+    dwellSeconds: Math.round(cp.dwellSeconds),
+    minDwellSeconds: cp.minDwellSeconds,
+    dwellMet: cp.dwellMet,
+  }));
+  const missed = checkpointResults.filter(c => !c.dwellMet);
+
+  const report: PatrolReport = {
+    id: `PR-${uuidv4().slice(0, 8)}`,
+    createdAt: Date.now(),
+    createdBy: round.responderId,
+    createdByName: round.responderName,
+    location: round.siteName,
+    status: missed.length > 0 ? 'inhabituel' : 'habituel',
+    tasks: [],
+    media: [],
+    organizationId: round.organizationId,
+    siteId: round.siteId,
+    checkpoints: checkpointResults,
+    trail: round.trail,
+    roundStatus,
+    startedAt: round.startedAt,
+    interruptReason: roundStatus === 'interrupted' ? interruptReason : undefined,
+  };
+
+  patrolReports.unshift(report);
+  persistPatrolReports();
+  savePatrolReportToSupabase(report).catch(e => console.error('[PatrolRound] Supabase save error:', e));
+
+  activePatrolRounds.delete(round.id);
+
+  const finishPayload = {
+    type: roundStatus === 'interrupted' ? 'patrolRoundInterrupted' : 'patrolRoundFinished',
+    data: { roundId: round.id, report },
+  };
+  broadcastToOrgRole(round.organizationId, 'dispatcher', finishPayload);
+  broadcastToOrgRole(round.organizationId, 'admin', finishPayload);
+
+  addAuditEntry(
+    'system',
+    roundStatus === 'interrupted' ? 'Ronde interrompue' : 'Ronde terminée',
+    round.responderName,
+    `Ronde "${round.siteName}" ${roundStatus === 'interrupted' ? 'interrompue' : 'terminée'}${missed.length > 0 ? ` — ${missed.length} checkpoint(s) manqué(s)` : ''}`,
+    round.responderId,
+    round.organizationId
+  );
+
+  if (missed.length > 0) {
+    const names = missed.map(c => c.name).join(', ');
+    notifyPatrolRoundAttention(
+      round,
+      'missed_checkpoints',
+      `${round.responderName} a ${roundStatus === 'interrupted' ? 'interrompu' : 'terminé'} la ronde "${round.siteName}" sans valider : ${names}.`
+    );
+  }
+
+  return report;
 }
 
 // Track which users are actively sharing location
@@ -2332,6 +2544,7 @@ function handleLocationUpdate(ws: any, userId: string, userRole: string, locatio
       timestamp: Date.now(),
     });
     checkGeofences(userId, locationData);
+    checkActivePatrolRound(userId, locationData);
   } else {
     // Regular user location update - broadcast as userLocationUpdate to dispatch (both
     // dispatcher and admin consoles), unless this user is in Ghost mode and hasn't
@@ -6270,6 +6483,83 @@ app.delete('/admin/patrol-checkpoints/:id', requireAuth, requireRole('admin'), (
   res.json({ success: true });
 });
 
+// ─── Patrol rounds (GPS-tracked, live) ───────────────────────────────────
+// POST /api/patrol/rounds/start - begin a GPS-tracked round tied to a site.
+// Checkpoint detection then runs automatically off the responder's normal
+// location pings (see checkActivePatrolRound, wired into handleLocationUpdate)
+// - no separate tracking call needed from the client.
+app.post('/api/patrol/rounds/start', requireAuth, requireRole('responder'), (req, res) => {
+  const { siteId } = req.body;
+  if (!siteId) return res.status(400).json({ error: 'siteId is required' });
+  const site = patrolSites.get(siteId);
+  if (!site) return res.status(404).json({ error: 'Patrol site not found' });
+  if (!canAccessOrg(req.supabaseUser!, site.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+
+  const caller = req.supabaseUser!;
+  const existing = Array.from(activePatrolRounds.values()).find(r => r.responderId === caller.id);
+  if (existing) return res.status(409).json({ error: 'Une ronde est déjà en cours', roundId: existing.id });
+
+  const siteCheckpoints = Array.from(patrolCheckpoints.values()).filter(c => c.siteId === siteId);
+  const responderName = adminUsers.get(caller.id)?.name || caller.id;
+  const now = Date.now();
+  const round: ActivePatrolRound = {
+    id: uuidv4(),
+    siteId,
+    siteName: site.name,
+    responderId: caller.id,
+    responderName,
+    organizationId: site.organizationId,
+    startedAt: now,
+    checkpoints: siteCheckpoints.map(c => ({
+      checkpointId: c.id,
+      name: c.name,
+      latitude: c.latitude,
+      longitude: c.longitude,
+      radiusMeters: c.radiusMeters,
+      minDwellSeconds: c.minDwellSeconds,
+      dwellSeconds: 0,
+      wasInsideLastPing: false,
+      visited: false,
+      dwellMet: false,
+    })),
+    trail: [],
+    lastMovementAt: now,
+  };
+  activePatrolRounds.set(round.id, round);
+
+  const payload = { type: 'patrolRoundStarted', data: round };
+  broadcastToOrgRole(round.organizationId, 'dispatcher', payload);
+  broadcastToOrgRole(round.organizationId, 'admin', payload);
+  addAuditEntry('system', 'Ronde démarrée', responderName, `Ronde démarrée sur le site "${site.name}" (${round.checkpoints.length} checkpoint(s))`, caller.id, round.organizationId);
+
+  res.status(201).json(round);
+});
+
+// POST /api/patrol/rounds/:id/interrupt - end early (emergency) — still produces a report
+app.post('/api/patrol/rounds/:id/interrupt', requireAuth, requireRole('responder'), (req, res) => {
+  const round = activePatrolRounds.get(req.params.id as string);
+  if (!round) return res.status(404).json({ error: 'Active round not found' });
+  if (round.responderId !== req.supabaseUser!.id) return res.status(403).json({ error: 'Not authorized' });
+  const report = finalizePatrolRound(round, 'interrupted', req.body?.reason);
+  res.json({ success: true, report });
+});
+
+// POST /api/patrol/rounds/:id/finish - normal completion
+app.post('/api/patrol/rounds/:id/finish', requireAuth, requireRole('responder'), (req, res) => {
+  const round = activePatrolRounds.get(req.params.id as string);
+  if (!round) return res.status(404).json({ error: 'Active round not found' });
+  if (round.responderId !== req.supabaseUser!.id) return res.status(403).json({ error: 'Not authorized' });
+  const report = finalizePatrolRound(round, 'completed');
+  res.json({ success: true, report });
+});
+
+// GET /api/patrol/rounds/active - rounds currently in progress, org-scoped
+// (used for initial page/screen load; live updates arrive via WS)
+app.get('/api/patrol/rounds/active', requireAuth, (req, res) => {
+  const rounds = Array.from(activePatrolRounds.values()).filter(r => canAccessOrg(req.supabaseUser!, r.organizationId));
+  res.json(rounds);
+});
+
 // GET /api/patrol/statuses - list predefined patrol statuses
 app.get('/api/patrol/statuses', (_req, res) => {
   res.json({ statuses: PATROL_STATUS_CONFIG });
@@ -6287,14 +6577,7 @@ app.post('/api/patrol/reports', (req, res) => {
     return res.status(400).json({ error: `Invalid status. Must be one of: ${Object.keys(PATROL_STATUS_CONFIG).join(', ')}` });
   }
 
-  // Author is derived from the authenticated session when present. TEMPORARY: the
-  // /api/patrol prefix is currently non-blocking (see app.use above) while the mobile
-  // app fix propagates, so fall back to the client-supplied id for old app versions
-  // that send no token — remove this fallback once requireAuth is re-enabled there.
-  const createdBy = req.supabaseUser?.id || req.body.createdBy;
-  if (!createdBy) {
-    return res.status(400).json({ error: 'createdBy is required' });
-  }
+  const createdBy = req.supabaseUser!.id;
   const user = adminUsers.get(createdBy);
   if (!user) {
     return res.status(404).json({ error: 'User profile not found' });
@@ -6389,21 +6672,10 @@ app.get('/api/patrol/reports', (req, res) => {
   const to = req.query.to ? Number(req.query.to) : null;
   const limit = Math.min(Number(req.query.limit) || 100, 500);
 
-  // Identity/role come from the authenticated session when present. TEMPORARY: fall back
-  // to client-supplied query params for old app versions while /api/patrol is non-blocking
-  // (see app.use above) — remove this fallback once requireAuth is re-enabled there.
-  const currentUserId = req.supabaseUser?.id || (req.query.userId as string);
-  const currentRole = req.supabaseUser?.role || (req.query.role as string);
+  const currentUserId = req.supabaseUser!.id;
+  const currentRole = req.supabaseUser!.role;
 
-  let filtered = [...patrolReports];
-  // Same temporary tolerance as the identity fallback above: only narrow by
-  // organization when a verified caller is actually present (real callers
-  // today — the app via apiGet, dispatch-web via its authenticated fetch
-  // wrapper — always have one). Once requireAuth replaces optionalAuth on
-  // this prefix, req.supabaseUser is guaranteed and this becomes unconditional.
-  if (req.supabaseUser) {
-    filtered = filtered.filter(r => canAccessOrg(req.supabaseUser!, r.organizationId));
-  }
+  let filtered = [...patrolReports].filter(r => canAccessOrg(req.supabaseUser!, r.organizationId));
   if (locationFilter) {
     filtered = filtered.filter(r => r.location === locationFilter);
   }
@@ -6451,6 +6723,7 @@ app.get('/api/patrol/coverage', requireAuth, (req, res) => {
 app.get('/api/patrol/reports/:id', (req, res) => {
   const report = patrolReports.find(r => r.id === req.params.id);
   if (!report) return res.status(404).json({ error: 'Patrol report not found' });
+  if (!canAccessOrg(req.supabaseUser!, report.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   res.json(report);
 });
 
@@ -6460,6 +6733,7 @@ app.get('/api/patrol/reports/:id', (req, res) => {
 app.post('/api/patrol/reports/:id/escalate-to-incident', async (req, res) => {
   const report = patrolReports.find(r => r.id === req.params.id);
   if (!report) return res.status(404).json({ error: 'Patrol report not found' });
+  if (!canAccessOrg(req.supabaseUser!, report.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   if (report.escalatedIncidentId) {
     return res.status(400).json({ error: 'Report already escalated', incidentId: report.escalatedIncidentId });
   }
@@ -6508,6 +6782,7 @@ app.post('/api/patrol/reports/:id/escalate-to-incident', async (req, res) => {
 app.post('/api/patrol/reports/:id/media', uploadMedia.single('media'), (req: any, res) => {
   const report = patrolReports.find(r => r.id === req.params.id);
   if (!report) return res.status(404).json({ error: 'Patrol report not found' });
+  if (!canAccessOrg(req.supabaseUser!, report.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
   const ext = req.file.originalname.split('.').pop()?.toLowerCase() || '';
@@ -6532,6 +6807,7 @@ app.post('/api/patrol/reports/:id/media', uploadMedia.single('media'), (req: any
 app.delete('/api/patrol/reports/:id/media/:mediaId', (req, res) => {
   const report = patrolReports.find(r => r.id === req.params.id);
   if (!report) return res.status(404).json({ error: 'Patrol report not found' });
+  if (!canAccessOrg(req.supabaseUser!, report.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   if (!report.media) return res.status(404).json({ error: 'No media found' });
 
   const idx = report.media.findIndex(m => m.id === req.params.mediaId);
@@ -7405,6 +7681,9 @@ async function loadPatrolReportsFromSupabase(): Promise<void> {
         createdByName: r.created_by_name, location: r.location,
         status: r.status, tasks: r.tasks || [], notes: r.notes, media: r.media || [],
         organizationId: r.organization_id || undefined,
+        siteId: r.site_id || undefined, checkpoints: r.checkpoints || undefined,
+        trail: r.trail || undefined, roundStatus: r.round_status || undefined,
+        startedAt: r.started_at || undefined, interruptReason: r.interrupt_reason || undefined,
       }));
       console.log(`[Supabase] Loaded ${data.length} patrol reports`);
     }
@@ -7418,6 +7697,9 @@ async function savePatrolReportToSupabase(report: PatrolReport): Promise<void> {
       created_by_name: report.createdByName, location: report.location,
       status: report.status, tasks: report.tasks, notes: report.notes || null, media: report.media || [],
       organization_id: report.organizationId || null,
+      site_id: report.siteId || null, checkpoints: report.checkpoints || null,
+      trail: report.trail || null, round_status: report.roundStatus || null,
+      started_at: report.startedAt || null, interrupt_reason: report.interruptReason || null,
     });
     if (error) console.error('[Supabase] savePatrolReportToSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] savePatrolReportToSupabase error:', e); }
