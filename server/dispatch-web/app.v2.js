@@ -6733,14 +6733,35 @@ function closeCheckpointConfigModal() {
   cancelCheckpointForm();
 }
 
+let checkpointMapTileLayer = null;
+let checkpointMapIsSatellite = false;
+
+const CHECKPOINT_STREET_TILES_LIGHT = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+const CHECKPOINT_STREET_TILES_DARK = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+const CHECKPOINT_SATELLITE_TILES = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+
+function toggleCheckpointSatellite() {
+  checkpointMapIsSatellite = !checkpointMapIsSatellite;
+  if (checkpointMapTileLayer) checkpointConfigMap.removeLayer(checkpointMapTileLayer);
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  const tiles = checkpointMapIsSatellite
+    ? CHECKPOINT_SATELLITE_TILES
+    : (isLight ? CHECKPOINT_STREET_TILES_LIGHT : CHECKPOINT_STREET_TILES_DARK);
+  checkpointMapTileLayer = L.tileLayer(tiles, {
+    subdomains: checkpointMapIsSatellite ? undefined : 'abcd',
+    maxZoom: checkpointMapIsSatellite ? 20 : 19,
+    attribution: checkpointMapIsSatellite ? 'Tiles &copy; Esri' : undefined,
+  }).addTo(checkpointConfigMap);
+  const btn = document.getElementById('cpSatelliteToggle');
+  if (btn) btn.innerHTML = checkpointMapIsSatellite ? '&#x1F5FA;&#xFE0F; Plan' : '&#x1F6F0;&#xFE0F; Satellite';
+}
+
 function initCheckpointConfigMap() {
   if (checkpointConfigMap) { checkpointConfigMap.invalidateSize(); return; }
   checkpointConfigMap = L.map('checkpointConfigMap', { center: [46.2125, 6.1795], zoom: 15 });
   const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-  const tiles = isLight
-    ? 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
-    : 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
-  L.tileLayer(tiles, { subdomains: 'abcd', maxZoom: 19 }).addTo(checkpointConfigMap);
+  const tiles = isLight ? CHECKPOINT_STREET_TILES_LIGHT : CHECKPOINT_STREET_TILES_DARK;
+  checkpointMapTileLayer = L.tileLayer(tiles, { subdomains: 'abcd', maxZoom: 19 }).addTo(checkpointConfigMap);
   checkpointConfigMap.on('click', (e) => {
     if (!document.getElementById('cpSiteSelect').value) {
       showToast("Sélectionnez un site d'abord", 'error');

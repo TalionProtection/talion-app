@@ -21,6 +21,7 @@ interface WebMapProps {
   showsMyLocationButton?: boolean;
   showsCompass?: boolean;
   onPress?: (e: { nativeEvent: { coordinate: { latitude: number; longitude: number } } }) => void;
+  mapType?: 'standard' | 'satellite' | 'hybrid' | 'terrain';
   style?: any;
 }
 

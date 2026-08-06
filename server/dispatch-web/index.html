@@ -1325,7 +1325,10 @@
       </select>
       <p style="font-size:12px;color:var(--text-secondary);margin:0 0 10px;">Cliquez sur la carte pour placer un nouveau checkpoint. Cliquez sur un checkpoint existant pour le modifier ou le supprimer.</p>
       <div style="display:flex;gap:12px;">
-        <div id="checkpointConfigMap" style="flex:1;height:70vh;min-height:420px;border-radius:8px;"></div>
+        <div style="flex:1;position:relative;">
+          <div id="checkpointConfigMap" style="height:70vh;min-height:420px;border-radius:8px;"></div>
+          <button id="cpSatelliteToggle" class="btn btn-secondary" onclick="toggleCheckpointSatellite()" style="position:absolute;top:10px;right:10px;z-index:1000;">&#x1F6F0;&#xFE0F; Satellite</button>
+        </div>
         <div id="checkpointList" style="width:260px;height:70vh;min-height:420px;overflow-y:auto;flex-shrink:0;"></div>
       </div>
       <div id="checkpointForm" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid var(--border-color);">

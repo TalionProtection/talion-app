@@ -304,6 +304,7 @@ export default function AdminScreen() {
   const [checkpointRadius, setCheckpointRadius] = useState('15');
   const [checkpointMinDwell, setCheckpointMinDwell] = useState('');
   const [checkpointSaving, setCheckpointSaving] = useState(false);
+  const [checkpointMapSatellite, setCheckpointMapSatellite] = useState(false);
 
   // ─── Data Loading (from real server) ──────────────────────────────
   const fetchUsers = useCallback(async () => {
@@ -1550,8 +1551,17 @@ export default function AdminScreen() {
             Touchez la carte pour ajouter un checkpoint. Touchez un checkpoint existant pour le modifier.
           </Text>
           <View style={{ flex: 1 }}>
+            <TouchableOpacity
+              style={styles.checkpointSatelliteBtn}
+              onPress={() => setCheckpointMapSatellite(s => !s)}
+            >
+              <Text style={styles.checkpointSatelliteBtnText}>
+                {checkpointMapSatellite ? '🗺️ Plan' : '🛰️ Satellite'}
+              </Text>
+            </TouchableOpacity>
             <NativeMapView
               style={{ flex: 1 }}
+              mapType={checkpointMapSatellite ? 'satellite' : 'standard'}
               initialRegion={{
                 latitude: checkpoints[0]?.latitude ?? 46.2125,
                 longitude: checkpoints[0]?.longitude ?? 6.1795,
@@ -2334,6 +2344,8 @@ const styles = StyleSheet.create({
   checkpointMapHint: { fontSize: 12, color: '#6b7280', textAlign: 'center', paddingVertical: 8, backgroundColor: '#f9fafb' },
   checkpointPin: { width: 26, height: 26, borderRadius: 13, backgroundColor: '#ffffff', borderWidth: 2, borderColor: '#3b82f6', justifyContent: 'center', alignItems: 'center' },
   checkpointFormPanel: { padding: 16, borderTopWidth: 1, borderTopColor: '#e5e7eb', backgroundColor: '#ffffff' },
+  checkpointSatelliteBtn: { position: 'absolute', top: 10, right: 10, zIndex: 10, backgroundColor: '#ffffff', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.2, shadowRadius: 3, elevation: 3 },
+  checkpointSatelliteBtnText: { fontSize: 13, fontWeight: '600', color: '#1f2937' },
 
   // Modal
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
