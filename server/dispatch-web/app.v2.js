@@ -6744,14 +6744,17 @@ function toggleCheckpointSatellite() {
   checkpointMapIsSatellite = !checkpointMapIsSatellite;
   if (checkpointMapTileLayer) checkpointConfigMap.removeLayer(checkpointMapTileLayer);
   const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  // Leaflet's TileLayer.getTileUrl() calls this.options.subdomains.length on
+  // every tile regardless of whether the URL template even contains {s} — so
+  // subdomains must never be set to undefined, only omitted (falls back to
+  // Leaflet's harmless default 'abc') or given a real string/array.
+  const tileOptions = checkpointMapIsSatellite
+    ? { maxZoom: 20, attribution: 'Tiles &copy; Esri' }
+    : { subdomains: 'abcd', maxZoom: 19 };
   const tiles = checkpointMapIsSatellite
     ? CHECKPOINT_SATELLITE_TILES
     : (isLight ? CHECKPOINT_STREET_TILES_LIGHT : CHECKPOINT_STREET_TILES_DARK);
-  checkpointMapTileLayer = L.tileLayer(tiles, {
-    subdomains: checkpointMapIsSatellite ? undefined : 'abcd',
-    maxZoom: checkpointMapIsSatellite ? 20 : 19,
-    attribution: checkpointMapIsSatellite ? 'Tiles &copy; Esri' : undefined,
-  }).addTo(checkpointConfigMap);
+  checkpointMapTileLayer = L.tileLayer(tiles, tileOptions).addTo(checkpointConfigMap);
   const btn = document.getElementById('cpSatelliteToggle');
   if (btn) btn.innerHTML = checkpointMapIsSatellite ? '&#x1F5FA;&#xFE0F; Plan' : '&#x1F6F0;&#xFE0F; Satellite';
 }
