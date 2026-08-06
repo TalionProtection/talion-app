@@ -21,6 +21,7 @@ import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
 import { authHeader } from '@/lib/auth-fetch';
 import type { UserRole } from '@/lib/auth-context';
 import { offlineCache } from '@/services/offline-cache';
+import NativeMapView, { Marker, Circle } from '@/components/map-view';
 
 // Types matching server AdminUser (without passwordHash)
 interface ServerUser {
@@ -97,6 +98,18 @@ interface AdminPatrolSite {
   id: string;
   organizationId: string;
   name: string;
+  createdAt: number;
+}
+
+interface AdminPatrolCheckpoint {
+  id: string;
+  siteId: string;
+  organizationId: string;
+  name: string;
+  latitude: number;
+  longitude: number;
+  radiusMeters: number;
+  minDwellSeconds?: number;
   createdAt: number;
 }
 
@@ -280,6 +293,17 @@ export default function AdminScreen() {
   const [newSiteName, setNewSiteName] = useState('');
   const [newSiteOrgId, setNewSiteOrgId] = useState('');
   const [siteSaving, setSiteSaving] = useState(false);
+
+  // ─── Patrol checkpoints state (per-site GPS waypoints for rondes) ──
+  const [checkpointMapSite, setCheckpointMapSite] = useState<AdminPatrolSite | null>(null);
+  const [checkpoints, setCheckpoints] = useState<AdminPatrolCheckpoint[]>([]);
+  const [checkpointsLoading, setCheckpointsLoading] = useState(false);
+  const [pendingCheckpoint, setPendingCheckpoint] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [editingCheckpointId, setEditingCheckpointId] = useState<string | null>(null);
+  const [checkpointName, setCheckpointName] = useState('');
+  const [checkpointRadius, setCheckpointRadius] = useState('15');
+  const [checkpointMinDwell, setCheckpointMinDwell] = useState('');
+  const [checkpointSaving, setCheckpointSaving] = useState(false);
 
   // ─── Data Loading (from real server) ──────────────────────────────
   const fetchUsers = useCallback(async () => {
@@ -542,6 +566,122 @@ export default function AdminScreen() {
       ]
     );
   }, [BASE, fetchPatrolSitesAdmin]);
+
+  // ─── Patrol checkpoints (GPS waypoints per site) ───────────────────
+  const fetchCheckpoints = useCallback(async (siteId: string) => {
+    setCheckpointsLoading(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/admin/patrol-checkpoints?siteId=${siteId}`, { timeout: 10000, headers: await authHeader() });
+      if (res.ok) setCheckpoints(await res.json());
+    } catch (e) {
+      console.warn('Failed to fetch checkpoints:', e);
+    }
+    setCheckpointsLoading(false);
+  }, [BASE]);
+
+  const openCheckpointMap = useCallback((site: AdminPatrolSite) => {
+    setCheckpointMapSite(site);
+    setPendingCheckpoint(null);
+    setEditingCheckpointId(null);
+    fetchCheckpoints(site.id);
+  }, [fetchCheckpoints]);
+
+  const closeCheckpointMap = useCallback(() => {
+    setCheckpointMapSite(null);
+    setCheckpoints([]);
+    setPendingCheckpoint(null);
+    setEditingCheckpointId(null);
+  }, []);
+
+  const cancelCheckpointForm = useCallback(() => {
+    setPendingCheckpoint(null);
+    setEditingCheckpointId(null);
+    setCheckpointName('');
+    setCheckpointRadius('15');
+    setCheckpointMinDwell('');
+  }, []);
+
+  const startNewCheckpointAt = useCallback((latitude: number, longitude: number) => {
+    setEditingCheckpointId(null);
+    setPendingCheckpoint({ latitude, longitude });
+    setCheckpointName('');
+    setCheckpointRadius('15');
+    setCheckpointMinDwell('');
+  }, []);
+
+  const startEditCheckpoint = useCallback((cp: AdminPatrolCheckpoint) => {
+    setEditingCheckpointId(cp.id);
+    setPendingCheckpoint({ latitude: cp.latitude, longitude: cp.longitude });
+    setCheckpointName(cp.name);
+    setCheckpointRadius(String(cp.radiusMeters));
+    setCheckpointMinDwell(cp.minDwellSeconds != null ? String(cp.minDwellSeconds) : '');
+  }, []);
+
+  const handleSaveCheckpoint = useCallback(async () => {
+    if (!checkpointMapSite || !pendingCheckpoint) return;
+    const name = checkpointName.trim();
+    const radiusMeters = Number(checkpointRadius);
+    if (!name || !radiusMeters) {
+      Alert.alert('Erreur', 'Nom et rayon sont obligatoires.');
+      return;
+    }
+    const minDwellSeconds = checkpointMinDwell.trim() ? Number(checkpointMinDwell.trim()) : undefined;
+    setCheckpointSaving(true);
+    try {
+      const isEditing = !!editingCheckpointId;
+      const url = isEditing ? `${BASE}/admin/patrol-checkpoints/${editingCheckpointId}` : `${BASE}/admin/patrol-checkpoints`;
+      const payload: any = isEditing
+        ? { name, radiusMeters, minDwellSeconds: minDwellSeconds ?? null }
+        : { siteId: checkpointMapSite.id, name, latitude: pendingCheckpoint.latitude, longitude: pendingCheckpoint.longitude, radiusMeters, minDwellSeconds };
+      const res = await fetchWithTimeout(url, {
+        method: isEditing ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify(payload),
+        timeout: 10000,
+      });
+      if (res.ok) {
+        cancelCheckpointForm();
+        await fetchCheckpoints(checkpointMapSite.id);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        Alert.alert('Erreur', err.error || `Échec (${res.status})`);
+      }
+    } catch (e: any) {
+      Alert.alert('Erreur', e.message || 'Impossible de contacter le serveur.');
+    }
+    setCheckpointSaving(false);
+  }, [BASE, checkpointMapSite, pendingCheckpoint, editingCheckpointId, checkpointName, checkpointRadius, checkpointMinDwell, cancelCheckpointForm, fetchCheckpoints]);
+
+  const handleDeleteCheckpoint = useCallback((cp: AdminPatrolCheckpoint) => {
+    Alert.alert(
+      'Supprimer le checkpoint',
+      `Êtes-vous sûr de vouloir supprimer "${cp.name}" ?`,
+      [
+        { text: 'Annuler', style: 'cancel' },
+        {
+          text: 'Supprimer',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const res = await fetchWithTimeout(`${BASE}/admin/patrol-checkpoints/${cp.id}`, {
+                method: 'DELETE',
+                headers: await authHeader(),
+                timeout: 10000,
+              });
+              if (res.ok) {
+                cancelCheckpointForm();
+                if (checkpointMapSite) await fetchCheckpoints(checkpointMapSite.id);
+              } else {
+                Alert.alert('Erreur', 'Impossible de supprimer ce checkpoint.');
+              }
+            } catch {
+              Alert.alert('Erreur', 'Impossible de contacter le serveur.');
+            }
+          },
+        },
+      ]
+    );
+  }, [BASE, checkpointMapSite, cancelCheckpointForm, fetchCheckpoints]);
 
   // ─── User CRUD Handlers ───────────────────────────────────────────
   const openCreateForm = useCallback(() => {
@@ -1393,6 +1533,125 @@ export default function AdminScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* Checkpoint Map Modal — tap the map to place a GPS checkpoint */}
+      <Modal visible={!!checkpointMapSite} animationType="slide" onRequestClose={closeCheckpointMap}>
+        <View style={{ flex: 1, backgroundColor: '#fff' }}>
+          <View style={styles.checkpointMapHeader}>
+            <TouchableOpacity onPress={closeCheckpointMap}>
+              <Text style={styles.checkpointMapClose}>✕</Text>
+            </TouchableOpacity>
+            <Text style={styles.checkpointMapTitle} numberOfLines={1}>
+              📍 {checkpointMapSite?.name}
+            </Text>
+            {checkpointsLoading ? <ActivityIndicator size="small" color="#7c3aed" /> : <View style={{ width: 24 }} />}
+          </View>
+          <Text style={styles.checkpointMapHint}>
+            Touchez la carte pour ajouter un checkpoint. Touchez un checkpoint existant pour le modifier.
+          </Text>
+          <View style={{ flex: 1 }}>
+            <NativeMapView
+              style={{ flex: 1 }}
+              initialRegion={{
+                latitude: checkpoints[0]?.latitude ?? 46.2125,
+                longitude: checkpoints[0]?.longitude ?? 6.1795,
+                latitudeDelta: 0.01,
+                longitudeDelta: 0.01,
+              }}
+              onPress={(e: any) => startNewCheckpointAt(e.nativeEvent.coordinate.latitude, e.nativeEvent.coordinate.longitude)}
+            >
+              {checkpoints.map(cp => (
+                <React.Fragment key={cp.id}>
+                  <Circle
+                    center={{ latitude: cp.latitude, longitude: cp.longitude }}
+                    radius={cp.radiusMeters}
+                    strokeColor={editingCheckpointId === cp.id ? '#f59e0b' : '#3b82f6'}
+                    fillColor={editingCheckpointId === cp.id ? 'rgba(245,158,11,0.15)' : 'rgba(59,130,246,0.15)'}
+                    strokeWidth={2}
+                  />
+                  <Marker
+                    coordinate={{ latitude: cp.latitude, longitude: cp.longitude }}
+                    onPress={() => startEditCheckpoint(cp)}
+                  >
+                    <View style={styles.checkpointPin}>
+                      <Text style={{ fontSize: 12 }}>📍</Text>
+                    </View>
+                  </Marker>
+                </React.Fragment>
+              ))}
+              {pendingCheckpoint && !editingCheckpointId && (
+                <Circle
+                  center={pendingCheckpoint}
+                  radius={Number(checkpointRadius) || 15}
+                  strokeColor="#22c55e"
+                  fillColor="rgba(34,197,94,0.15)"
+                  strokeWidth={2}
+                />
+              )}
+            </NativeMapView>
+          </View>
+
+          {pendingCheckpoint && (
+            <View style={styles.checkpointFormPanel}>
+              <Text style={styles.formLabel}>Nom</Text>
+              <TextInput
+                style={styles.formInput}
+                value={checkpointName}
+                onChangeText={setCheckpointName}
+                placeholder="Nom du checkpoint"
+                placeholderTextColor="#9ca3af"
+              />
+              <View style={styles.formRow}>
+                <View style={styles.formHalf}>
+                  <Text style={styles.formLabel}>Rayon (m)</Text>
+                  <TextInput
+                    style={styles.formInput}
+                    value={checkpointRadius}
+                    onChangeText={setCheckpointRadius}
+                    keyboardType="numeric"
+                    placeholder="15"
+                    placeholderTextColor="#9ca3af"
+                  />
+                </View>
+                <View style={styles.formHalf}>
+                  <Text style={styles.formLabel}>Temps min. (s)</Text>
+                  <TextInput
+                    style={styles.formInput}
+                    value={checkpointMinDwell}
+                    onChangeText={setCheckpointMinDwell}
+                    keyboardType="numeric"
+                    placeholder="Optionnel"
+                    placeholderTextColor="#9ca3af"
+                  />
+                </View>
+              </View>
+              <View style={styles.formActions}>
+                <TouchableOpacity
+                  style={[styles.formBtn, styles.formBtnPrimary]}
+                  onPress={handleSaveCheckpoint}
+                  disabled={checkpointSaving}
+                >
+                  {checkpointSaving ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.formBtnPrimaryText}>Enregistrer</Text>}
+                </TouchableOpacity>
+                {editingCheckpointId && (
+                  <TouchableOpacity
+                    style={[styles.formBtn, { backgroundColor: '#fef2f2' }]}
+                    onPress={() => {
+                      const cp = checkpoints.find(c => c.id === editingCheckpointId);
+                      if (cp) handleDeleteCheckpoint(cp);
+                    }}
+                  >
+                    <Text style={{ color: '#ef4444', fontSize: 16, fontWeight: '700' }}>Supprimer</Text>
+                  </TouchableOpacity>
+                )}
+                <TouchableOpacity style={[styles.formBtn, styles.formBtnCancel]} onPress={cancelCheckpointForm}>
+                  <Text style={styles.formBtnCancelText}>Annuler</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+        </View>
+      </Modal>
     </TalionScreen>
   );
 
@@ -1894,6 +2153,9 @@ export default function AdminScreen() {
               <Text style={styles.siteCardName}>{site.name}</Text>
               <Text style={styles.loginHistoryDetail}>Créé le {formatDate(site.createdAt)}</Text>
             </View>
+            <TouchableOpacity style={[styles.actionBtn, { backgroundColor: '#3b82f615' }]} onPress={() => openCheckpointMap(site)}>
+              <Text style={[styles.actionBtnText, { color: '#3b82f6' }]}>📍 Checkpoints</Text>
+            </TouchableOpacity>
             <TouchableOpacity style={styles.siteDeleteBtn} onPress={() => handleDeleteSite(site)}>
               <Text style={styles.siteDeleteBtnText}>🗑️</Text>
             </TouchableOpacity>
@@ -2064,6 +2326,14 @@ const styles = StyleSheet.create({
   siteCardName: { fontSize: 15, fontWeight: '700', color: '#1f2937' },
   siteDeleteBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#fef2f2', justifyContent: 'center', alignItems: 'center' },
   siteDeleteBtnText: { fontSize: 16 },
+
+  // Checkpoint map
+  checkpointMapHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 54, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: '#e5e7eb' },
+  checkpointMapClose: { fontSize: 20, color: '#6b7280', width: 24 },
+  checkpointMapTitle: { fontSize: 16, fontWeight: '700', color: '#1f2937', flex: 1, textAlign: 'center' },
+  checkpointMapHint: { fontSize: 12, color: '#6b7280', textAlign: 'center', paddingVertical: 8, backgroundColor: '#f9fafb' },
+  checkpointPin: { width: 26, height: 26, borderRadius: 13, backgroundColor: '#ffffff', borderWidth: 2, borderColor: '#3b82f6', justifyContent: 'center', alignItems: 'center' },
+  checkpointFormPanel: { padding: 16, borderTopWidth: 1, borderTopColor: '#e5e7eb', backgroundColor: '#ffffff' },
 
   // Modal
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },

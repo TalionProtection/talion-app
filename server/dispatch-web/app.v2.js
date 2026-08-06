@@ -638,6 +638,7 @@ setInterval(() => {
 // ─── Init ────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   setupNavigation();
+  setupCheckpointAdminUI();
   checkEmergencyOverrideStatus();
   // Show audio unlock reminder
   setTimeout(() => {
@@ -6694,6 +6695,207 @@ function setupSectorAdminUI() {
   const isAdmin = localStorage.getItem('talion_role') === 'admin';
   const btn = document.getElementById('btnManageSectors');
   if (btn) btn.style.display = isAdmin ? 'inline-flex' : 'none';
+}
+
+function setupCheckpointAdminUI() {
+  const role = localStorage.getItem('talion_role');
+  const isAdminOrAbove = role === 'admin' || role === 'superadmin';
+  const btn = document.getElementById('btnConfigCheckpoints');
+  if (btn) btn.style.display = isAdminOrAbove ? 'inline-flex' : 'none';
+}
+
+// ─── Patrol checkpoint configuration (admin only) ─────────────────────
+let checkpointConfigMap = null;
+let checkpointSites = [];
+let checkpointsForSite = [];
+let checkpointMarkers = {}; // id -> {marker, circle}
+let editingCheckpointId = null; // null while creating a new checkpoint
+let pendingCheckpointLatLng = null;
+let pendingPreviewCircle = null;
+
+async function openCheckpointConfigModal() {
+  document.getElementById('checkpointConfigModal').style.display = 'flex';
+  if (!checkpointSites.length) {
+    try {
+      const res = await fetch(`${API_BASE}/admin/patrol-sites`);
+      checkpointSites = res.ok ? await res.json() : [];
+    } catch (e) { checkpointSites = []; }
+  }
+  const select = document.getElementById('cpSiteSelect');
+  select.innerHTML = '<option value="">Sélectionner un site...</option>' +
+    checkpointSites.map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+  // Modal must be visible (display:flex) before Leaflet measures its container.
+  setTimeout(initCheckpointConfigMap, 50);
+}
+
+function closeCheckpointConfigModal() {
+  document.getElementById('checkpointConfigModal').style.display = 'none';
+  cancelCheckpointForm();
+}
+
+function initCheckpointConfigMap() {
+  if (checkpointConfigMap) { checkpointConfigMap.invalidateSize(); return; }
+  checkpointConfigMap = L.map('checkpointConfigMap', { center: [46.2125, 6.1795], zoom: 15 });
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  const tiles = isLight
+    ? 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
+    : 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+  L.tileLayer(tiles, { subdomains: 'abcd', maxZoom: 19 }).addTo(checkpointConfigMap);
+  checkpointConfigMap.on('click', (e) => {
+    if (!document.getElementById('cpSiteSelect').value) {
+      showToast("Sélectionnez un site d'abord", 'error');
+      return;
+    }
+    startNewCheckpointAt(e.latlng);
+  });
+  const radiusInput = document.getElementById('cpRadius');
+  radiusInput.addEventListener('input', () => {
+    if (pendingCheckpointLatLng) showPendingPreview(pendingCheckpointLatLng, Number(radiusInput.value) || 15);
+  });
+}
+
+async function onCheckpointSiteChange() {
+  const siteId = document.getElementById('cpSiteSelect').value;
+  cancelCheckpointForm();
+  clearCheckpointMarkers();
+  if (!siteId) { checkpointsForSite = []; renderCheckpointList(); return; }
+  try {
+    const res = await fetch(`${API_BASE}/admin/patrol-checkpoints?siteId=${siteId}`);
+    checkpointsForSite = res.ok ? await res.json() : [];
+  } catch (e) { checkpointsForSite = []; }
+  renderCheckpointList();
+  drawCheckpointMarkers();
+  if (checkpointsForSite.length) {
+    const group = L.featureGroup(Object.values(checkpointMarkers).map(m => m.circle));
+    checkpointConfigMap.fitBounds(group.getBounds(), { padding: [40, 40], maxZoom: 17 });
+  }
+}
+
+function clearCheckpointMarkers() {
+  Object.values(checkpointMarkers).forEach(({ marker, circle }) => {
+    checkpointConfigMap.removeLayer(marker);
+    checkpointConfigMap.removeLayer(circle);
+  });
+  checkpointMarkers = {};
+}
+
+function drawCheckpointMarkers() {
+  clearCheckpointMarkers();
+  checkpointsForSite.forEach(cp => addCheckpointMarker(cp));
+}
+
+function addCheckpointMarker(cp) {
+  const circle = L.circle([cp.latitude, cp.longitude], {
+    radius: cp.radiusMeters, color: '#3b82f6', fillColor: '#3b82f6', fillOpacity: 0.15,
+    weight: 2, dashArray: '6,4',
+  }).addTo(checkpointConfigMap);
+  const marker = L.marker([cp.latitude, cp.longitude], {
+    icon: L.divIcon({
+      className: 'checkpoint-marker',
+      html: '<div style="background:#3b82f6;color:#fff;border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-size:12px;box-shadow:0 1px 4px rgba(0,0,0,0.4);">&#x1F4CD;</div>',
+      iconSize: [22, 22], iconAnchor: [11, 11],
+    }),
+  }).addTo(checkpointConfigMap);
+  marker.bindPopup(
+    `<b>${escapeHtml(cp.name)}</b><br>${cp.radiusMeters}m` +
+    (cp.minDwellSeconds ? ` &middot; min ${cp.minDwellSeconds}s` : '') +
+    `<br><button class="btn btn-sm btn-secondary" onclick="editCheckpoint('${cp.id}')">Modifier</button> ` +
+    `<button class="btn btn-sm btn-danger" onclick="deleteCheckpoint('${cp.id}')">Supprimer</button>`
+  );
+  checkpointMarkers[cp.id] = { marker, circle };
+}
+
+function renderCheckpointList() {
+  const container = document.getElementById('checkpointList');
+  if (!checkpointsForSite.length) {
+    container.innerHTML = '<div class="empty-state" style="padding:12px;font-size:13px;">Aucun checkpoint. Cliquez sur la carte pour en ajouter un.</div>';
+    return;
+  }
+  container.innerHTML = checkpointsForSite.map(cp => `
+    <div style="padding:8px;border-bottom:1px solid var(--border-color);cursor:pointer;" onclick="focusCheckpoint('${cp.id}')">
+      <div style="font-weight:600;">${escapeHtml(cp.name)}</div>
+      <div style="font-size:12px;color:var(--text-secondary);">${cp.radiusMeters}m${cp.minDwellSeconds ? ` &middot; min ${cp.minDwellSeconds}s` : ''}</div>
+    </div>
+  `).join('');
+}
+
+function focusCheckpoint(id) {
+  const cp = checkpointsForSite.find(c => c.id === id);
+  const m = checkpointMarkers[id];
+  if (cp && m) { checkpointConfigMap.setView([cp.latitude, cp.longitude], 17); m.marker.openPopup(); }
+}
+
+function startNewCheckpointAt(latlng) {
+  editingCheckpointId = null;
+  pendingCheckpointLatLng = latlng;
+  showCheckpointForm({ name: '', radiusMeters: 15, minDwellSeconds: '' });
+  showPendingPreview(latlng, 15);
+}
+
+function editCheckpoint(id) {
+  const cp = checkpointsForSite.find(c => c.id === id);
+  if (!cp) return;
+  editingCheckpointId = id;
+  pendingCheckpointLatLng = L.latLng(cp.latitude, cp.longitude);
+  showCheckpointForm(cp);
+  showPendingPreview(pendingCheckpointLatLng, cp.radiusMeters);
+}
+
+function showPendingPreview(latlng, radius) {
+  if (pendingPreviewCircle) checkpointConfigMap.removeLayer(pendingPreviewCircle);
+  pendingPreviewCircle = L.circle(latlng, {
+    radius, color: '#f59e0b', fillColor: '#f59e0b', fillOpacity: 0.15, weight: 2, dashArray: '4,4',
+  }).addTo(checkpointConfigMap);
+}
+
+function showCheckpointForm(cp) {
+  document.getElementById('checkpointForm').style.display = 'block';
+  document.getElementById('cpName').value = cp.name || '';
+  document.getElementById('cpRadius').value = cp.radiusMeters || 15;
+  document.getElementById('cpMinDwell').value = cp.minDwellSeconds || '';
+}
+
+function cancelCheckpointForm() {
+  document.getElementById('checkpointForm').style.display = 'none';
+  if (pendingPreviewCircle) { checkpointConfigMap && checkpointConfigMap.removeLayer(pendingPreviewCircle); pendingPreviewCircle = null; }
+  editingCheckpointId = null;
+  pendingCheckpointLatLng = null;
+}
+
+async function saveCheckpointForm() {
+  const siteId = document.getElementById('cpSiteSelect').value;
+  const name = document.getElementById('cpName').value.trim();
+  const radiusMeters = Number(document.getElementById('cpRadius').value);
+  const minDwellRaw = document.getElementById('cpMinDwell').value;
+  const minDwellSeconds = minDwellRaw ? Number(minDwellRaw) : undefined;
+  if (!name || !radiusMeters) { showToast('Nom et rayon requis', 'error'); return; }
+  try {
+    let res;
+    if (editingCheckpointId) {
+      res = await fetch(`${API_BASE}/admin/patrol-checkpoints/${editingCheckpointId}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, radiusMeters, minDwellSeconds: minDwellSeconds ?? null }),
+      });
+    } else {
+      res = await fetch(`${API_BASE}/admin/patrol-checkpoints`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ siteId, name, latitude: pendingCheckpointLatLng.lat, longitude: pendingCheckpointLatLng.lng, radiusMeters, minDwellSeconds }),
+      });
+    }
+    if (!res.ok) { const err = await res.json().catch(() => ({})); showToast(err.error || 'Erreur', 'error'); return; }
+    showToast(editingCheckpointId ? 'Checkpoint modifié' : 'Checkpoint créé', 'success');
+    cancelCheckpointForm();
+    await onCheckpointSiteChange();
+  } catch (e) { showToast('Impossible de contacter le serveur', 'error'); }
+}
+
+async function deleteCheckpoint(id) {
+  if (!confirm('Supprimer ce checkpoint ?')) return;
+  try {
+    const res = await fetch(`${API_BASE}/admin/patrol-checkpoints/${id}`, { method: 'DELETE' });
+    if (res.ok) { showToast('Checkpoint supprimé', 'success'); await onCheckpointSiteChange(); }
+    else showToast('Erreur lors de la suppression', 'error');
+  } catch (e) { showToast('Impossible de contacter le serveur', 'error'); }
 }
 
 function openSectorModal() {

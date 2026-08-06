@@ -13,6 +13,7 @@ export interface MapRegion {
 // Stub components for web
 export const Marker = (_props: any) => null;
 export const Circle = (_props: any) => null;
+export const Polyline = (_props: any) => null;
 export const Callout = ({ children }: any) => <>{children}</>;
 
 interface WebMapProps {
@@ -21,6 +22,7 @@ interface WebMapProps {
   showsUserLocation?: boolean;
   showsMyLocationButton?: boolean;
   showsCompass?: boolean;
+  onPress?: (e: { nativeEvent: { coordinate: { latitude: number; longitude: number } } }) => void;
   style?: any;
 }
 

@@ -426,6 +426,24 @@ interface PatrolSite {
   createdAt: number;
 }
 
+// A GPS waypoint on a patrol site's route — the responder must get within
+// radiusMeters of {latitude,longitude} (and, if minDwellSeconds is set,
+// stay within it for at least that long, cumulatively) for it to count as
+// visited during a round. Order is intentionally not enforced (see
+// ActivePatrolRound) — checkpoints are unordered from the server's
+// perspective.
+interface PatrolCheckpoint {
+  id: string;
+  siteId: string;
+  organizationId: string;
+  name: string;
+  latitude: number;
+  longitude: number;
+  radiusMeters: number;
+  minDwellSeconds?: number;
+  createdAt: number;
+}
+
 interface AdminUser {
   id: string;
   name: string;
@@ -844,6 +862,7 @@ const wsClientMap = new Map<any, string>();
 // Organizations (tenants) — source of truth for AdminUser.organizationId.
 const organizations = new Map<string, Organization>();
 const patrolSites = new Map<string, PatrolSite>();
+const patrolCheckpoints = new Map<string, PatrolCheckpoint>();
 
 // Admin storage
 const adminUsers = new Map<string, AdminUser>();
@@ -6191,6 +6210,66 @@ app.delete('/admin/patrol-sites/:id', requireAuth, requireRole('admin'), (req, r
   res.json({ success: true });
 });
 
+// ─── Patrol checkpoints (GPS waypoints per site, for ronde verification) ─
+app.get('/admin/patrol-checkpoints', requireAuth, requireRole('admin'), (req, res) => {
+  const siteId = req.query.siteId as string | undefined;
+  let checkpoints = Array.from(patrolCheckpoints.values()).filter(c => canAccessOrg(req.supabaseUser!, c.organizationId));
+  if (siteId) checkpoints = checkpoints.filter(c => c.siteId === siteId);
+  res.json(checkpoints);
+});
+
+app.post('/admin/patrol-checkpoints', requireAuth, requireRole('admin'), (req, res) => {
+  const { siteId, name, latitude, longitude, radiusMeters, minDwellSeconds } = req.body;
+  const trimmedName = (name || '').trim();
+  if (!siteId || !trimmedName || latitude == null || longitude == null || !radiusMeters) {
+    return res.status(400).json({ error: 'siteId, name, latitude, longitude and radiusMeters are required' });
+  }
+  const site = patrolSites.get(siteId);
+  if (!site) return res.status(404).json({ error: 'Patrol site not found' });
+  if (!canAccessOrg(req.supabaseUser!, site.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  const checkpoint: PatrolCheckpoint = {
+    id: uuidv4(),
+    siteId,
+    organizationId: site.organizationId,
+    name: trimmedName,
+    latitude: Number(latitude),
+    longitude: Number(longitude),
+    radiusMeters: Number(radiusMeters),
+    minDwellSeconds: minDwellSeconds != null ? Number(minDwellSeconds) : undefined,
+    createdAt: Date.now(),
+  };
+  patrolCheckpoints.set(checkpoint.id, checkpoint);
+  savePatrolCheckpointToSupabase(checkpoint).catch(e => console.error('[PatrolCheckpoints] Supabase save error:', e));
+  addAuditEntry('system', 'Patrol Checkpoint Created', req.supabaseUser!.id, `New checkpoint "${checkpoint.name}" on site ${site.name}`, checkpoint.id, checkpoint.organizationId);
+  res.status(201).json(checkpoint);
+});
+
+app.put('/admin/patrol-checkpoints/:id', requireAuth, requireRole('admin'), (req, res) => {
+  const checkpoint = patrolCheckpoints.get(req.params.id as string);
+  if (!checkpoint) return res.status(404).json({ error: 'Checkpoint not found' });
+  if (!canAccessOrg(req.supabaseUser!, checkpoint.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  const { name, latitude, longitude, radiusMeters, minDwellSeconds } = req.body;
+  if (name !== undefined) checkpoint.name = String(name).trim();
+  if (latitude !== undefined) checkpoint.latitude = Number(latitude);
+  if (longitude !== undefined) checkpoint.longitude = Number(longitude);
+  if (radiusMeters !== undefined) checkpoint.radiusMeters = Number(radiusMeters);
+  if (minDwellSeconds !== undefined) checkpoint.minDwellSeconds = minDwellSeconds === null ? undefined : Number(minDwellSeconds);
+  patrolCheckpoints.set(checkpoint.id, checkpoint);
+  savePatrolCheckpointToSupabase(checkpoint).catch(e => console.error('[PatrolCheckpoints] Supabase save error:', e));
+  addAuditEntry('system', 'Patrol Checkpoint Updated', req.supabaseUser!.id, `Updated checkpoint "${checkpoint.name}"`, checkpoint.id, checkpoint.organizationId);
+  res.json(checkpoint);
+});
+
+app.delete('/admin/patrol-checkpoints/:id', requireAuth, requireRole('admin'), (req, res) => {
+  const checkpoint = patrolCheckpoints.get(req.params.id as string);
+  if (!checkpoint) return res.status(404).json({ error: 'Checkpoint not found' });
+  if (!canAccessOrg(req.supabaseUser!, checkpoint.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  patrolCheckpoints.delete(checkpoint.id);
+  deletePatrolCheckpointFromSupabase(checkpoint.id).catch(e => console.error('[PatrolCheckpoints] Supabase delete error:', e));
+  addAuditEntry('system', 'Patrol Checkpoint Deleted', req.supabaseUser!.id, `Deleted checkpoint "${checkpoint.name}"`, checkpoint.id, checkpoint.organizationId);
+  res.json({ success: true });
+});
+
 // GET /api/patrol/statuses - list predefined patrol statuses
 app.get('/api/patrol/statuses', (_req, res) => {
   res.json({ statuses: PATROL_STATUS_CONFIG });
@@ -7010,6 +7089,7 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
     loadAlertsFromSupabase(),
     loadPatrolReportsFromSupabase(),
     loadPatrolSitesFromSupabase(),
+    loadPatrolCheckpointsFromSupabase(),
     loadBlackbookFromSupabase(),
     loadPTTChannelsFromSupabase(),
     loadFamilyPerimetersFromSupabase(),
@@ -7162,6 +7242,43 @@ async function deletePatrolSiteFromSupabase(siteId: string): Promise<void> {
     const { error } = await supabaseAdmin.from('patrol_sites').delete().eq('id', siteId);
     if (error) console.error('[Supabase] deletePatrolSiteFromSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] deletePatrolSiteFromSupabase error:', e); }
+}
+
+async function loadPatrolCheckpointsFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('patrol_checkpoints').select('*');
+    if (error) { console.error('[Supabase] Failed to load patrol_checkpoints:', error.message); return; }
+    if (data && data.length > 0) {
+      patrolCheckpoints.clear();
+      data.forEach((c: any) => {
+        patrolCheckpoints.set(c.id, {
+          id: c.id, siteId: c.site_id, organizationId: c.organization_id, name: c.name,
+          latitude: c.latitude, longitude: c.longitude, radiusMeters: c.radius_meters,
+          minDwellSeconds: c.min_dwell_seconds ?? undefined, createdAt: c.created_at || Date.now(),
+        });
+      });
+      console.log(`[Supabase] Loaded ${data.length} patrol checkpoints`);
+    }
+  } catch (e) { console.error('[Supabase] loadPatrolCheckpointsFromSupabase error:', e); }
+}
+
+async function savePatrolCheckpointToSupabase(checkpoint: PatrolCheckpoint): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('patrol_checkpoints').upsert({
+      id: checkpoint.id, site_id: checkpoint.siteId, organization_id: checkpoint.organizationId,
+      name: checkpoint.name, latitude: checkpoint.latitude, longitude: checkpoint.longitude,
+      radius_meters: checkpoint.radiusMeters, min_dwell_seconds: checkpoint.minDwellSeconds ?? null,
+      created_at: checkpoint.createdAt,
+    });
+    if (error) console.error('[Supabase] savePatrolCheckpointToSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] savePatrolCheckpointToSupabase error:', e); }
+}
+
+async function deletePatrolCheckpointFromSupabase(checkpointId: string): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('patrol_checkpoints').delete().eq('id', checkpointId);
+    if (error) console.error('[Supabase] deletePatrolCheckpointFromSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] deletePatrolCheckpointFromSupabase error:', e); }
 }
 
 async function saveAdminUserToSupabase(user: AdminUser): Promise<void> {

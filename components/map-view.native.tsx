@@ -1,8 +1,8 @@
 import React, { forwardRef } from 'react';
-import MapView, { Marker, Circle, Callout } from 'react-native-maps';
+import MapView, { Marker, Circle, Polyline, Callout } from 'react-native-maps';
 import { View, Text, StyleSheet } from 'react-native';
 
-export { Marker, Circle, Callout };
+export { Marker, Circle, Polyline, Callout };
 
 export interface MapRegion {
   latitude: number;
@@ -17,6 +17,7 @@ interface NativeMapProps {
   showsUserLocation?: boolean;
   showsMyLocationButton?: boolean;
   showsCompass?: boolean;
+  onPress?: (e: { nativeEvent: { coordinate: { latitude: number; longitude: number } } }) => void;
   style?: any;
 }
 
@@ -29,6 +30,7 @@ const NativeMapView = forwardRef<any, NativeMapProps>((props, ref) => {
       showsUserLocation={props.showsUserLocation}
       showsMyLocationButton={props.showsMyLocationButton}
       showsCompass={props.showsCompass}
+      onPress={props.onPress}
     >
       {props.children}
     </MapView>

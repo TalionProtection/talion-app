@@ -589,6 +589,7 @@
           <button class="chip" onclick="filterPatrolReports('attaque')" style="--chip-color:#000000">&#x26AB; Attaque</button>
         </div>
         <button class="btn btn-primary" onclick="refreshPatrolReports()">&#x1F504; Rafraîchir</button>
+        <button class="btn btn-secondary" id="btnConfigCheckpoints" onclick="openCheckpointConfigModal()" style="display:none;">&#x1F4CD; Configurer les checkpoints</button>
       </div>
       <div class="toolbar patrol-filter-row">
         <select id="patrolAgentFilter" class="filter-select" onchange="applyPatrolFilters()">
@@ -1309,6 +1310,35 @@
       <h3 class="modal-title">Détail du rapport de ronde</h3>
       <div id="patrolDetailContent"></div>
       <button class="btn btn-secondary modal-cancel" onclick="closePatrolDetailModal()">Fermer</button>
+    </div>
+  </div>
+
+  <!-- Checkpoint Configuration Modal (admin only) -->
+  <div class="modal-overlay" id="checkpointConfigModal" style="display:none;">
+    <div class="modal" style="max-width:900px;">
+      <div class="gf-header">
+        <h3 class="modal-title">&#x1F4CD; Configurer les checkpoints</h3>
+        <button class="gf-close" onclick="closeCheckpointConfigModal()">&times;</button>
+      </div>
+      <select id="cpSiteSelect" class="filter-select" onchange="onCheckpointSiteChange()" style="width:100%;margin-bottom:10px;">
+        <option value="">Sélectionner un site...</option>
+      </select>
+      <p style="font-size:12px;color:var(--text-secondary);margin:0 0 10px;">Cliquez sur la carte pour placer un nouveau checkpoint. Cliquez sur un checkpoint existant pour le modifier ou le supprimer.</p>
+      <div style="display:flex;gap:12px;">
+        <div id="checkpointConfigMap" style="flex:1;height:420px;border-radius:8px;"></div>
+        <div id="checkpointList" style="width:260px;max-height:420px;overflow-y:auto;"></div>
+      </div>
+      <div id="checkpointForm" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid var(--border-color);">
+        <input type="text" id="cpName" placeholder="Nom du checkpoint" class="filter-select" style="width:100%;margin-bottom:8px;">
+        <div style="display:flex;gap:8px;">
+          <input type="number" id="cpRadius" placeholder="Rayon (mètres)" class="filter-select" value="15" style="flex:1;">
+          <input type="number" id="cpMinDwell" placeholder="Temps min. (secondes, optionnel)" class="filter-select" style="flex:1;">
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <button class="btn btn-primary" onclick="saveCheckpointForm()">Enregistrer</button>
+          <button class="btn btn-secondary" onclick="cancelCheckpointForm()">Annuler</button>
+        </div>
+      </div>
     </div>
   </div>
 
