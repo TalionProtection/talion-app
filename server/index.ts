@@ -1603,9 +1603,13 @@ function checkActivePatrolRound(userId: string, location: { latitude: number; lo
   broadcastToOrgRole(round.organizationId, 'dispatcher', locPayload);
   broadcastToOrgRole(round.organizationId, 'admin', locPayload);
   newlySatisfied.forEach(cp => {
+    // Also pushed straight to the responder's own device (not just
+    // dispatch/admin) so the round screen can show "checkpoint validated"
+    // instantly instead of waiting on a poll.
     const msg = { type: 'patrolCheckpointVisited', data: { roundId: round.id, checkpointId: cp.checkpointId, name: cp.name } };
     broadcastToOrgRole(round.organizationId, 'dispatcher', msg);
     broadcastToOrgRole(round.organizationId, 'admin', msg);
+    broadcastToUsers([round.responderId], msg);
   });
 }
 
@@ -6381,10 +6385,12 @@ const PATROL_COVERAGE_CRITICAL_HOURS = 8;
 // Response shape ({ sites: string[] }) is unchanged from the old hardcoded
 // PATROL_SITES constant, so app/(tabs)/patrol.tsx needs no changes.
 app.get('/api/patrol/sites', requireAuth, (req, res) => {
-  const sites = Array.from(patrolSites.values())
-    .filter(s => canAccessOrg(req.supabaseUser!, s.organizationId))
-    .map(s => s.name);
-  res.json({ sites });
+  const accessibleSites = Array.from(patrolSites.values())
+    .filter(s => canAccessOrg(req.supabaseUser!, s.organizationId));
+  res.json({
+    sites: accessibleSites.map(s => s.name), // back-compat: name-only list for the quick-report picker
+    siteObjects: accessibleSites.map(s => ({ id: s.id, name: s.name })), // needed for GPS rounds, which key sites by id
+  });
 });
 
 // ─── Patrol sites management (each organization configures its own) ─────

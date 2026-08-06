@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   StyleSheet,
   View,
@@ -23,6 +23,9 @@ import { offlineCache } from '@/services/offline-cache';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
+import NativeMapView, { Marker, Circle, Polyline } from '@/components/map-view';
+import { wsManager } from '@/services/websocket-manager';
+import { SOSButton } from '@/components/sos-button';
 
 // Loaded defensively (require + try/catch, not a static import) — matches the
 // pattern already established in lib/ptt-context.tsx for these same native
@@ -63,6 +66,21 @@ interface PatrolMedia {
   uploadedAt: number;
 }
 
+interface PatrolCheckpointResult {
+  checkpointId: string;
+  name: string;
+  visited: boolean;
+  dwellSeconds: number;
+  minDwellSeconds?: number;
+  dwellMet: boolean;
+}
+
+interface PatrolTrailPoint {
+  latitude: number;
+  longitude: number;
+  timestamp: number;
+}
+
 interface PatrolReport {
   id: string;
   createdAt: number;
@@ -74,6 +92,13 @@ interface PatrolReport {
   notes?: string;
   media?: PatrolMedia[];
   escalatedIncidentId?: string;
+  // Present only for reports generated from a GPS-tracked round.
+  siteId?: string;
+  checkpoints?: PatrolCheckpointResult[];
+  trail?: PatrolTrailPoint[];
+  roundStatus?: 'completed' | 'interrupted';
+  startedAt?: number;
+  interruptReason?: string;
 }
 
 // Local media item before upload
@@ -81,6 +106,31 @@ interface LocalMedia {
   uri: string;
   type: 'photo' | 'video';
   filename: string;
+}
+
+// ─── GPS round tracking ──────────────────────────────────────────────────
+interface ActiveRoundCheckpoint {
+  checkpointId: string;
+  name: string;
+  latitude: number;
+  longitude: number;
+  radiusMeters: number;
+  minDwellSeconds?: number;
+  dwellSeconds: number;
+  visited: boolean;
+  dwellMet: boolean;
+}
+
+interface ActiveRound {
+  id: string;
+  siteId: string;
+  siteName: string;
+  responderId: string;
+  responderName: string;
+  startedAt: number;
+  checkpoints: ActiveRoundCheckpoint[];
+  trail: PatrolTrailPoint[];
+  lastLocation?: PatrolTrailPoint;
 }
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -133,7 +183,7 @@ function formatRelativeTime(ts: number): string {
 
 // ─── Main Component ─────────────────────────────────────────────────────────
 
-type ViewState = 'list' | 'create' | 'detail';
+type ViewState = 'list' | 'create' | 'detail' | 'round';
 
 export default function PatrolScreen() {
   const { user } = useAuth();
@@ -152,6 +202,16 @@ export default function PatrolScreen() {
   const [notes, setNotes] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showSitePicker, setShowSitePicker] = useState(false);
+
+  // ─── GPS round state ────────────────────────────────────────────────────
+  const [siteObjects, setSiteObjects] = useState<{ id: string; name: string }[]>([]);
+  const [myActiveRound, setMyActiveRound] = useState<ActiveRound | null>(null);
+  const [showRoundSitePicker, setShowRoundSitePicker] = useState(false);
+  const [roundStarting, setRoundStarting] = useState(false);
+  const [roundFinishing, setRoundFinishing] = useState(false);
+  const [showInterruptConfirm, setShowInterruptConfirm] = useState(false);
+  const [interruptReason, setInterruptReason] = useState('');
+  const activeRoundIdRef = useRef<string | null>(null);
 
   // Media attachment state
   const [localMedia, setLocalMedia] = useState<LocalMedia[]>([]);
@@ -212,27 +272,63 @@ export default function PatrolScreen() {
 
   const fetchSites = useCallback(async () => {
     try {
-      const data = await apiGet<{ sites: string[] }>('/api/patrol/sites');
+      const data = await apiGet<{ sites: string[]; siteObjects: { id: string; name: string }[] }>('/api/patrol/sites');
       setSites(data.sites || []);
+      setSiteObjects(data.siteObjects || []);
     } catch (err) {
       console.error('[Patrol] Failed to fetch sites:', err);
     }
   }, []);
 
+  // Resume an in-progress round on mount (e.g. app was reloaded/backgrounded
+  // mid-round) — round state lives server-side, not just in local React state.
+  const fetchMyActiveRound = useCallback(async () => {
+    if (!user?.id) return;
+    try {
+      const rounds = await apiGet<ActiveRound[]>('/api/patrol/rounds/active');
+      const mine = (rounds || []).find(r => r.responderId === user.id);
+      setMyActiveRound(mine || null);
+      if (mine) setView('round');
+    } catch (err) {
+      console.error('[Patrol] Failed to fetch active round:', err);
+    }
+  }, [user?.id]);
+
   useEffect(() => {
     const load = async () => {
       setIsLoading(true);
-      await Promise.all([fetchReports(), fetchSites()]);
+      await Promise.all([fetchReports(), fetchSites(), fetchMyActiveRound()]);
       setIsLoading(false);
     };
     load();
-  }, [fetchReports, fetchSites]);
+  }, [fetchReports, fetchSites, fetchMyActiveRound]);
 
   // Poll for new reports every 15s
   useEffect(() => {
     const interval = setInterval(fetchReports, 15000);
     return () => clearInterval(interval);
   }, [fetchReports]);
+
+  useEffect(() => {
+    activeRoundIdRef.current = myActiveRound?.id || null;
+  }, [myActiveRound?.id]);
+
+  // Live checkpoint feedback pushed straight to this responder's device
+  // (see broadcastToUsers alongside the dispatcher/admin broadcast, server-side).
+  useEffect(() => {
+    const unsubVisited = wsManager.on('patrolCheckpointVisited', (msg: any) => {
+      const data = msg.data || msg;
+      if (data.roundId !== activeRoundIdRef.current) return;
+      setMyActiveRound(prev => prev ? {
+        ...prev,
+        checkpoints: prev.checkpoints.map(cp =>
+          cp.checkpointId === data.checkpointId ? { ...cp, visited: true, dwellMet: true } : cp
+        ),
+      } : prev);
+      if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    });
+    return () => unsubVisited();
+  }, []);
 
   // ─── Media Handlers ─────────────────────────────────────────────────────
 
@@ -329,6 +425,87 @@ export default function PatrolScreen() {
       } catch { /* ignore */ }
     }
   };
+
+  // ─── GPS round handlers ─────────────────────────────────────────────────
+  const handleStartRound = useCallback(async (site: { id: string; name: string }) => {
+    if (!user?.id) return;
+    setRoundStarting(true);
+    try {
+      const res = await fetchWithTimeout(`${getApiBaseUrl()}/api/patrol/rounds/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({ siteId: site.id }),
+        timeout: 10000,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        Alert.alert('Erreur', err.error || 'Impossible de démarrer la ronde.');
+        return;
+      }
+      const round = await res.json();
+      setMyActiveRound(round);
+      setShowRoundSitePicker(false);
+      setView('round');
+      if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (e: any) {
+      Alert.alert('Erreur', e.message || 'Impossible de contacter le serveur.');
+    }
+    setRoundStarting(false);
+  }, [user?.id]);
+
+  const handleFinishRound = useCallback(async () => {
+    if (!myActiveRound) return;
+    setRoundFinishing(true);
+    try {
+      const res = await fetchWithTimeout(`${getApiBaseUrl()}/api/patrol/rounds/${myActiveRound.id}/finish`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        timeout: 10000,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        Alert.alert('Erreur', err.error || 'Impossible de terminer la ronde.');
+        return;
+      }
+      const data = await res.json();
+      setMyActiveRound(null);
+      setSelectedReport(data.report);
+      setView('detail');
+      await fetchReports();
+      if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (e: any) {
+      Alert.alert('Erreur', e.message || 'Impossible de contacter le serveur.');
+    }
+    setRoundFinishing(false);
+  }, [myActiveRound, fetchReports]);
+
+  const handleInterruptRound = useCallback(async () => {
+    if (!myActiveRound) return;
+    setRoundFinishing(true);
+    try {
+      const res = await fetchWithTimeout(`${getApiBaseUrl()}/api/patrol/rounds/${myActiveRound.id}/interrupt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({ reason: interruptReason.trim() || undefined }),
+        timeout: 10000,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        Alert.alert('Erreur', err.error || "Impossible d'interrompre la ronde.");
+        return;
+      }
+      const data = await res.json();
+      setMyActiveRound(null);
+      setShowInterruptConfirm(false);
+      setInterruptReason('');
+      setSelectedReport(data.report);
+      setView('detail');
+      await fetchReports();
+    } catch (e: any) {
+      Alert.alert('Erreur', e.message || 'Impossible de contacter le serveur.');
+    }
+    setRoundFinishing(false);
+  }, [myActiveRound, interruptReason, fetchReports]);
 
   const handleSubmit = async () => {
     if (!selectedSite) return;
@@ -774,6 +951,17 @@ export default function PatrolScreen() {
         />
       )}
 
+      {/* FAB: Start a GPS-tracked round (responders only) */}
+      {user?.role === 'responder' && (
+        <TouchableOpacity
+          style={styles.roundFab}
+          onPress={() => setShowRoundSitePicker(true)}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.fabText}>📍 Démarrer une ronde</Text>
+        </TouchableOpacity>
+      )}
+
       {/* FAB: Create new report (staff only) */}
       {isStaffRole(user?.role) && (
         <TouchableOpacity style={styles.fab} onPress={handleCreate} activeOpacity={0.8}>
@@ -1086,7 +1274,64 @@ export default function PatrolScreen() {
             </View>
           </View>
 
+          {/* GPS round map + checkpoints */}
+          {selectedReport.checkpoints && selectedReport.checkpoints.length > 0 && (
+            <>
+              <Text style={styles.detailSectionTitle}>
+                Ronde GPS {selectedReport.roundStatus === 'interrupted' ? '(interrompue)' : ''}
+              </Text>
+              {selectedReport.interruptReason && (
+                <View style={[styles.detailCard, { marginBottom: 10 }]}>
+                  <Text style={styles.detailLabel}>Motif de l&apos;interruption</Text>
+                  <Text style={styles.detailNotes}>{selectedReport.interruptReason}</Text>
+                </View>
+              )}
+              {selectedReport.trail && selectedReport.trail.length > 0 && (
+                <View style={styles.roundMapContainer}>
+                  <NativeMapView
+                    style={{ flex: 1 }}
+                    initialRegion={{
+                      latitude: selectedReport.trail[0].latitude,
+                      longitude: selectedReport.trail[0].longitude,
+                      latitudeDelta: 0.01,
+                      longitudeDelta: 0.01,
+                    }}
+                  >
+                    <Polyline
+                      coordinates={selectedReport.trail.map(p => ({ latitude: p.latitude, longitude: p.longitude }))}
+                      strokeColor="#1e3a5f"
+                      strokeWidth={3}
+                    />
+                  </NativeMapView>
+                </View>
+              )}
+              <View style={styles.detailCard}>
+                {selectedReport.checkpoints.map((cp, idx) => (
+                  <View key={cp.checkpointId}>
+                    {idx > 0 && <View style={styles.detailDivider} />}
+                    <View style={styles.detailRow}>
+                      <Text style={styles.detailLabel}>{cp.name}</Text>
+                      <View style={[
+                        styles.taskResultBadge,
+                        cp.dwellMet ? styles.taskResultOk : styles.taskResultPasOk,
+                      ]}>
+                        <Text style={[
+                          styles.taskResultText,
+                          cp.dwellMet ? styles.taskResultTextOk : styles.taskResultTextPasOk,
+                        ]}>
+                          {cp.dwellMet ? '✓ Validé' : cp.visited ? 'Temps insuffisant' : 'Manqué'}
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            </>
+          )}
+
           {/* Tasks */}
+          {selectedReport.tasks.length > 0 && (
+          <>
           <Text style={styles.detailSectionTitle}>Tâches</Text>
           <View style={styles.detailCard}>
             {selectedReport.tasks.map((task, idx) => (
@@ -1112,6 +1357,8 @@ export default function PatrolScreen() {
               </View>
             ))}
           </View>
+          </>
+          )}
 
           {/* Media Attachments */}
           {selectedReport.media && selectedReport.media.length > 0 && (
@@ -1184,6 +1431,130 @@ export default function PatrolScreen() {
     );
   };
 
+  // ─── Render: Active GPS Round ──────────────────────────────────────────
+
+  const renderRoundView = () => {
+    if (!myActiveRound) return null;
+    const visitedCount = myActiveRound.checkpoints.filter(cp => cp.dwellMet).length;
+    const totalCount = myActiveRound.checkpoints.length;
+    const firstCp = myActiveRound.checkpoints[0];
+
+    return (
+      <View style={styles.container}>
+        <View style={styles.formHeader}>
+          <Text style={styles.formTitle} numberOfLines={1}>📍 {myActiveRound.siteName}</Text>
+        </View>
+        <Text style={styles.roundProgressText}>
+          {totalCount > 0 ? `${visitedCount} / ${totalCount} checkpoints validés` : 'Aucun checkpoint configuré pour ce site'}
+        </Text>
+
+        <View style={styles.roundMapContainer}>
+          <NativeMapView
+            style={{ flex: 1 }}
+            showsUserLocation
+            initialRegion={{
+              latitude: firstCp?.latitude ?? myActiveRound.lastLocation?.latitude ?? 46.2125,
+              longitude: firstCp?.longitude ?? myActiveRound.lastLocation?.longitude ?? 6.1795,
+              latitudeDelta: 0.01,
+              longitudeDelta: 0.01,
+            }}
+          >
+            {myActiveRound.checkpoints.map(cp => (
+              <Circle
+                key={`cp-circle-${cp.checkpointId}`}
+                center={{ latitude: cp.latitude, longitude: cp.longitude }}
+                radius={cp.radiusMeters}
+                strokeColor={cp.dwellMet ? '#22c55e' : '#3b82f6'}
+                fillColor={cp.dwellMet ? 'rgba(34,197,94,0.2)' : 'rgba(59,130,246,0.15)'}
+                strokeWidth={2}
+              />
+            ))}
+            {myActiveRound.checkpoints.map(cp => (
+              <Marker key={`cp-marker-${cp.checkpointId}`} coordinate={{ latitude: cp.latitude, longitude: cp.longitude }}>
+                <View style={[styles.roundMapPin, cp.dwellMet && styles.roundMapPinDone]}>
+                  <Text style={{ fontSize: 11 }}>{cp.dwellMet ? '✓' : '📍'}</Text>
+                </View>
+              </Marker>
+            ))}
+            {myActiveRound.trail.length > 1 && (
+              <Polyline
+                coordinates={myActiveRound.trail.map(p => ({ latitude: p.latitude, longitude: p.longitude }))}
+                strokeColor="#1e3a5f"
+                strokeWidth={3}
+              />
+            )}
+          </NativeMapView>
+        </View>
+
+        <ScrollView style={styles.roundChecklistScroll} contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 8 }}>
+          {myActiveRound.checkpoints.map(cp => (
+            <View key={cp.checkpointId} style={styles.roundChecklistItem}>
+              <Text style={styles.roundChecklistIcon}>{cp.dwellMet ? '✅' : cp.visited ? '🟡' : '⚪'}</Text>
+              <Text style={styles.roundChecklistName}>{cp.name}</Text>
+            </View>
+          ))}
+        </ScrollView>
+
+        <View style={styles.roundActionsRow}>
+          <TouchableOpacity
+            style={styles.roundInterruptBtn}
+            onPress={() => setShowInterruptConfirm(true)}
+            disabled={roundFinishing}
+          >
+            <Text style={styles.roundInterruptBtnText}>🚨 Interrompre</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.roundFinishBtn, roundFinishing && styles.submitButtonDisabled]}
+            onPress={handleFinishRound}
+            disabled={roundFinishing}
+          >
+            {roundFinishing ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.roundFinishBtnText}>Terminer la ronde</Text>}
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.roundSosContainer}>
+          <SOSButton userName={user?.name || 'Unknown'} userRole={user?.role || 'user'} userId={user?.id || ''} />
+        </View>
+
+        {/* Interrupt confirmation modal */}
+        <Modal visible={showInterruptConfirm} transparent animationType="fade">
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContent, { padding: 20 }]}>
+              <Text style={styles.modalTitle}>Interrompre la ronde ?</Text>
+              <Text style={[styles.detailNotes, { marginTop: 8, marginBottom: 12 }]}>
+                La ronde sera terminée immédiatement et un rapport partiel sera généré et transmis au dispatch.
+              </Text>
+              <TextInput
+                style={styles.notesInput}
+                placeholder="Motif (optionnel)"
+                placeholderTextColor="#9ca3af"
+                value={interruptReason}
+                onChangeText={setInterruptReason}
+                multiline
+              />
+              <View style={styles.roundActionsRow}>
+                <TouchableOpacity
+                  style={styles.roundModalCancelBtn}
+                  onPress={() => setShowInterruptConfirm(false)}
+                  disabled={roundFinishing}
+                >
+                  <Text style={styles.roundModalCancelBtnText}>Annuler</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.roundInterruptBtn, roundFinishing && styles.submitButtonDisabled]}
+                  onPress={handleInterruptRound}
+                  disabled={roundFinishing}
+                >
+                  {roundFinishing ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.roundInterruptBtnText}>Confirmer</Text>}
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+      </View>
+    );
+  };
+
   // ─── Access Control ───────────────────────────────────────────────────
 
   const canAccess = isStaffRole(user?.role);
@@ -1207,6 +1578,43 @@ export default function PatrolScreen() {
       {view === 'list' && renderListView()}
       {view === 'create' && renderCreateView()}
       {view === 'detail' && renderDetailView()}
+      {view === 'round' && renderRoundView()}
+
+      {/* Round Site Picker Modal — pick a site to start a GPS-tracked round */}
+      <Modal visible={showRoundSitePicker} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Démarrer une ronde</Text>
+              <TouchableOpacity onPress={() => setShowRoundSitePicker(false)}>
+                <Text style={styles.modalClose}>✕</Text>
+              </TouchableOpacity>
+            </View>
+            {roundStarting ? (
+              <ActivityIndicator size="large" color="#1e3a5f" style={{ padding: 40 }} />
+            ) : (
+              <FlatList
+                data={siteObjects}
+                keyExtractor={item => item.id}
+                renderItem={({ item }) => (
+                  <TouchableOpacity
+                    style={styles.siteOption}
+                    onPress={() => handleStartRound(item)}
+                  >
+                    <Text style={styles.siteOptionText}>{item.name}</Text>
+                  </TouchableOpacity>
+                )}
+                ListEmptyComponent={
+                  <Text style={[styles.emptySubtext, { padding: 20, textAlign: 'center' }]}>
+                    Aucun site de patrouille configuré.
+                  </Text>
+                }
+                contentContainerStyle={styles.siteList}
+              />
+            )}
+          </View>
+        </View>
+      </Modal>
 
       {/* Blackbook Modal — suspicious persons registry */}
       <Modal visible={showBlackbookModal} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowBlackbookModal(false)}>
@@ -1708,10 +2116,127 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     elevation: 6,
   },
+  roundFab: {
+    position: 'absolute',
+    bottom: 88,
+    left: 16,
+    right: 16,
+    backgroundColor: '#059669',
+    borderRadius: 14,
+    paddingVertical: 16,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    elevation: 6,
+  },
   fabText: {
     color: '#ffffff',
     fontSize: 16,
     fontWeight: '700',
+  },
+
+  // ─── GPS Round ──────────────────────────────────────────────────────
+  roundProgressText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#4b5563',
+    textAlign: 'center',
+    paddingVertical: 8,
+    backgroundColor: '#f9fafb',
+  },
+  roundMapContainer: {
+    height: 280,
+    marginHorizontal: 16,
+    marginTop: 8,
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  roundChecklistScroll: {
+    flex: 1,
+    marginTop: 8,
+  },
+  roundChecklistItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+  },
+  roundChecklistIcon: {
+    fontSize: 18,
+  },
+  roundChecklistName: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1f2937',
+    flex: 1,
+  },
+  roundActionsRow: {
+    flexDirection: 'row',
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 4,
+  },
+  roundInterruptBtn: {
+    flex: 1,
+    backgroundColor: '#ef4444',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  roundInterruptBtnText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  roundFinishBtn: {
+    flex: 1,
+    backgroundColor: '#059669',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  roundFinishBtnText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  roundModalCancelBtn: {
+    flex: 1,
+    backgroundColor: '#f3f4f6',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  roundModalCancelBtnText: {
+    color: '#4b5563',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  roundSosContainer: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  roundMapPin: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#ffffff',
+    borderWidth: 2,
+    borderColor: '#3b82f6',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  roundMapPinDone: {
+    borderColor: '#22c55e',
   },
 
   // ─── Form ──────────────────────────────────────────────────────────

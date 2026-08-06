@@ -41,6 +41,13 @@ export type WebSocketMessageType =
   | 'pttEmergency'
   | 'pttEmergencyMessage'
   | 'pttEmergencyAck'
+  | 'activePatrolRoundsSnapshot'
+  | 'patrolRoundStarted'
+  | 'patrolRoundLocationUpdate'
+  | 'patrolCheckpointVisited'
+  | 'patrolRoundFinished'
+  | 'patrolRoundInterrupted'
+  | 'patrolRoundAttention'
   | 'ping'
   | 'pong'
   | 'error';
