@@ -11,6 +11,7 @@ import {
   Platform,
   Alert,
   Image,
+  Linking,
 } from 'react-native';
 import { TextInput } from 'react-native';
 import { TalionScreen, TalionBanner } from '@/components/talion-banner';
@@ -26,6 +27,7 @@ import * as ImagePicker from 'expo-image-picker';
 import NativeMapView, { Marker, Circle, Polyline } from '@/components/map-view';
 import { wsManager } from '@/services/websocket-manager';
 import { SOSButton } from '@/components/sos-button';
+import locationService from '@/services/location-service';
 
 // Loaded defensively (require + try/catch, not a static import) — matches the
 // pattern already established in lib/ptt-context.tsx for these same native
@@ -136,6 +138,18 @@ interface ActiveRound {
   lastLocation?: PatrolTrailPoint;
 }
 
+// ─── Post-round route planning ────────────────────────────────────────────
+interface RoutePlan {
+  geometry: { latitude: number; longitude: number }[];
+  distanceMeters: number;
+  durationSeconds: number;
+  rationale: string;
+  mode: 'driving' | 'walking';
+  alternativesConsidered: number;
+  toSiteId: string;
+  toSiteName: string;
+}
+
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 const STATUS_CONFIG: Record<PatrolStatus, { label: string; color: string; textColor: string }> = {
@@ -186,7 +200,43 @@ function formatRelativeTime(ts: number): string {
 
 // ─── Main Component ─────────────────────────────────────────────────────────
 
-type ViewState = 'list' | 'create' | 'detail' | 'round';
+type ViewState = 'list' | 'create' | 'detail' | 'round' | 'routePreview';
+
+// Samples up to `count` well-spaced intermediate points from a route's
+// geometry, used to force native turn-by-turn apps through roughly the
+// recommended path via a waypoints= param — without this, the native app
+// just computes its own default route and silently discards the variety/
+// safety scoring the whole feature exists to provide.
+function sampleWaypoints(geometry: { latitude: number; longitude: number }[], count: number): { latitude: number; longitude: number }[] {
+  if (geometry.length <= count + 2) return [];
+  const points: { latitude: number; longitude: number }[] = [];
+  for (let i = 1; i <= count; i++) {
+    const idx = Math.floor((geometry.length - 1) * (i / (count + 1)));
+    points.push(geometry[idx]);
+  }
+  return points;
+}
+
+function openNativeNavigation(plan: RoutePlan, origin: { latitude: number; longitude: number }) {
+  const dest = plan.geometry[plan.geometry.length - 1];
+  const travelmode = plan.mode === 'walking' ? 'walking' : 'driving';
+  const waypoints = sampleWaypoints(plan.geometry, 3);
+  const waypointsParam = waypoints.length > 0 ? waypoints.map(p => `${p.latitude},${p.longitude}`).join('|') : '';
+
+  const googleAppUrl = `comgooglemaps://?saddr=${origin.latitude},${origin.longitude}&daddr=${dest.latitude},${dest.longitude}${waypointsParam ? `&waypoints=${waypointsParam}` : ''}&travelmode=${travelmode}`;
+  const googleWebUrl = `https://www.google.com/maps/dir/?api=1&origin=${origin.latitude},${origin.longitude}&destination=${dest.latitude},${dest.longitude}${waypointsParam ? `&waypoints=${waypointsParam}` : ''}&travelmode=${travelmode}`;
+  const appleMapsUrl = `maps://app?daddr=${dest.latitude},${dest.longitude}`;
+
+  const fallbackToAppleMaps = () => { if (Platform.OS === 'ios') Linking.openURL(appleMapsUrl).catch(() => {}); };
+  const tryWebFallback = () => Linking.openURL(googleWebUrl).catch(fallbackToAppleMaps);
+
+  Linking.canOpenURL(googleAppUrl)
+    .then(supported => {
+      if (supported) Linking.openURL(googleAppUrl).catch(tryWebFallback);
+      else tryWebFallback();
+    })
+    .catch(tryWebFallback);
+}
 
 export default function PatrolScreen() {
   const { user } = useAuth();
@@ -219,6 +269,16 @@ export default function PatrolScreen() {
   const [showInterruptConfirm, setShowInterruptConfirm] = useState(false);
   const [interruptReason, setInterruptReason] = useState('');
   const activeRoundIdRef = useRef<string | null>(null);
+
+  // "Next location" route-planning state (after a round finishes)
+  const [showNextLocationPicker, setShowNextLocationPicker] = useState(false);
+  const [finishedSiteId, setFinishedSiteId] = useState<string | null>(null);
+  const [routeOrigin, setRouteOrigin] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [routePlan, setRoutePlan] = useState<RoutePlan | null>(null);
+  const [routePlanning, setRoutePlanning] = useState(false);
+  const [routeConfirming, setRouteConfirming] = useState(false);
+  const [routeMode, setRouteMode] = useState<'driving' | 'walking'>('driving');
+  const [selectedNextSite, setSelectedNextSite] = useState<{ id: string; name: string } | null>(null);
 
   // Media attachment state
   const [localMedia, setLocalMedia] = useState<LocalMedia[]>([]);
@@ -510,11 +570,19 @@ export default function PatrolScreen() {
       }
 
       if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      setFinishedSiteId(myActiveRound.siteId);
+      setRouteOrigin(myActiveRound.lastLocation
+        ? { latitude: myActiveRound.lastLocation.latitude, longitude: myActiveRound.lastLocation.longitude }
+        : null);
       setMyActiveRound(null);
       setSelectedReport(data.report);
       setView('detail');
       resetForm();
       await fetchReports();
+      // Offer to plan a varied route to the next stop — reuses the same
+      // site list as starting a round. "Terminer sans naviguer" in the
+      // modal just dismisses it, leaving today's detail view as-is.
+      setShowNextLocationPicker(true);
     } catch (e: any) {
       // Unlike a manual report, this is NOT queued offline — the round stays
       // active server-side until a finish call actually succeeds, so it's
@@ -553,6 +621,74 @@ export default function PatrolScreen() {
     }
     setRoundFinishing(false);
   }, [myActiveRound, interruptReason, fetchReports]);
+
+  // Scores Mapbox Directions alternatives to `site` against recent
+  // patrol_route_history + Blackbook proximity (server-side) and shows the
+  // result as a preview. Called both from the "next location" picker and
+  // from the driving/walking toggle on the preview screen itself.
+  const planRoute = useCallback(async (site: { id: string; name: string }, mode: 'driving' | 'walking') => {
+    setRoutePlanning(true);
+    setSelectedNextSite(site);
+    try {
+      let origin = routeOrigin;
+      if (!origin) {
+        const pos = await locationService.getCurrentPosition();
+        origin = { latitude: pos.latitude, longitude: pos.longitude };
+        setRouteOrigin(origin);
+      }
+      const res = await fetchWithTimeout(`${getApiBaseUrl()}/api/patrol/routes/plan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({ fromLatitude: origin.latitude, fromLongitude: origin.longitude, toSiteId: site.id, mode }),
+        timeout: 15000,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        Alert.alert('Erreur', err.error || "Impossible de calculer un itinéraire.");
+        return;
+      }
+      const plan: RoutePlan = await res.json();
+      setRouteMode(mode);
+      setRoutePlan(plan);
+      setShowNextLocationPicker(false);
+      setView('routePreview');
+    } catch (e: any) {
+      Alert.alert('Erreur', e.message || 'Impossible de contacter le serveur.');
+    } finally {
+      setRoutePlanning(false);
+    }
+  }, [routeOrigin]);
+
+  // Persists the taken route to patrol_route_history and mirrors it live to
+  // the console (best-effort — a failure here shouldn't block the
+  // responder from actually navigating), then hands off to native
+  // turn-by-turn nav.
+  const handleConfirmAndNavigate = useCallback(async () => {
+    if (!routePlan || !routeOrigin) return;
+    setRouteConfirming(true);
+    try {
+      await fetchWithTimeout(`${getApiBaseUrl()}/api/patrol/routes/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({
+          toSiteId: routePlan.toSiteId,
+          geometry: routePlan.geometry,
+          distanceMeters: routePlan.distanceMeters,
+          durationSeconds: routePlan.durationSeconds,
+          rationale: routePlan.rationale,
+          mode: routePlan.mode,
+          fromLatitude: routeOrigin.latitude,
+          fromLongitude: routeOrigin.longitude,
+        }),
+        timeout: 10000,
+      }).catch(() => {});
+      openNativeNavigation(routePlan, routeOrigin);
+      setView('detail');
+      setRoutePlan(null);
+    } finally {
+      setRouteConfirming(false);
+    }
+  }, [routePlan, routeOrigin]);
 
   const handleSubmit = async () => {
     if (!selectedSite) return;
@@ -1632,6 +1768,82 @@ export default function PatrolScreen() {
     );
   };
 
+  const renderRoutePreview = () => {
+    if (!routePlan) return null;
+    const dest = routePlan.geometry[routePlan.geometry.length - 1];
+    const km = (routePlan.distanceMeters / 1000).toFixed(1);
+    const mins = Math.round(routePlan.durationSeconds / 60);
+
+    return (
+      <View style={styles.container}>
+        <View style={styles.formHeader}>
+          <TouchableOpacity style={styles.backButton} onPress={() => { setRoutePlan(null); setView('detail'); }}>
+            <Text style={styles.backButtonText}>← Retour</Text>
+          </TouchableOpacity>
+          <Text style={styles.formTitle} numberOfLines={1}>🧭 Vers {routePlan.toSiteName}</Text>
+        </View>
+
+        <View style={styles.roundMapContainer}>
+          <NativeMapView
+            style={{ flex: 1 }}
+            initialRegion={{
+              latitude: routeOrigin?.latitude ?? dest.latitude,
+              longitude: routeOrigin?.longitude ?? dest.longitude,
+              latitudeDelta: 0.03,
+              longitudeDelta: 0.03,
+            }}
+          >
+            <Polyline coordinates={routePlan.geometry} strokeColor="#2563eb" strokeWidth={4} />
+            {routeOrigin && (
+              <Marker coordinate={routeOrigin}>
+                <View style={styles.roundMapPin}><Text style={{ fontSize: 11 }}>🚩</Text></View>
+              </Marker>
+            )}
+            <Marker coordinate={dest}>
+              <View style={[styles.roundMapPin, styles.roundMapPinDone]}><Text style={{ fontSize: 11 }}>🏁</Text></View>
+            </Marker>
+          </NativeMapView>
+        </View>
+
+        <View style={{ paddingHorizontal: 16, paddingTop: 12 }}>
+          <Text style={styles.routeEtaText}>
+            {km} km · ~{mins} min · {routePlan.mode === 'walking' ? 'à pied' : 'en véhicule'}
+          </Text>
+          <Text style={styles.routeRationaleText}>{routePlan.rationale}</Text>
+
+          <View style={styles.routeModeToggleRow}>
+            <TouchableOpacity
+              style={[styles.routeModeBtn, routePlan.mode === 'driving' && styles.routeModeBtnActive]}
+              onPress={() => selectedNextSite && planRoute(selectedNextSite, 'driving')}
+              disabled={routePlanning}
+            >
+              <Text style={[styles.routeModeBtnText, routePlan.mode === 'driving' && styles.routeModeBtnTextActive]}>🚗 En véhicule</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.routeModeBtn, routePlan.mode === 'walking' && styles.routeModeBtnActive]}
+              onPress={() => selectedNextSite && planRoute(selectedNextSite, 'walking')}
+              disabled={routePlanning}
+            >
+              <Text style={[styles.routeModeBtnText, routePlan.mode === 'walking' && styles.routeModeBtnTextActive]}>🚶 À pied</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {routePlanning && <ActivityIndicator size="large" color="#1e3a5f" style={{ padding: 20 }} />}
+
+        <View style={{ paddingHorizontal: 16, paddingBottom: 16, paddingTop: 8 }}>
+          <TouchableOpacity
+            style={[styles.roundFinishBtn, (routeConfirming || routePlanning) && styles.submitButtonDisabled]}
+            onPress={handleConfirmAndNavigate}
+            disabled={routeConfirming || routePlanning}
+          >
+            {routeConfirming ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.roundFinishBtnText}>Démarrer la navigation</Text>}
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  };
+
   // ─── Access Control ───────────────────────────────────────────────────
 
   const canAccess = isStaffRole(user?.role);
@@ -1656,6 +1868,49 @@ export default function PatrolScreen() {
       {view === 'create' && renderCreateView()}
       {view === 'detail' && renderDetailView()}
       {view === 'round' && renderRoundView()}
+      {view === 'routePreview' && renderRoutePreview()}
+
+      {/* Next Location Picker Modal — after finishing a round, offer a
+          variety/safety-scored route to wherever the responder heads next */}
+      <Modal visible={showNextLocationPicker} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Prochain lieu ?</Text>
+              <TouchableOpacity onPress={() => setShowNextLocationPicker(false)}>
+                <Text style={styles.modalClose}>✕</Text>
+              </TouchableOpacity>
+            </View>
+            {routePlanning ? (
+              <ActivityIndicator size="large" color="#1e3a5f" style={{ padding: 40 }} />
+            ) : (
+              <FlatList
+                data={siteObjects.filter(s => s.id !== finishedSiteId)}
+                keyExtractor={item => item.id}
+                renderItem={({ item }) => (
+                  <TouchableOpacity
+                    style={styles.siteOption}
+                    onPress={() => planRoute(item, routeMode)}
+                  >
+                    <Text style={styles.siteOptionText}>{item.name}</Text>
+                  </TouchableOpacity>
+                )}
+                ListEmptyComponent={
+                  <Text style={[styles.emptySubtext, { padding: 20, textAlign: 'center' }]}>
+                    Aucun autre site disponible.
+                  </Text>
+                }
+                contentContainerStyle={styles.siteList}
+              />
+            )}
+            <View style={{ paddingHorizontal: 16, paddingBottom: 16 }}>
+              <TouchableOpacity style={styles.roundModalCancelBtn} onPress={() => setShowNextLocationPicker(false)}>
+                <Text style={styles.roundModalCancelBtnText}>Terminer sans naviguer</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       {/* Round Site Picker Modal — pick a site to start a GPS-tracked round */}
       <Modal visible={showRoundSitePicker} transparent animationType="slide">
@@ -2317,6 +2572,40 @@ const styles = StyleSheet.create({
   },
   roundMapPinMissed: {
     borderColor: '#ef4444',
+  },
+  routeEtaText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1f2937',
+  },
+  routeRationaleText: {
+    fontSize: 13,
+    color: '#4b5563',
+    marginTop: 4,
+    marginBottom: 12,
+  },
+  routeModeToggleRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 4,
+  },
+  routeModeBtn: {
+    flex: 1,
+    backgroundColor: '#f3f4f6',
+    borderRadius: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  routeModeBtnActive: {
+    backgroundColor: '#1e3a5f',
+  },
+  routeModeBtnText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#4b5563',
+  },
+  routeModeBtnTextActive: {
+    color: '#ffffff',
   },
 
   // ─── Form ──────────────────────────────────────────────────────────
