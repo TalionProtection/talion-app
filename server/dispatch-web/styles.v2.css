@@ -2517,6 +2517,30 @@ tr.is-duress { background: rgba(185,28,28,0.12) !important; font-weight: 700; }
   font-weight: 600;
   margin-top: 2px;
 }
+.patrol-round-panel {
+  margin: 0 24px 16px;
+  padding: 14px 16px;
+  background: var(--bg-card);
+  border: 1px solid #22c55e;
+  border-radius: 10px;
+}
+.patrol-round-panel-title {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #22c55e;
+  margin-bottom: 10px;
+}
+.patrol-round-item {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-main);
+  color: var(--text-primary);
+  font-size: 14px;
+}
+.patrol-round-item:last-child {
+  border-bottom: none;
+}
 .patrol-stats-row {
   display: flex;
   gap: 12px;

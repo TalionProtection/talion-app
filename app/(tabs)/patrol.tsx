@@ -69,6 +69,9 @@ interface PatrolMedia {
 interface PatrolCheckpointResult {
   checkpointId: string;
   name: string;
+  latitude: number;
+  longitude: number;
+  radiusMeters: number;
   visited: boolean;
   dwellSeconds: number;
   minDwellSeconds?: number;
@@ -207,6 +210,10 @@ export default function PatrolScreen() {
   const [siteObjects, setSiteObjects] = useState<{ id: string; name: string }[]>([]);
   const [myActiveRound, setMyActiveRound] = useState<ActiveRound | null>(null);
   const [showRoundSitePicker, setShowRoundSitePicker] = useState(false);
+  // 'round-finish' reuses the same questionnaire form (renderCreateView) as a
+  // manual report, but submits to the round-finish endpoint instead and skips
+  // the site picker (the round's site is already fixed).
+  const [createFormMode, setCreateFormMode] = useState<'report' | 'round-finish'>('report');
   const [roundStarting, setRoundStarting] = useState(false);
   const [roundFinishing, setRoundFinishing] = useState(false);
   const [showInterruptConfirm, setShowInterruptConfirm] = useState(false);
@@ -409,6 +416,7 @@ export default function PatrolScreen() {
 
   const handleCreate = async () => {
     resetForm();
+    setCreateFormMode('report');
     // Pre-fill task results as 'ok'
     const defaults: Record<string, TaskResult> = {};
     DEFAULT_TASKS.forEach(t => { defaults[t.name] = 'ok'; });
@@ -453,13 +461,37 @@ export default function PatrolScreen() {
     setRoundStarting(false);
   }, [user?.id]);
 
-  const handleFinishRound = useCallback(async () => {
+  // "Terminer la ronde" doesn't submit directly — it opens the same
+  // questionnaire (status/tasks/notes/photos) a manual report uses, pre-filled
+  // with the round's site and defaults, via renderCreateView in 'round-finish'
+  // mode. Submission itself is handleSubmitRoundFinish, below.
+  const openRoundFinishForm = useCallback(() => {
     if (!myActiveRound) return;
-    setRoundFinishing(true);
+    resetForm();
+    const defaults: Record<string, TaskResult> = {};
+    DEFAULT_TASKS.forEach(t => { defaults[t.name] = 'ok'; });
+    setTaskResults(defaults);
+    setSelectedSite(myActiveRound.siteName);
+    setCreateFormMode('round-finish');
+    setView('create');
+  }, [myActiveRound]);
+
+  const handleSubmitRoundFinish = useCallback(async () => {
+    if (!myActiveRound) return;
+    const tasks: PatrolTask[] = DEFAULT_TASKS.map(t => ({
+      name: t.name,
+      label: t.label,
+      result: taskResults[t.name] || 'ok',
+      ...(taskComments[t.name] ? { comment: taskComments[t.name] } : {}),
+    }));
+    const media = [...localMedia];
+
+    setIsSubmitting(true);
     try {
       const res = await fetchWithTimeout(`${getApiBaseUrl()}/api/patrol/rounds/${myActiveRound.id}/finish`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({ status: selectedStatus, tasks, notes: notes || undefined }),
         timeout: 10000,
       });
       if (!res.ok) {
@@ -468,16 +500,31 @@ export default function PatrolScreen() {
         return;
       }
       const data = await res.json();
+
+      if (media.length > 0) {
+        setIsUploading(true);
+        for (const m of media) {
+          await uploadMedia(data.report.id, m);
+        }
+        setIsUploading(false);
+      }
+
+      if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       setMyActiveRound(null);
       setSelectedReport(data.report);
       setView('detail');
+      resetForm();
       await fetchReports();
-      if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (e: any) {
-      Alert.alert('Erreur', e.message || 'Impossible de contacter le serveur.');
+      // Unlike a manual report, this is NOT queued offline — the round stays
+      // active server-side until a finish call actually succeeds, so it's
+      // safe (and clearer to the responder) to just let them retry.
+      Alert.alert('Erreur', e.message || "Impossible de terminer la ronde. Vérifiez votre connexion et réessayez.");
+    } finally {
+      setIsSubmitting(false);
+      setIsUploading(false);
     }
-    setRoundFinishing(false);
-  }, [myActiveRound, fetchReports]);
+  }, [myActiveRound, taskResults, taskComments, localMedia, selectedStatus, notes, fetchReports]);
 
   const handleInterruptRound = useCallback(async () => {
     if (!myActiveRound) return;
@@ -977,10 +1024,15 @@ export default function PatrolScreen() {
     <View style={styles.container}>
       {/* Header */}
       <View style={styles.formHeader}>
-        <TouchableOpacity onPress={() => setView('list')} style={styles.backButton}>
+        <TouchableOpacity
+          onPress={() => setView(createFormMode === 'round-finish' ? 'round' : 'list')}
+          style={styles.backButton}
+        >
           <Text style={styles.backButtonText}>← Retour</Text>
         </TouchableOpacity>
-        <Text style={styles.formTitle}>Nouveau rapport de ronde</Text>
+        <Text style={styles.formTitle}>
+          {createFormMode === 'round-finish' ? 'Terminer la ronde' : 'Nouveau rapport de ronde'}
+        </Text>
       </View>
 
       <ScrollView style={styles.formScroll} contentContainerStyle={styles.formContent} keyboardShouldPersistTaps="handled">
@@ -993,18 +1045,25 @@ export default function PatrolScreen() {
           </View>
         </View>
 
-        {/* Site Selection */}
+        {/* Site Selection — fixed (read-only) when finishing a GPS round */}
         <View style={styles.formSection}>
           <Text style={styles.formLabel}>Lieu de la ronde</Text>
-          <TouchableOpacity
-            style={[styles.dropdownButton, !selectedSite && styles.dropdownButtonEmpty]}
-            onPress={() => setShowSitePicker(true)}
-          >
-            <Text style={[styles.dropdownText, !selectedSite && styles.dropdownPlaceholder]}>
-              {selectedSite || 'Sélectionner un lieu...'}
-            </Text>
-            <Text style={styles.dropdownArrow}>▼</Text>
-          </TouchableOpacity>
+          {createFormMode === 'round-finish' ? (
+            <View style={styles.autoField}>
+              <Text style={styles.autoFieldText}>{selectedSite}</Text>
+              <Text style={styles.autoFieldHint}>Ronde GPS</Text>
+            </View>
+          ) : (
+            <TouchableOpacity
+              style={[styles.dropdownButton, !selectedSite && styles.dropdownButtonEmpty]}
+              onPress={() => setShowSitePicker(true)}
+            >
+              <Text style={[styles.dropdownText, !selectedSite && styles.dropdownPlaceholder]}>
+                {selectedSite || 'Sélectionner un lieu...'}
+              </Text>
+              <Text style={styles.dropdownArrow}>▼</Text>
+            </TouchableOpacity>
+          )}
         </View>
 
         {/* Status Selection */}
@@ -1152,7 +1211,7 @@ export default function PatrolScreen() {
         {/* Submit */}
         <TouchableOpacity
           style={[styles.submitButton, (!selectedSite || isSubmitting || isUploading) && styles.submitButtonDisabled]}
-          onPress={handleSubmit}
+          onPress={createFormMode === 'round-finish' ? handleSubmitRoundFinish : handleSubmit}
           disabled={!selectedSite || isSubmitting || isUploading}
           activeOpacity={0.8}
         >
@@ -1164,7 +1223,9 @@ export default function PatrolScreen() {
               </Text>
             </View>
           ) : (
-            <Text style={styles.submitButtonText}>Soumettre le rapport</Text>
+            <Text style={styles.submitButtonText}>
+              {createFormMode === 'round-finish' ? 'Terminer et envoyer le rapport' : 'Soumettre le rapport'}
+            </Text>
           )}
         </TouchableOpacity>
 
@@ -1302,6 +1363,23 @@ export default function PatrolScreen() {
                       strokeColor="#1e3a5f"
                       strokeWidth={3}
                     />
+                    {(selectedReport.checkpoints || []).map(cp => (
+                      <Circle
+                        key={`cp-circle-${cp.checkpointId}`}
+                        center={{ latitude: cp.latitude, longitude: cp.longitude }}
+                        radius={cp.radiusMeters}
+                        strokeColor={cp.dwellMet ? '#22c55e' : '#ef4444'}
+                        fillColor={cp.dwellMet ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.15)'}
+                        strokeWidth={2}
+                      />
+                    ))}
+                    {(selectedReport.checkpoints || []).map(cp => (
+                      <Marker key={`cp-marker-${cp.checkpointId}`} coordinate={{ latitude: cp.latitude, longitude: cp.longitude }}>
+                        <View style={[styles.roundMapPin, cp.dwellMet ? styles.roundMapPinDone : styles.roundMapPinMissed]}>
+                          <Text style={{ fontSize: 11 }}>{cp.dwellMet ? '✓' : '✕'}</Text>
+                        </View>
+                      </Marker>
+                    ))}
                   </NativeMapView>
                 </View>
               )}
@@ -1504,11 +1582,10 @@ export default function PatrolScreen() {
             <Text style={styles.roundInterruptBtnText}>🚨 Interrompre</Text>
           </TouchableOpacity>
           <TouchableOpacity
-            style={[styles.roundFinishBtn, roundFinishing && styles.submitButtonDisabled]}
-            onPress={handleFinishRound}
-            disabled={roundFinishing}
+            style={styles.roundFinishBtn}
+            onPress={openRoundFinishForm}
           >
-            {roundFinishing ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.roundFinishBtnText}>Terminer la ronde</Text>}
+            <Text style={styles.roundFinishBtnText}>Terminer la ronde</Text>
           </TouchableOpacity>
         </View>
 
@@ -2237,6 +2314,9 @@ const styles = StyleSheet.create({
   },
   roundMapPinDone: {
     borderColor: '#22c55e',
+  },
+  roundMapPinMissed: {
+    borderColor: '#ef4444',
   },
 
   // ─── Form ──────────────────────────────────────────────────────────

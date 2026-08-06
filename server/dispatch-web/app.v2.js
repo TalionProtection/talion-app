@@ -321,6 +321,72 @@ function handleWsMessage(msg) {
       break;
     }
 
+    // ─── GPS patrol rounds (live) ─────────────────────────────────────
+    case 'activePatrolRoundsSnapshot': {
+      if (Array.isArray(msg.data)) {
+        activePatrolRounds = msg.data;
+        renderActivePatrolRounds();
+        refreshPatrolRoundMapLayers();
+      }
+      break;
+    }
+
+    case 'patrolRoundStarted': {
+      const round = msg.data;
+      const idx = activePatrolRounds.findIndex(r => r.id === round.id);
+      if (idx >= 0) activePatrolRounds[idx] = round; else activePatrolRounds.push(round);
+      showToast(`📍 Ronde démarrée : ${round.responderName} — ${round.siteName}`, 'info');
+      renderActivePatrolRounds();
+      refreshPatrolRoundMapLayers();
+      break;
+    }
+
+    case 'patrolRoundLocationUpdate': {
+      const { roundId, location, timestamp } = msg.data;
+      const round = activePatrolRounds.find(r => r.id === roundId);
+      if (round) {
+        round.lastLocation = { ...location, timestamp };
+        round.trail = round.trail || [];
+        round.trail.push({ ...location, timestamp });
+        updatePatrolRoundMapLayers(round);
+      }
+      break;
+    }
+
+    case 'patrolCheckpointVisited': {
+      const { roundId, checkpointId, name } = msg.data;
+      const round = activePatrolRounds.find(r => r.id === roundId);
+      if (round) {
+        const cp = (round.checkpoints || []).find(c => c.checkpointId === checkpointId);
+        if (cp) { cp.visited = true; cp.dwellMet = true; }
+        renderActivePatrolRounds();
+        updatePatrolRoundMapLayers(round);
+      }
+      showToast(`✅ Checkpoint validé : ${name}`, 'success');
+      break;
+    }
+
+    case 'patrolRoundFinished':
+    case 'patrolRoundInterrupted': {
+      const { roundId } = msg.data;
+      activePatrolRounds = activePatrolRounds.filter(r => r.id !== roundId);
+      removePatrolRoundMapLayers(roundId);
+      renderActivePatrolRounds();
+      showToast(
+        msg.type === 'patrolRoundInterrupted' ? '🚨 Ronde interrompue' : '✅ Ronde terminée',
+        msg.type === 'patrolRoundInterrupted' ? 'warning' : 'success'
+      );
+      refreshPatrolReports();
+      break;
+    }
+
+    case 'patrolRoundAttention': {
+      const d = msg.data;
+      showToast(`⚠️ ${d.message}`, 'warning', 8000);
+      sendBrowserNotification('Ronde — attention requise', d.message, 'warning', `patrol-round-${d.roundId}`);
+      break;
+    }
+
     case 'alertsSnapshot': {
       // Full list of active alerts from server
       if (Array.isArray(msg.data)) {
@@ -3587,6 +3653,10 @@ function initMap() {
   // ── Sectors (admin-managed organizational zones) ──
   loadSectors();
   setupSectorAdminUI();
+
+  // ── GPS patrol rounds already in progress (e.g. map tab opened after a
+  // round's WS snapshot already arrived) ──
+  refreshPatrolRoundMapLayers();
 
   // ── Geneva POIs (hospitals, fire stations, police) ──
   const GENEVA_POIS = [
@@ -7269,6 +7339,126 @@ function selectPOI(name, lat, lng) {
 // ── Patrol Reports ──────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════
 
+let activePatrolRounds = [];
+let patrolDetailMap = null; // Leaflet instance for the round map inside showPatrolDetail's modal
+const patrolRoundLayers = {}; // roundId -> { marker, trailPolyline, checkpointCircles: [], checkpointMarkers: [] }
+
+function checkpointDivIcon(dwellMet) {
+  const color = dwellMet ? '#22c55e' : '#3b82f6';
+  return L.divIcon({
+    className: 'patrol-checkpoint-marker',
+    html: `<div style="background:#fff;border:2px solid ${color};border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;font-size:10px;">${dwellMet ? '✓' : '📍'}</div>`,
+    iconSize: [20, 20],
+    iconAnchor: [10, 10],
+  });
+}
+
+// Adds (once) or updates the Leaflet layers for one active round on the main
+// dispatch map: checkpoint circles+markers (positions are fixed for the
+// round's lifetime, only their color/icon changes), a growing trail
+// polyline, and the responder's own marker — moved via setLatLng
+// (incremental), not a remove-and-redraw, so it stays smooth as pings
+// arrive. Mirrors the live-move pattern already used for updateUserMarkers.
+function updatePatrolRoundMapLayers(round) {
+  if (!dispatchMap) return;
+  let layers = patrolRoundLayers[round.id];
+  if (!layers) {
+    layers = { marker: null, trailPolyline: null, checkpointCircles: [], checkpointMarkers: [] };
+    patrolRoundLayers[round.id] = layers;
+    (round.checkpoints || []).forEach(cp => {
+      const circle = L.circle([cp.latitude, cp.longitude], {
+        radius: cp.radiusMeters,
+        color: cp.dwellMet ? '#22c55e' : '#3b82f6',
+        fillColor: cp.dwellMet ? '#22c55e' : '#3b82f6',
+        fillOpacity: 0.15,
+        weight: 2,
+      }).addTo(dispatchMap);
+      circle._checkpointId = cp.checkpointId;
+      const marker = L.marker([cp.latitude, cp.longitude], { icon: checkpointDivIcon(cp.dwellMet) }).addTo(dispatchMap);
+      marker._checkpointId = cp.checkpointId;
+      layers.checkpointCircles.push(circle);
+      layers.checkpointMarkers.push(marker);
+    });
+    layers.trailPolyline = L.polyline([], { color: '#1e3a5f', weight: 3 }).addTo(dispatchMap);
+  }
+
+  if (round.trail && round.trail.length) {
+    layers.trailPolyline.setLatLngs(round.trail.map(p => [p.latitude, p.longitude]));
+  }
+
+  const loc = round.lastLocation;
+  if (loc) {
+    if (!layers.marker) {
+      layers.marker = L.marker([loc.latitude, loc.longitude], {
+        icon: L.divIcon({
+          className: 'patrol-responder-marker',
+          html: '<div style="background:#059669;color:#fff;border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:13px;box-shadow:0 1px 4px rgba(0,0,0,0.4);">🚶</div>',
+          iconSize: [26, 26],
+          iconAnchor: [13, 13],
+        }),
+      }).addTo(dispatchMap);
+      layers.marker.bindPopup(`<b>${escapeHtml(round.responderName)}</b><br>${escapeHtml(round.siteName)}`);
+    } else {
+      layers.marker.setLatLng([loc.latitude, loc.longitude]);
+    }
+  }
+
+  (round.checkpoints || []).forEach(cp => {
+    const circle = layers.checkpointCircles.find(c => c._checkpointId === cp.checkpointId);
+    const marker = layers.checkpointMarkers.find(m => m._checkpointId === cp.checkpointId);
+    const color = cp.dwellMet ? '#22c55e' : '#3b82f6';
+    if (circle) circle.setStyle({ color, fillColor: color });
+    if (marker) marker.setIcon(checkpointDivIcon(cp.dwellMet));
+  });
+}
+
+function refreshPatrolRoundMapLayers() {
+  if (!dispatchMap) return;
+  Object.keys(patrolRoundLayers).forEach(id => {
+    if (!activePatrolRounds.find(r => r.id === id)) removePatrolRoundMapLayers(id);
+  });
+  activePatrolRounds.forEach(round => updatePatrolRoundMapLayers(round));
+}
+
+function removePatrolRoundMapLayers(roundId) {
+  const layers = patrolRoundLayers[roundId];
+  if (!layers) return;
+  if (dispatchMap) {
+    if (layers.marker) dispatchMap.removeLayer(layers.marker);
+    if (layers.trailPolyline) dispatchMap.removeLayer(layers.trailPolyline);
+    layers.checkpointCircles.forEach(c => dispatchMap.removeLayer(c));
+    layers.checkpointMarkers.forEach(m => dispatchMap.removeLayer(m));
+  }
+  delete patrolRoundLayers[roundId];
+}
+
+// "Rondes en cours" status list on the Rondes tab (the live map itself lives
+// on the Map tab, where dispatchMap already renders every other live layer).
+function renderActivePatrolRounds() {
+  const panel = document.getElementById('activePatrolRoundsPanel');
+  const list = document.getElementById('activePatrolRoundsList');
+  if (!panel || !list) return;
+  if (activePatrolRounds.length === 0) {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = 'block';
+  list.innerHTML = activePatrolRounds.map(round => {
+    const total = (round.checkpoints || []).length;
+    const done = (round.checkpoints || []).filter(c => c.dwellMet).length;
+    return `
+      <div class="patrol-round-item">
+        <div>
+          <b>${escapeHtml(round.responderName)}</b> — ${escapeHtml(round.siteName)}
+          <div style="font-size:12px;color:var(--text-secondary);">
+            ${total > 0 ? `${done} / ${total} checkpoints validés` : 'Aucun checkpoint configuré'} · depuis ${new Date(round.startedAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
 let patrolReports = [];
 let patrolFilter = 'all';
 let patrolAgentFilter = '';
@@ -7476,11 +7666,40 @@ function showPatrolDetail(reportId) {
       </div>
     </div>
 
+  `;
+
+  // GPS round: map (trail + checkpoints) + per-checkpoint outcome
+  if (report.checkpoints && report.checkpoints.length > 0) {
+    html += `<h4 style="font-size:13px;text-transform:uppercase;letter-spacing:0.5px;color:#374151;margin-bottom:8px;">Ronde GPS${report.roundStatus === 'interrupted' ? ' (interrompue)' : ''}</h4>`;
+    if (report.interruptReason) {
+      html += `<div style="background:#fef2f2;border-radius:10px;padding:12px;margin-bottom:12px;color:#991b1b;"><b>Motif de l'interruption :</b> ${escapeHtml(report.interruptReason)}</div>`;
+    }
+    if (report.trail && report.trail.length > 0) {
+      html += `<div id="patrolDetailMap" style="height:280px;border-radius:10px;margin-bottom:12px;"></div>`;
+    }
+    html += '<div style="background:#f9fafb;border-radius:10px;padding:14px;margin-bottom:16px;">';
+    report.checkpoints.forEach((cp, idx) => {
+      const badgeColor = cp.dwellMet ? '#22c55e' : '#ef4444';
+      const badgeBg = cp.dwellMet ? '#f0fdf4' : '#fef2f2';
+      const badgeText = cp.dwellMet ? '✓ Validé' : cp.visited ? 'Temps insuffisant' : 'Manqué';
+      html += `
+        ${idx > 0 ? '<hr style="border:none;border-top:1px solid #e5e7eb;margin:8px 0;">' : ''}
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <span style="color:#374151;">${escapeHtml(cp.name)}</span>
+          <span style="background:${badgeBg};color:${badgeColor};padding:2px 10px;border-radius:6px;font-size:12px;font-weight:700;">${badgeText}</span>
+        </div>
+      `;
+    });
+    html += '</div>';
+  }
+
+  if (report.tasks && report.tasks.length > 0) {
+  html += `
     <h4 style="font-size:13px;text-transform:uppercase;letter-spacing:0.5px;color:#374151;margin-bottom:8px;">Tâches</h4>
     <div style="background:#f9fafb;border-radius:10px;padding:14px;margin-bottom:16px;">
   `;
 
-  (report.tasks || []).forEach((task, idx) => {
+  report.tasks.forEach((task, idx) => {
     const isOk = task.result === 'ok';
     const badgeColor = isOk ? '#22c55e' : '#ef4444';
     const badgeBg = isOk ? '#f0fdf4' : '#fef2f2';
@@ -7496,6 +7715,7 @@ function showPatrolDetail(reportId) {
   });
 
   html += '</div>';
+  }
 
   // Media attachments
   if (report.media && report.media.length > 0) {
@@ -7536,6 +7756,48 @@ function showPatrolDetail(reportId) {
 
   const modal = document.getElementById('patrolDetailModal');
   if (modal) modal.style.display = 'flex';
+
+  // The map container div only exists once innerHTML above has run, so this
+  // has to happen after — and any previous report's map instance (tied to
+  // now-replaced DOM nodes) needs tearing down first.
+  if (patrolDetailMap) { patrolDetailMap.remove(); patrolDetailMap = null; }
+  if (report.trail && report.trail.length > 0) {
+    setTimeout(() => {
+      const mapEl = document.getElementById('patrolDetailMap');
+      if (!mapEl) return;
+      patrolDetailMap = L.map('patrolDetailMap', {
+        center: [report.trail[0].latitude, report.trail[0].longitude],
+        zoom: 16,
+      });
+      const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+      const tiles = isLight
+        ? 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
+        : 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+      L.tileLayer(tiles, { subdomains: 'abcd', maxZoom: 19 }).addTo(patrolDetailMap);
+
+      const trailLatLngs = report.trail.map(p => [p.latitude, p.longitude]);
+      const trailLine = L.polyline(trailLatLngs, { color: '#1e3a5f', weight: 3 }).addTo(patrolDetailMap);
+      const bounds = trailLine.getBounds();
+
+      (report.checkpoints || []).forEach(cp => {
+        const color = cp.dwellMet ? '#22c55e' : '#ef4444';
+        L.circle([cp.latitude, cp.longitude], {
+          radius: cp.radiusMeters, color, fillColor: color, fillOpacity: 0.15, weight: 2,
+        }).addTo(patrolDetailMap);
+        L.marker([cp.latitude, cp.longitude], {
+          icon: L.divIcon({
+            className: 'patrol-checkpoint-marker',
+            html: `<div style="background:#fff;border:2px solid ${color};border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;font-size:11px;">${cp.dwellMet ? '✓' : '✕'}</div>`,
+            iconSize: [20, 20], iconAnchor: [10, 10],
+          }),
+        }).addTo(patrolDetailMap).bindPopup(`<b>${escapeHtml(cp.name)}</b><br>${cp.dwellMet ? 'Validé' : cp.visited ? 'Temps insuffisant' : 'Manqué'}`);
+        bounds.extend([cp.latitude, cp.longitude]);
+      });
+
+      patrolDetailMap.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
+      setTimeout(() => patrolDetailMap && patrolDetailMap.invalidateSize(), 100);
+    }, 50);
+  }
 }
 
 async function escalatePatrolReport(reportId) {
@@ -7558,6 +7820,7 @@ async function escalatePatrolReport(reportId) {
 function closePatrolDetailModal() {
   const modal = document.getElementById('patrolDetailModal');
   if (modal) modal.style.display = 'none';
+  if (patrolDetailMap) { patrolDetailMap.remove(); patrolDetailMap = null; }
 }
 
 // Initial load of patrol reports

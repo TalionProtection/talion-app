@@ -591,6 +591,13 @@
         <button class="btn btn-primary" onclick="refreshPatrolReports()">&#x1F504; Rafraîchir</button>
         <button class="btn btn-secondary" id="btnConfigCheckpoints" onclick="openCheckpointConfigModal()" style="display:none;">&#x1F4CD; Configurer les checkpoints</button>
       </div>
+
+      <!-- Rondes en cours (live GPS tracking) — the live map itself is on the Map tab -->
+      <div class="patrol-round-panel" id="activePatrolRoundsPanel" style="display:none;">
+        <div class="patrol-round-panel-title">&#x1F4CD; Rondes en cours</div>
+        <div id="activePatrolRoundsList"></div>
+      </div>
+
       <div class="toolbar patrol-filter-row">
         <select id="patrolAgentFilter" class="filter-select" onchange="applyPatrolFilters()">
           <option value="">Tous les agents</option>

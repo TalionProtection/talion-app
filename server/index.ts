@@ -804,6 +804,9 @@ interface PatrolMedia {
 interface PatrolCheckpointResult {
   checkpointId: string;
   name: string;
+  latitude: number;
+  longitude: number;
+  radiusMeters: number;
   visited: boolean;
   dwellSeconds: number;
   minDwellSeconds?: number;
@@ -1616,10 +1619,18 @@ function checkActivePatrolRound(userId: string, location: { latitude: number; lo
 // Condenses a round in progress into a durable PatrolReport, removes it
 // from activePatrolRounds, and notifies dispatch/admin — shared by both the
 // interrupt and finish routes, which only differ in roundStatus/reason.
-function finalizePatrolRound(round: ActivePatrolRound, roundStatus: 'completed' | 'interrupted', interruptReason?: string): PatrolReport {
+function finalizePatrolRound(
+  round: ActivePatrolRound,
+  roundStatus: 'completed' | 'interrupted',
+  interruptReason?: string,
+  questionnaire?: { status: PatrolStatus; tasks: PatrolTask[]; notes?: string }
+): PatrolReport {
   const checkpointResults: PatrolCheckpointResult[] = round.checkpoints.map(cp => ({
     checkpointId: cp.checkpointId,
     name: cp.name,
+    latitude: cp.latitude,
+    longitude: cp.longitude,
+    radiusMeters: cp.radiusMeters,
     visited: cp.visited,
     dwellSeconds: Math.round(cp.dwellSeconds),
     minDwellSeconds: cp.minDwellSeconds,
@@ -1633,8 +1644,12 @@ function finalizePatrolRound(round: ActivePatrolRound, roundStatus: 'completed' 
     createdBy: round.responderId,
     createdByName: round.responderName,
     location: round.siteName,
-    status: missed.length > 0 ? 'inhabituel' : 'habituel',
-    tasks: [],
+    // A normal "finish" always carries the same status/tasks/notes
+    // questionnaire as a manual report — an interrupt (emergency bail-out)
+    // skips it, so falls back to a status derived from checkpoint coverage.
+    status: questionnaire?.status || (missed.length > 0 ? 'inhabituel' : 'habituel'),
+    tasks: questionnaire?.tasks || [],
+    notes: questionnaire?.notes,
     media: [],
     organizationId: round.organizationId,
     siteId: round.siteId,
@@ -6551,11 +6566,21 @@ app.post('/api/patrol/rounds/:id/interrupt', requireAuth, requireRole('responder
 });
 
 // POST /api/patrol/rounds/:id/finish - normal completion
+// A normal finish carries the same questionnaire (status/tasks/notes) a
+// manual report does — media is attached afterward via the existing
+// POST /api/patrol/reports/:id/media route, same as a manual report.
 app.post('/api/patrol/rounds/:id/finish', requireAuth, requireRole('responder'), (req, res) => {
   const round = activePatrolRounds.get(req.params.id as string);
   if (!round) return res.status(404).json({ error: 'Active round not found' });
   if (round.responderId !== req.supabaseUser!.id) return res.status(403).json({ error: 'Not authorized' });
-  const report = finalizePatrolRound(round, 'completed');
+  const { status, tasks, notes } = req.body;
+  if (!status || !PATROL_STATUS_CONFIG[status as PatrolStatus]) {
+    return res.status(400).json({ error: `Invalid status. Must be one of: ${Object.keys(PATROL_STATUS_CONFIG).join(', ')}` });
+  }
+  if (!Array.isArray(tasks)) {
+    return res.status(400).json({ error: 'tasks is required' });
+  }
+  const report = finalizePatrolRound(round, 'completed', undefined, { status: status as PatrolStatus, tasks, notes: notes || undefined });
   res.json({ success: true, report });
 });
 
