@@ -387,6 +387,35 @@ function handleWsMessage(msg) {
       break;
     }
 
+    // ─── Post-round "next location" navigation (live) ──────────────────
+    case 'activeRoutesSnapshot': {
+      if (Array.isArray(msg.data)) {
+        activeResponderRoutes = msg.data;
+        renderActiveResponderRoutes();
+        refreshPatrolRouteMapLayers();
+      }
+      break;
+    }
+
+    case 'patrolRouteStarted': {
+      const route = msg.data;
+      const idx = activeResponderRoutes.findIndex(r => r.responderId === route.responderId);
+      if (idx >= 0) activeResponderRoutes[idx] = route; else activeResponderRoutes.push(route);
+      showToast(`🧭 Navigation démarrée : ${route.responderName} → ${route.toSiteName}`, 'info');
+      sendBrowserNotification('Navigation démarrée', `${route.responderName} → ${route.toSiteName}`, 'info', `route-${route.responderId}`);
+      renderActiveResponderRoutes();
+      refreshPatrolRouteMapLayers();
+      break;
+    }
+
+    case 'patrolRouteEnded': {
+      const { responderId } = msg.data;
+      activeResponderRoutes = activeResponderRoutes.filter(r => r.responderId !== responderId);
+      removePatrolRouteMapLayers(responderId);
+      renderActiveResponderRoutes();
+      break;
+    }
+
     case 'alertsSnapshot': {
       // Full list of active alerts from server
       if (Array.isArray(msg.data)) {
@@ -3657,6 +3686,7 @@ function initMap() {
   // ── GPS patrol rounds already in progress (e.g. map tab opened after a
   // round's WS snapshot already arrived) ──
   refreshPatrolRoundMapLayers();
+  refreshPatrolRouteMapLayers();
 
   // ── Geneva POIs (hospitals, fire stations, police) ──
   const GENEVA_POIS = [
@@ -7453,6 +7483,95 @@ function renderActivePatrolRounds() {
           <div style="font-size:12px;color:var(--text-secondary);">
             ${total > 0 ? `${done} / ${total} checkpoints validés` : 'Aucun checkpoint configuré'} · depuis ${new Date(round.startedAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
           </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+// ─── Post-round "next location" navigation (live) ──────────────────────────
+// A responder can only navigate to one place at a time, so this is keyed by
+// responderId (unlike activePatrolRounds' roundId) — same live/reconnect-
+// snapshot model, though, and the map layers follow the exact incremental
+// add/update/remove pattern used above for round layers.
+let activeResponderRoutes = [];
+const patrolRouteLayers = {}; // responderId -> { polyline, originMarker, destMarker }
+
+function updatePatrolRouteMapLayers(route) {
+  if (!dispatchMap || !Array.isArray(route.geometry) || route.geometry.length === 0) return;
+  let layers = patrolRouteLayers[route.responderId];
+  const origin = route.geometry[0];
+  const dest = route.geometry[route.geometry.length - 1];
+  if (!layers) {
+    layers = {
+      // Dashed + a distinct blue so a live route reads differently from a
+      // round's solid trail on the same map.
+      polyline: L.polyline(route.geometry.map(p => [p.latitude, p.longitude]), {
+        color: '#2563eb', weight: 4, dashArray: '8,6',
+      }).addTo(dispatchMap),
+      originMarker: L.circleMarker([origin.latitude, origin.longitude], {
+        radius: 6, color: '#2563eb', fillColor: '#2563eb', fillOpacity: 1,
+      }).addTo(dispatchMap),
+      destMarker: L.marker([dest.latitude, dest.longitude], {
+        icon: L.divIcon({
+          className: 'patrol-route-dest-marker',
+          html: '<div style="background:#2563eb;color:#fff;border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-size:11px;">🏁</div>',
+          iconSize: [22, 22],
+          iconAnchor: [11, 11],
+        }),
+      }).addTo(dispatchMap),
+    };
+    layers.destMarker.bindPopup(
+      `<b>${escapeHtml(route.responderName)}</b><br>→ ${escapeHtml(route.toSiteName)}<br><span style="font-size:11px;color:#6b7280;">${escapeHtml(route.rationale || '')}</span>`
+    );
+    patrolRouteLayers[route.responderId] = layers;
+  } else {
+    layers.polyline.setLatLngs(route.geometry.map(p => [p.latitude, p.longitude]));
+  }
+}
+
+function refreshPatrolRouteMapLayers() {
+  if (!dispatchMap) return;
+  Object.keys(patrolRouteLayers).forEach(id => {
+    if (!activeResponderRoutes.find(r => r.responderId === id)) removePatrolRouteMapLayers(id);
+  });
+  activeResponderRoutes.forEach(route => updatePatrolRouteMapLayers(route));
+}
+
+function removePatrolRouteMapLayers(responderId) {
+  const layers = patrolRouteLayers[responderId];
+  if (!layers) return;
+  if (dispatchMap) {
+    dispatchMap.removeLayer(layers.polyline);
+    dispatchMap.removeLayer(layers.originMarker);
+    dispatchMap.removeLayer(layers.destMarker);
+  }
+  delete patrolRouteLayers[responderId];
+}
+
+// "Trajets en cours" status list on the Rondes tab, same visual language as
+// "Rondes en cours" above — the live map layers themselves render on the Map
+// tab where dispatchMap lives, matching every other live layer in this app.
+function renderActiveResponderRoutes() {
+  const panel = document.getElementById('activeRoutesPanel');
+  const list = document.getElementById('activeRoutesList');
+  if (!panel || !list) return;
+  if (activeResponderRoutes.length === 0) {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = 'block';
+  list.innerHTML = activeResponderRoutes.map(route => {
+    const km = ((route.distanceMeters || 0) / 1000).toFixed(1);
+    const mins = Math.round((route.durationSeconds || 0) / 60);
+    return `
+      <div class="patrol-round-item">
+        <div>
+          <b>${escapeHtml(route.responderName)}</b> → ${escapeHtml(route.toSiteName)}
+          <div style="font-size:12px;color:var(--text-secondary);">
+            ${km} km · ~${mins} min · ${route.mode === 'walking' ? 'à pied' : 'en véhicule'}
+          </div>
+          <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">${escapeHtml(route.rationale || '')}</div>
         </div>
       </div>
     `;
