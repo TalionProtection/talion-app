@@ -28,6 +28,11 @@
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "package": "com.talioncrisiscomm",
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyCb6CdyRM6wFdcuv-Hrn4nxuJQL0I9U1eY"
+        }
+      },
       "permissions": [
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_FINE_LOCATION",
