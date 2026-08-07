@@ -48,6 +48,8 @@ export type WebSocketMessageType =
   | 'patrolRoundFinished'
   | 'patrolRoundInterrupted'
   | 'patrolRoundAttention'
+  | 'blackbookTemporalPatternDetected'
+  | 'responderBlackbookProximityAlert'
   | 'ping'
   | 'pong'
   | 'error';

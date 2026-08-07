@@ -296,6 +296,7 @@ export default function PatrolScreen() {
   const [blackbookSearch, setBlackbookSearch] = useState('');
   const [blackbookRiskFilter, setBlackbookRiskFilter] = useState('');
   const [currentBlackbookEntry, setCurrentBlackbookEntry] = useState<any>(null); // null = creating new
+  const [relatedBlackbook, setRelatedBlackbook] = useState<any[]>([]); // deterministic plate/name matches, see findRelatedBlackbookEntries server-side
   const [bbFirstName, setBbFirstName] = useState('');
   const [bbLastName, setBbLastName] = useState('');
   const [bbAliases, setBbAliases] = useState('');
@@ -395,6 +396,20 @@ export default function PatrolScreen() {
       if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     });
     return () => unsubVisited();
+  }, []);
+
+  // Server only broadcasts this to dispatcher/admin/superadmin sockets (see
+  // notifyResponderBlackbookProximity), so no client-side role check needed
+  // here. IMPORTANT: this means one of OUR responders entered a zone with
+  // PAST Blackbook activity — never treat as live suspect detection (the
+  // message body from the server already states this explicitly).
+  useEffect(() => {
+    const unsubProximity = wsManager.on('responderBlackbookProximityAlert', (msg: any) => {
+      const data = msg.data || msg;
+      if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      Alert.alert(data.title || 'Zone à activité Blackbook connue', data.body || '');
+    });
+    return () => unsubProximity();
   }, []);
 
   // ─── Media Handlers ─────────────────────────────────────────────────────
@@ -893,6 +908,7 @@ export default function PatrolScreen() {
     ensureAllResidencesLoaded();
     if (!entry) {
       resetBlackbookForm();
+      setRelatedBlackbook([]);
     } else {
       setBbFirstName(entry.firstName || ''); setBbLastName(entry.lastName || '');
       setBbAliases((entry.aliases || []).join(', ')); setBbDateOfBirth(entry.dateOfBirth || '');
@@ -902,10 +918,23 @@ export default function PatrolScreen() {
       setBbVehiclePlate(v0?.plate || ''); setBbVehicleDescription(v0?.description || '');
       setBbNotes(entry.notes || '');
       setBbLinkedUserId(entry.linkedUserId || null); setBbUserSearch('');
+      setRelatedBlackbook([]);
+      apiGet<any[]>(`/api/blackbook/${entry.id}/related`).then(setRelatedBlackbook).catch(() => setRelatedBlackbook([]));
     }
     setSightingResidenceId(null); setSightingResidenceSearch('');
     setBlackbookView('form');
   }, [ensureAllUsersLoaded, ensureAllResidencesLoaded]);
+
+  const openRelatedBlackbookEntry = useCallback(async (entryId: string) => {
+    const existing = blackbookData.find((e: any) => e.id === entryId);
+    if (existing) { openBlackbookForm(existing); return; }
+    try {
+      const entry = await apiGet<any>(`/api/blackbook/${entryId}`);
+      openBlackbookForm(entry);
+    } catch {
+      Alert.alert('Erreur', 'Impossible de charger cette fiche.');
+    }
+  }, [blackbookData, openBlackbookForm]);
 
   const saveBlackbookEntry = useCallback(async () => {
     if (!bbFirstName.trim() && !bbLastName.trim()) { Alert.alert('Erreur', 'Nom ou prénom requis'); return; }
@@ -2228,6 +2257,24 @@ export default function PatrolScreen() {
                         <TouchableOpacity onPress={() => deleteSighting(s.id)}><Text style={{ color: '#dc2626' }}>🗑️</Text></TouchableOpacity>
                       </View>
                     ))
+                  )}
+
+                  {relatedBlackbook.length > 0 && (
+                    <>
+                      <Text style={[styles.bbSectionTitle, { marginTop: 16 }]}>Fiches liées (plaque/nom communs)</Text>
+                      {relatedBlackbook.map((r: any) => (
+                        <TouchableOpacity
+                          key={r.entryId}
+                          style={styles.bbSightingRow}
+                          onPress={() => openRelatedBlackbookEntry(r.entryId)}
+                        >
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.bbCardName}>{BLACKBOOK_RISK_LABELS[r.riskLevel] || r.riskLevel} {r.name}</Text>
+                            <Text style={styles.bbCardMeta}>Correspondance : {r.matchType} — {r.matchValue}</Text>
+                          </View>
+                        </TouchableOpacity>
+                      ))}
+                    </>
                   )}
                 </>
               )}
