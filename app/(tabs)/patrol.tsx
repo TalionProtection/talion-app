@@ -1134,8 +1134,13 @@ export default function PatrolScreen() {
         />
       )}
 
-      {/* FAB: Start a GPS-tracked round (responders only) */}
-      {user?.role === 'responder' && (
+      {/* FAB: Start a GPS-tracked round — responders do this in the field,
+          but admin/superadmin can also run one (e.g. spot-checking a site
+          themselves); dispatcher is excluded since they're deskbound. The
+          server side already permits this via requireRole('responder')'s
+          role hierarchy (admin/superadmin sit above responder) — this is
+          purely the matching client-side visibility gate. */}
+      {(user?.role === 'responder' || user?.role === 'admin' || user?.role === 'superadmin') && (
         <TouchableOpacity
           style={styles.roundFab}
           onPress={() => setShowRoundSitePicker(true)}
