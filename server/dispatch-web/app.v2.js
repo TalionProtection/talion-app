@@ -681,6 +681,24 @@ function handleWsMessage(msg) {
       break;
     }
 
+    case 'blackbookTemporalPatternDetected': {
+      // Same entity sighted repeatedly at a similar weekday/time — a
+      // deterministic bucket-count check, not AI.
+      const tData = msg.data || msg;
+      showToast(tData.title || 'Pattern horaire Blackbook détecté', 'warning');
+      break;
+    }
+
+    case 'responderBlackbookProximityAlert': {
+      // IMPORTANT: this means one of OUR responders entered a zone with
+      // PAST Blackbook activity — never treat/word this as live suspect
+      // detection (the server-side message body already says so).
+      const pData = msg.data || msg;
+      showToast(`📍 ${pData.body || pData.title || 'Responder proche d’une zone à activité Blackbook'}`, 'warning', 8000);
+      sendBrowserNotification(pData.title || 'Zone à activité Blackbook connue', pData.body || '', 'warning', `bb-proximity-${pData.responderId}-${pData.entryId}`);
+      break;
+    }
+
     case 'pttTransmitAck':
     case 'pttEmergencyAck':
       // Acknowledgements from server — no action needed
@@ -2424,6 +2442,26 @@ function renderBlackbookSightings() {
     </div>`).join('');
 }
 
+// Deterministic plate/name matching against other Blackbook entries (see
+// findRelatedBlackbookEntries server-side) — not AI, just string matching.
+async function renderBlackbookRelated(entryId) {
+  const section = document.getElementById('bbRelatedSection');
+  const list = document.getElementById('bbRelatedList');
+  try {
+    const res = await fetch(`${API_BASE}/api/blackbook/${entryId}/related`);
+    const related = res.ok ? await res.json() : [];
+    if (!related.length) { section.style.display = 'none'; return; }
+    section.style.display = 'block';
+    list.innerHTML = related.map(r => `
+      <button class="btn btn-sm" style="cursor:pointer;" onclick="openBlackbookDetail('${r.entryId}')" title="Correspondance : ${escapeHtml(r.matchType)} — ${escapeHtml(r.matchValue)}">
+        ${BLACKBOOK_RISK_LABELS[r.riskLevel] || r.riskLevel} ${escapeHtml(r.name)}
+      </button>
+    `).join('');
+  } catch (e) {
+    section.style.display = 'none';
+  }
+}
+
 let allUsersCache = null;
 
 async function ensureAllUsersLoaded() {
@@ -2545,6 +2583,7 @@ async function openBlackbookDetail(entryId) {
     document.getElementById('bbRiskLevel').value = 'medium';
     populateBlackbookLinkedUserSelect(null);
     renderBlackbookVehicles();
+    document.getElementById('bbRelatedSection').style.display = 'none';
   } else {
     const entry = blackbookData.find(e => e.id === entryId) || await (await fetch(`${API_BASE}/api/blackbook/${entryId}`)).json();
     currentBlackbookEntry = entry;
@@ -2568,6 +2607,7 @@ async function openBlackbookDetail(entryId) {
     renderBlackbookVehicles();
     renderBlackbookPhotos();
     renderBlackbookSightings();
+    renderBlackbookRelated(entry.id);
   }
   document.getElementById('blackbookModal').style.display = 'flex';
 }

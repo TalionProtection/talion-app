@@ -411,6 +411,9 @@ let currentPatrolSites = [];
 let editingSiteId = null; // null = create mode, set = editing this site
 let selectedSiteAddress = null; // { address, latitude, longitude } from the geocode picker
 let siteAddrSearchTimer = null;
+let siteRiskScores = new Map(); // siteId -> { score, band, rationale }, from computeSiteRiskScore (deterministic, not AI)
+
+const SITE_RISK_LABELS = { low: '🟢 Faible', medium: '🟡 Moyen', high: '🟠 Élevé', critical: '🔴 Critique' };
 
 async function loadPatrolSites() {
   try {
@@ -418,6 +421,15 @@ async function loadPatrolSites() {
     const sites = await res.json();
     currentPatrolSites = sites;
     renderPatrolSitesTable(sites);
+    // Risk scores fetched separately (a second admin-only endpoint) so a
+    // slow/failed score computation never blocks the sites list itself.
+    fetch(`${API_BASE}/admin/patrol-sites/risk-scores`)
+      .then(r => r.ok ? r.json() : [])
+      .then(results => {
+        siteRiskScores = new Map((results || []).map(r => [r.siteId, r]));
+        renderPatrolSitesTable(currentPatrolSites);
+      })
+      .catch(e => console.error('[PatrolSites] risk-scores load error:', e));
   } catch (e) {
     console.error('[PatrolSites] load error:', e);
   }
@@ -425,17 +437,24 @@ async function loadPatrolSites() {
 
 function renderPatrolSitesTable(sites) {
   const tbody = document.getElementById('patrolSitesTableBody');
-  tbody.innerHTML = sites.map(s => `
+  tbody.innerHTML = sites.map(s => {
+    const risk = siteRiskScores.get(s.id);
+    const riskCell = risk
+      ? `<span title="${(risk.rationale || '').replace(/"/g, '&quot;')}">${SITE_RISK_LABELS[risk.band] || risk.band} (${risk.score})</span>`
+      : '<span style="color:var(--text-secondary);font-size:12px;">—</span>';
+    return `
     <tr>
       <td>${s.name}</td>
       <td style="font-size:12px;color:var(--text-secondary);">${s.address || '—'}</td>
+      <td>${riskCell}</td>
       <td>${new Date(s.createdAt).toLocaleDateString('fr-FR')}</td>
       <td>
         <button class="btn btn-sm btn-secondary" onclick="openEditSiteModal('${s.id}')">✏️</button>
         <button class="btn btn-sm btn-danger" onclick="deletePatrolSite('${s.id}')">🗑️</button>
       </td>
     </tr>
-  `).join('');
+  `;
+  }).join('');
 }
 
 function resetSiteAddressField() {
