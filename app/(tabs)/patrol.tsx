@@ -1836,7 +1836,12 @@ export default function PatrolScreen() {
 
         {routePlanning && <ActivityIndicator size="large" color="#1e3a5f" style={{ padding: 20 }} />}
 
-        <View style={{ paddingHorizontal: 16, paddingBottom: 16, paddingTop: 8 }}>
+        {/* roundFinishBtn has flex:1, designed to share a flexDirection:'row'
+            container with a sibling button (see renderRoundView) — without
+            that row wrapper it stretches to fill the remaining column
+            height instead of sizing to its content, pushing the label off
+            screen. */}
+        <View style={[styles.roundActionsRow, { paddingBottom: 16 }]}>
           <TouchableOpacity
             style={[styles.roundFinishBtn, (routeConfirming || routePlanning) && styles.submitButtonDisabled]}
             onPress={handleConfirmAndNavigate}
