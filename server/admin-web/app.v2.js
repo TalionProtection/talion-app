@@ -407,10 +407,16 @@ async function toggleOrgStatus(id, newStatus) {
 }
 
 // ─── Patrol Sites (each organization manages its own) ─────────────────
+let currentPatrolSites = [];
+let editingSiteId = null; // null = create mode, set = editing this site
+let selectedSiteAddress = null; // { address, latitude, longitude } from the geocode picker
+let siteAddrSearchTimer = null;
+
 async function loadPatrolSites() {
   try {
     const res = await fetch(`${API_BASE}/admin/patrol-sites`);
     const sites = await res.json();
+    currentPatrolSites = sites;
     renderPatrolSitesTable(sites);
   } catch (e) {
     console.error('[PatrolSites] load error:', e);
@@ -422,19 +428,84 @@ function renderPatrolSitesTable(sites) {
   tbody.innerHTML = sites.map(s => `
     <tr>
       <td>${s.name}</td>
+      <td style="font-size:12px;color:var(--text-secondary);">${s.address || '—'}</td>
       <td>${new Date(s.createdAt).toLocaleDateString('fr-FR')}</td>
-      <td><button class="btn btn-sm btn-danger" onclick="deletePatrolSite('${s.id}')">🗑️</button></td>
+      <td>
+        <button class="btn btn-sm btn-secondary" onclick="openEditSiteModal('${s.id}')">✏️</button>
+        <button class="btn btn-sm btn-danger" onclick="deletePatrolSite('${s.id}')">🗑️</button>
+      </td>
     </tr>
   `).join('');
 }
 
+function resetSiteAddressField() {
+  selectedSiteAddress = null;
+  const searchEl = document.getElementById('newSiteAddressSearch');
+  if (searchEl) searchEl.value = '';
+  const suggestions = document.getElementById('siteAddressSuggestions');
+  if (suggestions) suggestions.style.display = 'none';
+}
+
 function openCreateSiteModal() {
+  editingSiteId = null;
+  document.getElementById('siteModalTitle').textContent = 'Nouveau site de patrouille';
+  document.getElementById('siteModalSubmitBtn').textContent = 'Créer';
   document.getElementById('newSiteName').value = '';
+  resetSiteAddressField();
+  document.getElementById('createSiteModal').classList.add('visible');
+}
+
+function openEditSiteModal(id) {
+  const site = currentPatrolSites.find(s => s.id === id);
+  if (!site) return;
+  editingSiteId = id;
+  document.getElementById('siteModalTitle').textContent = 'Modifier le site';
+  document.getElementById('siteModalSubmitBtn').textContent = 'Enregistrer';
+  document.getElementById('newSiteName').value = site.name || '';
+  resetSiteAddressField();
+  if (site.address) {
+    document.getElementById('newSiteAddressSearch').value = site.address;
+    if (typeof site.latitude === 'number' && typeof site.longitude === 'number') {
+      selectedSiteAddress = { address: site.address, latitude: site.latitude, longitude: site.longitude };
+    }
+  }
   document.getElementById('createSiteModal').classList.add('visible');
 }
 
 function closeCreateSiteModal() {
   document.getElementById('createSiteModal').classList.remove('visible');
+}
+
+function searchSiteAddress(query) {
+  clearTimeout(siteAddrSearchTimer);
+  const suggestions = document.getElementById('siteAddressSuggestions');
+  selectedSiteAddress = null; // typing invalidates a previous selection until one is (re)picked
+  if (!query || query.length < 3) { suggestions.style.display = 'none'; return; }
+  siteAddrSearchTimer = setTimeout(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/geocode?q=${encodeURIComponent(query)}`);
+      const results = await res.json();
+      if (!results.length) { suggestions.style.display = 'none'; return; }
+      suggestions._results = results;
+      suggestions.innerHTML = results.map((r, i) => `
+        <div onclick="selectSiteAddressSuggestion(${i})"
+             style="padding:10px 14px;cursor:pointer;border-bottom:1px solid #f3f4f6;"
+             onmouseover="this.style.background='#f9fafb'" onmouseout="this.style.background=''">
+          <div style="font-size:13px;color:#1f2937;">📍 ${r.display_name}</div>
+        </div>
+      `).join('');
+      suggestions.style.display = 'block';
+    } catch (e) { console.error('[PatrolSites] geocode error:', e); }
+  }, 500);
+}
+
+function selectSiteAddressSuggestion(idx) {
+  const suggestions = document.getElementById('siteAddressSuggestions');
+  if (!suggestions._results || !suggestions._results[idx]) return;
+  const r = suggestions._results[idx];
+  selectedSiteAddress = { address: r.display_name, latitude: parseFloat(r.lat), longitude: parseFloat(r.lon) };
+  document.getElementById('newSiteAddressSearch').value = r.display_name;
+  suggestions.style.display = 'none';
 }
 
 async function submitCreateSite() {
@@ -444,23 +515,29 @@ async function submitCreateSite() {
     return;
   }
   const payload = { name };
-  if (currentUserRole() === 'superadmin') {
+  if (selectedSiteAddress) {
+    payload.address = selectedSiteAddress.address;
+    payload.latitude = selectedSiteAddress.latitude;
+    payload.longitude = selectedSiteAddress.longitude;
+  }
+  const isEdit = !!editingSiteId;
+  if (!isEdit && currentUserRole() === 'superadmin') {
     payload.organizationId = document.getElementById('newSiteOrg').value;
   }
   try {
-    const res = await fetch(`${API_BASE}/admin/patrol-sites`, {
-      method: 'POST',
+    const res = await fetch(`${API_BASE}/admin/patrol-sites${isEdit ? '/' + editingSiteId : ''}`, {
+      method: isEdit ? 'PUT' : 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      showToast(err.error || 'Erreur lors de la création', 'error');
+      showToast(err.error || `Erreur lors de ${isEdit ? "la modification" : "la création"}`, 'error');
       return;
     }
     closeCreateSiteModal();
     loadPatrolSites();
-    showToast('Site créé', 'success');
+    showToast(isEdit ? 'Site mis à jour' : 'Site créé', 'success');
   } catch (e) {
     showToast('Erreur de connexion', 'error');
   }

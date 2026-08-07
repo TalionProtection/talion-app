@@ -418,6 +418,14 @@ interface PatrolSite {
   organizationId: string;
   name: string;
   createdAt: number;
+  // A site's own location, independent of any checkpoints it may have —
+  // checkpoints exist to verify a guard physically walked a route inside
+  // the site, not to answer "where is this site." Optional/backfilled:
+  // resolveSiteDestination() falls back to the checkpoint centroid for
+  // older sites that don't have one set yet.
+  address?: string;
+  latitude?: number;
+  longitude?: number;
 }
 
 // A GPS waypoint on a patrol site's route — the responder must get within
@@ -1731,11 +1739,16 @@ function finalizePatrolRound(
 }
 
 // ─── Post-round route planning: "next location" recommendation ─────────
-// A site has no coordinates of its own (see PatrolSite) — its destination
-// for routing purposes is the centroid of its own checkpoints, which must
-// already exist for the site's round-verification to work at all. Returns
-// null (caller responds 400) rather than guessing when a site has none.
+// A site's destination for routing purposes is its own address/coordinates
+// if set (the normal case going forward — set via /admin/patrol-sites).
+// Falls back to the centroid of its checkpoints for older sites that
+// predate the address field but already have a round configured. Returns
+// null (caller responds 400) only when neither is available.
 function resolveSiteDestination(siteId: string): { latitude: number; longitude: number } | null {
+  const site = patrolSites.get(siteId);
+  if (site && typeof site.latitude === 'number' && typeof site.longitude === 'number') {
+    return { latitude: site.latitude, longitude: site.longitude };
+  }
   const checkpoints = Array.from(patrolCheckpoints.values()).filter(c => c.siteId === siteId);
   if (checkpoints.length === 0) return null;
   const latitude = checkpoints.reduce((sum, c) => sum + c.latitude, 0) / checkpoints.length;
@@ -6657,11 +6670,36 @@ app.post('/admin/patrol-sites', requireAuth, requireRole('admin'), (req, res) =>
   } else {
     organizationId = req.supabaseUser!.organizationId;
   }
-  const site: PatrolSite = { id: uuidv4(), organizationId: organizationId!, name, createdAt: Date.now() };
+  const { address, latitude, longitude } = req.body;
+  const site: PatrolSite = {
+    id: uuidv4(), organizationId: organizationId!, name, createdAt: Date.now(),
+    address: address || undefined,
+    latitude: typeof latitude === 'number' ? latitude : undefined,
+    longitude: typeof longitude === 'number' ? longitude : undefined,
+  };
   patrolSites.set(site.id, site);
   savePatrolSiteToSupabase(site).catch(e => console.error('[PatrolSites] Supabase save error:', e));
   addAuditEntry('system', 'Patrol Site Created', req.supabaseUser!.id, `New patrol site: ${name}`, site.id, site.organizationId);
   res.status(201).json(site);
+});
+
+// PUT /admin/patrol-sites/:id - edit name/address, mainly so an existing
+// site (created name-only before this field existed) can get a real
+// destination for route-planning without needing to configure checkpoints.
+app.put('/admin/patrol-sites/:id', requireAuth, requireRole('admin'), (req, res) => {
+  const site = patrolSites.get(req.params.id as string);
+  if (!site) return res.status(404).json({ error: 'Patrol site not found' });
+  if (!canAccessOrg(req.supabaseUser!, site.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+
+  if (typeof req.body.name === 'string' && req.body.name.trim()) site.name = req.body.name.trim();
+  if ('address' in req.body) site.address = req.body.address || undefined;
+  if (typeof req.body.latitude === 'number') site.latitude = req.body.latitude;
+  if (typeof req.body.longitude === 'number') site.longitude = req.body.longitude;
+
+  patrolSites.set(site.id, site);
+  savePatrolSiteToSupabase(site).catch(e => console.error('[PatrolSites] Supabase save error:', e));
+  addAuditEntry('system', 'Patrol Site Updated', req.supabaseUser!.id, `Updated patrol site: ${site.name}`, site.id, site.organizationId);
+  res.json(site);
 });
 
 app.delete('/admin/patrol-sites/:id', requireAuth, requireRole('admin'), (req, res) => {
@@ -6837,7 +6875,7 @@ app.post('/api/patrol/routes/plan', requireAuth, requireRole('responder'), async
   const travelMode: 'driving' | 'walking' = mode === 'walking' ? 'walking' : 'driving';
 
   const destination = resolveSiteDestination(toSiteId);
-  if (!destination) return res.status(400).json({ error: "Ce site n'a pas encore de checkpoints configurés — impossible de calculer une destination." });
+  if (!destination) return res.status(400).json({ error: "Ce site n'a pas d'adresse configurée — impossible de calculer une destination." });
 
   try {
     const candidates = await fetchDirectionsAlternatives({ latitude: fromLatitude, longitude: fromLongitude }, destination, travelMode);
@@ -7836,7 +7874,12 @@ async function loadPatrolSitesFromSupabase(): Promise<void> {
     if (data && data.length > 0) {
       patrolSites.clear();
       data.forEach((s: any) => {
-        patrolSites.set(s.id, { id: s.id, organizationId: s.organization_id, name: s.name, createdAt: s.created_at || Date.now() });
+        patrolSites.set(s.id, {
+          id: s.id, organizationId: s.organization_id, name: s.name, createdAt: s.created_at || Date.now(),
+          address: s.address ?? undefined,
+          latitude: s.latitude ?? undefined,
+          longitude: s.longitude ?? undefined,
+        });
       });
       console.log(`[Supabase] Loaded ${data.length} patrol sites`);
     }
@@ -7847,6 +7890,7 @@ async function savePatrolSiteToSupabase(site: PatrolSite): Promise<void> {
   try {
     const { error } = await supabaseAdmin.from('patrol_sites').upsert({
       id: site.id, organization_id: site.organizationId, name: site.name, created_at: site.createdAt,
+      address: site.address ?? null, latitude: site.latitude ?? null, longitude: site.longitude ?? null,
     });
     if (error) console.error('[Supabase] savePatrolSiteToSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] savePatrolSiteToSupabase error:', e); }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -99,6 +99,9 @@ interface AdminPatrolSite {
   organizationId: string;
   name: string;
   createdAt: number;
+  address?: string;
+  latitude?: number;
+  longitude?: number;
 }
 
 interface AdminPatrolCheckpoint {
@@ -290,9 +293,15 @@ export default function AdminScreen() {
   const [sitesLoaded, setSitesLoaded] = useState(false);
   const [sitesLoading, setSitesLoading] = useState(false);
   const [showCreateSiteModal, setShowCreateSiteModal] = useState(false);
+  const [editingSiteId, setEditingSiteId] = useState<string | null>(null);
   const [newSiteName, setNewSiteName] = useState('');
   const [newSiteOrgId, setNewSiteOrgId] = useState('');
   const [siteSaving, setSiteSaving] = useState(false);
+  const [siteAddress, setSiteAddress] = useState('');
+  const [siteAddressCoords, setSiteAddressCoords] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [siteAddressSuggestions, setSiteAddressSuggestions] = useState<{ display_name: string; lat: string; lon: string }[]>([]);
+  const [siteAddressSearching, setSiteAddressSearching] = useState(false);
+  const siteAddressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ─── Patrol checkpoints state (per-site GPS waypoints for rondes) ──
   const [checkpointMapSite, setCheckpointMapSite] = useState<AdminPatrolSite | null>(null);
@@ -507,29 +516,96 @@ export default function AdminScreen() {
     }
   }, [activeTab, sitesLoaded]);
 
-  const handleCreateSite = useCallback(async () => {
+  const resetSiteForm = useCallback(() => {
+    setEditingSiteId(null);
+    setNewSiteName('');
+    setNewSiteOrgId('');
+    setSiteAddress('');
+    setSiteAddressCoords(null);
+    setSiteAddressSuggestions([]);
+  }, []);
+
+  const openCreateSiteModal = useCallback(() => {
+    resetSiteForm();
+    setShowCreateSiteModal(true);
+  }, [resetSiteForm]);
+
+  const openEditSiteModal = useCallback((site: AdminPatrolSite) => {
+    setEditingSiteId(site.id);
+    setNewSiteName(site.name);
+    setNewSiteOrgId(site.organizationId);
+    setSiteAddress(site.address || '');
+    setSiteAddressCoords(
+      typeof site.latitude === 'number' && typeof site.longitude === 'number'
+        ? { latitude: site.latitude, longitude: site.longitude }
+        : null
+    );
+    setSiteAddressSuggestions([]);
+    setShowCreateSiteModal(true);
+  }, []);
+
+  // Site's own address, independent of any checkpoints it may have —
+  // checkpoints verify a guard walked a route inside the site, they don't
+  // answer "where is this site" for routing purposes. Same debounced
+  // geocode-autocomplete pattern as family.tsx's perimeter address field.
+  const searchSiteAddress = useCallback(async (query: string) => {
+    if (query.length < 3) {
+      setSiteAddressSuggestions([]);
+      return;
+    }
+    setSiteAddressSearching(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/geocode?q=${encodeURIComponent(query)}`, { timeout: 10000, headers: await authHeader() });
+      if (res.ok) {
+        const data = await res.json();
+        setSiteAddressSuggestions(Array.isArray(data) ? data.slice(0, 5) : []);
+      }
+    } catch (e) {
+      console.warn('[Admin] Site geocode error:', e);
+    }
+    setSiteAddressSearching(false);
+  }, [BASE]);
+
+  const handleSiteAddressChange = useCallback((text: string) => {
+    setSiteAddress(text);
+    setSiteAddressCoords(null);
+    if (siteAddressTimerRef.current) clearTimeout(siteAddressTimerRef.current);
+    siteAddressTimerRef.current = setTimeout(() => searchSiteAddress(text), 400);
+  }, [searchSiteAddress]);
+
+  const selectSiteAddressSuggestion = useCallback((s: { display_name: string; lat: string; lon: string }) => {
+    setSiteAddress(s.display_name);
+    setSiteAddressCoords({ latitude: parseFloat(s.lat), longitude: parseFloat(s.lon) });
+    setSiteAddressSuggestions([]);
+  }, []);
+
+  const handleSaveSite = useCallback(async () => {
     if (!newSiteName.trim()) {
       Alert.alert('Erreur', 'Le nom du site est obligatoire.');
       return;
     }
-    if (user?.role === 'superadmin' && !newSiteOrgId) {
+    if (!editingSiteId && user?.role === 'superadmin' && !newSiteOrgId) {
       Alert.alert('Erreur', 'Sélectionnez une organisation.');
       return;
     }
     setSiteSaving(true);
     try {
       const payload: any = { name: newSiteName.trim() };
-      if (user?.role === 'superadmin') payload.organizationId = newSiteOrgId;
-      const res = await fetchWithTimeout(`${BASE}/admin/patrol-sites`, {
-        method: 'POST',
+      if (!editingSiteId && user?.role === 'superadmin') payload.organizationId = newSiteOrgId;
+      if (siteAddressCoords) {
+        payload.address = siteAddress;
+        payload.latitude = siteAddressCoords.latitude;
+        payload.longitude = siteAddressCoords.longitude;
+      }
+      const res = await fetchWithTimeout(`${BASE}/admin/patrol-sites${editingSiteId ? `/${editingSiteId}` : ''}`, {
+        method: editingSiteId ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
         body: JSON.stringify(payload),
         timeout: 10000,
       });
       if (res.ok) {
         setShowCreateSiteModal(false);
-        setNewSiteName('');
-        setNewSiteOrgId('');
+        resetSiteForm();
         await fetchPatrolSitesAdmin();
       } else {
         const err = await res.json().catch(() => ({}));
@@ -539,7 +615,7 @@ export default function AdminScreen() {
       Alert.alert('Erreur', e.message || 'Impossible de contacter le serveur.');
     }
     setSiteSaving(false);
-  }, [BASE, newSiteName, newSiteOrgId, user?.role, fetchPatrolSitesAdmin]);
+  }, [BASE, newSiteName, newSiteOrgId, editingSiteId, siteAddress, siteAddressCoords, user?.role, fetchPatrolSitesAdmin, resetSiteForm]);
 
   const handleDeleteSite = useCallback((site: AdminPatrolSite) => {
     Alert.alert(
@@ -1484,12 +1560,12 @@ export default function AdminScreen() {
         </View>
       </Modal>
 
-      {/* Create Patrol Site Modal */}
+      {/* Create/Edit Patrol Site Modal */}
       <Modal visible={showCreateSiteModal} transparent animationType="slide">
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Nouveau site de patrouille</Text>
-            <Text style={styles.formLabel}>Nom / Adresse</Text>
+            <Text style={styles.modalTitle}>{editingSiteId ? 'Modifier le site' : 'Nouveau site de patrouille'}</Text>
+            <Text style={styles.formLabel}>Nom</Text>
             <TextInput
               style={styles.formInput}
               value={newSiteName}
@@ -1498,7 +1574,35 @@ export default function AdminScreen() {
               placeholderTextColor="#9ca3af"
               returnKeyType="done"
             />
-            {user?.role === 'superadmin' && (
+            <Text style={styles.formLabel}>Adresse (nécessaire pour la navigation vers ce site)</Text>
+            <View>
+              <TextInput
+                style={styles.formInput}
+                value={siteAddress}
+                onChangeText={handleSiteAddressChange}
+                placeholder="Rechercher une adresse..."
+                placeholderTextColor="#9ca3af"
+                returnKeyType="search"
+              />
+              {siteAddressSearching && (
+                <ActivityIndicator size="small" color="#1e3a5f" style={{ position: 'absolute', right: 12, top: 14 }} />
+              )}
+            </View>
+            {siteAddressSuggestions.length > 0 && (
+              <View style={styles.suggestionsContainer}>
+                {siteAddressSuggestions.map((s, idx) => (
+                  <TouchableOpacity
+                    key={`${s.lat}-${s.lon}-${idx}`}
+                    style={[styles.suggestionItem, idx < siteAddressSuggestions.length - 1 && styles.suggestionBorder]}
+                    onPress={() => selectSiteAddressSuggestion(s)}
+                  >
+                    <Text style={styles.suggestionIcon}>📍</Text>
+                    <Text style={styles.suggestionText} numberOfLines={2}>{s.display_name}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+            {!editingSiteId && user?.role === 'superadmin' && (
               <>
                 <Text style={styles.formLabel}>Organisation</Text>
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.relTypeScroll}>
@@ -1519,14 +1623,14 @@ export default function AdminScreen() {
             <View style={styles.formActions}>
               <TouchableOpacity
                 style={[styles.formBtn, styles.formBtnPrimary]}
-                onPress={handleCreateSite}
+                onPress={handleSaveSite}
                 disabled={siteSaving}
               >
-                {siteSaving ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.formBtnPrimaryText}>Créer</Text>}
+                {siteSaving ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.formBtnPrimaryText}>{editingSiteId ? 'Enregistrer' : 'Créer'}</Text>}
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.formBtn, styles.formBtnCancel]}
-                onPress={() => { setShowCreateSiteModal(false); setNewSiteName(''); setNewSiteOrgId(''); }}
+                onPress={() => { setShowCreateSiteModal(false); resetSiteForm(); }}
               >
                 <Text style={styles.formBtnCancelText}>Annuler</Text>
               </TouchableOpacity>
@@ -2151,7 +2255,7 @@ export default function AdminScreen() {
           <Text style={[styles.sectionTitle, { flex: 1, marginTop: 0, marginBottom: 0 }]}>
             Sites de patrouille ({patrolSitesAdmin.length})
           </Text>
-          <TouchableOpacity style={styles.addBtn} onPress={() => setShowCreateSiteModal(true)}>
+          <TouchableOpacity style={styles.addBtn} onPress={openCreateSiteModal}>
             <Text style={styles.addBtnText}>+ Ajouter</Text>
           </TouchableOpacity>
         </View>
@@ -2161,10 +2265,16 @@ export default function AdminScreen() {
           <View key={site.id} style={styles.siteCard}>
             <View style={styles.siteCardInfo}>
               <Text style={styles.siteCardName}>{site.name}</Text>
+              <Text style={styles.loginHistoryDetail}>
+                {site.address ? `📍 ${site.address}` : '⚠ Aucune adresse — navigation impossible'}
+              </Text>
               <Text style={styles.loginHistoryDetail}>Créé le {formatDate(site.createdAt)}</Text>
             </View>
             <TouchableOpacity style={[styles.actionBtn, { backgroundColor: '#3b82f615' }]} onPress={() => openCheckpointMap(site)}>
               <Text style={[styles.actionBtnText, { color: '#3b82f6' }]}>📍 Checkpoints</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.actionBtn, { backgroundColor: '#7c3aed15' }]} onPress={() => openEditSiteModal(site)}>
+              <Text style={[styles.actionBtnText, { color: '#7c3aed' }]}>✏️ Modifier</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.siteDeleteBtn} onPress={() => handleDeleteSite(site)}>
               <Text style={styles.siteDeleteBtnText}>🗑️</Text>
@@ -2336,6 +2446,36 @@ const styles = StyleSheet.create({
   siteCardName: { fontSize: 15, fontWeight: '700', color: '#1f2937' },
   siteDeleteBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#fef2f2', justifyContent: 'center', alignItems: 'center' },
   siteDeleteBtnText: { fontSize: 16 },
+
+  // Address autocomplete (site form)
+  suggestionsContainer: {
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 10,
+    marginTop: 4,
+    marginBottom: 8,
+    overflow: 'hidden',
+  },
+  suggestionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+  suggestionBorder: {
+    borderBottomWidth: 1,
+    borderBottomColor: '#f3f4f6',
+  },
+  suggestionIcon: {
+    fontSize: 13,
+    marginRight: 8,
+  },
+  suggestionText: {
+    flex: 1,
+    fontSize: 13,
+    color: '#1f2937',
+  },
 
   // Checkpoint map
   checkpointMapHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 54, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: '#e5e7eb' },

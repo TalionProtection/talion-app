@@ -329,6 +329,7 @@
           <thead>
             <tr>
               <th>Nom</th>
+              <th>Adresse</th>
               <th>Créé le</th>
               <th></th>
             </tr>
@@ -354,13 +355,18 @@
     </div>
   </div>
 
-  <!-- Create Patrol Site Modal -->
+  <!-- Create/Edit Patrol Site Modal -->
   <div class="modal-overlay" id="createSiteModal">
     <div class="modal">
-      <h3 class="modal-title">Nouveau site de patrouille</h3>
+      <h3 class="modal-title" id="siteModalTitle">Nouveau site de patrouille</h3>
       <div class="form-group">
-        <label class="form-label">Nom / Adresse</label>
-        <input type="text" class="form-input" id="newSiteName" placeholder="ex. Champel — Avenue de Champel 24">
+        <label class="form-label">Nom</label>
+        <input type="text" class="form-input" id="newSiteName" placeholder="ex. Résidence Champel">
+      </div>
+      <div class="form-group" style="position:relative;">
+        <label class="form-label">Adresse (nécessaire pour la navigation vers ce site)</label>
+        <input type="text" class="form-input" id="newSiteAddressSearch" placeholder="Rechercher une adresse..." autocomplete="off" oninput="searchSiteAddress(this.value)">
+        <div id="siteAddressSuggestions" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:20;background:var(--card-bg,#fff);border:1px solid var(--border);border-radius:8px;max-height:220px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,0.15);"></div>
       </div>
       <div class="form-group" id="newSiteOrgGroup" style="display:none;">
         <label class="form-label">Organisation</label>
@@ -368,7 +374,7 @@
       </div>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
         <button class="btn btn-secondary" onclick="closeCreateSiteModal()">Annuler</button>
-        <button class="btn btn-primary" onclick="submitCreateSite()">Créer</button>
+        <button class="btn btn-primary" onclick="submitCreateSite()" id="siteModalSubmitBtn">Créer</button>
       </div>
     </div>
   </div>
