@@ -1061,11 +1061,27 @@ export default function PatrolScreen() {
       if (!res.ok) throw new Error('failed');
       const data = await res.json();
       setCurrentBlackbookEntry({ ...currentBlackbookEntry, photos: data.photos });
+      // Vehicle/plate recognition (ANPR) suggestion — never auto-written.
+      // Mobile only has a single scalar plate field (unlike the console's
+      // vehicle list), so only offer to fill it if empty; if a different
+      // plate is already set, just surface a heads-up rather than silently
+      // overwriting it.
+      if (data.plateSuggestion?.ok) {
+        const detectedPlate = data.plateSuggestion.plate;
+        if (!bbVehiclePlate.trim()) {
+          Alert.alert('Plaque détectée', `Plaque détectée sur la photo : ${detectedPlate}. Utiliser ?`, [
+            { text: 'Ignorer', style: 'cancel' },
+            { text: 'Utiliser', onPress: () => setBbVehiclePlate(detectedPlate) },
+          ]);
+        } else if (bbVehiclePlate.trim().toUpperCase() !== detectedPlate) {
+          Alert.alert('Plaque détectée', `Une plaque différente a été détectée sur la photo : ${detectedPlate} (véhicule actuel : ${bbVehiclePlate}).`);
+        }
+      }
     } catch (e) {
       Alert.alert('Erreur', 'Envoi de la photo impossible');
     }
     setPhotoUploading(false);
-  }, [currentBlackbookEntry]);
+  }, [currentBlackbookEntry, bbVehiclePlate]);
 
   const deleteBlackbookPhoto = useCallback((url: string) => {
     if (!currentBlackbookEntry) return;

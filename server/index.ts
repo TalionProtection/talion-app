@@ -10209,19 +10209,87 @@ app.delete('/api/blackbook/:id/sightings/:sightingId', requireAuth, async (req, 
   res.json({ success: true });
 });
 
+// ─── Vehicle/plate recognition (ANPR) on Blackbook photo upload ────────
+// Plate Recognizer (platerecognizer.com) — a dedicated ANPR SaaS, not
+// generic OCR retrofitted for plates, chosen for accuracy on angled/
+// partial plates over hand-rolled Cloud Vision text-detection heuristics.
+// Never auto-writes to a Blackbook entry — always a suggestion the
+// operator must explicitly confirm client-side (sensitive dossier data).
+type PlateRecognitionResult =
+  | { ok: true; plate: string; confidence: number; vehicle?: { make?: string; color?: string } }
+  | { ok: false; reason: string };
+
+async function recognizePlateFromFile(filePath: string): Promise<PlateRecognitionResult> {
+  const token = process.env.PLATERECOGNIZER_API_TOKEN;
+  if (!token) { console.warn('[ANPR] PLATERECOGNIZER_API_TOKEN not set'); return { ok: false, reason: 'Reconnaissance de plaque non configurée sur le serveur' }; }
+  try {
+    const form = new FormData();
+    form.append('upload', new Blob([fs.readFileSync(filePath)]));
+    const resp = await fetch('https://api.platerecognizer.com/v1/plate-reader/', {
+      method: 'POST',
+      headers: { Authorization: `Token ${token}` },
+      body: form as any,
+    });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      console.error('[ANPR] Plate Recognizer error:', resp.status, body);
+      return { ok: false, reason: `Service ANPR indisponible (${resp.status})` };
+    }
+    const data = await resp.json() as any;
+    const best = data.results?.[0];
+    if (!best) return { ok: false, reason: 'Aucune plaque détectée sur la photo' };
+    return {
+      ok: true,
+      plate: String(best.plate || '').toUpperCase(),
+      confidence: typeof best.score === 'number' ? best.score : 0,
+      vehicle: { make: best.vehicle?.type, color: best.color?.[0]?.name },
+    };
+  } catch (e) {
+    console.error('[ANPR] recognizePlateFromFile error:', e);
+    return { ok: false, reason: `Erreur réseau : ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+function findEntriesWithPlate(plate: string, organizationId?: string, excludeEntryId?: string): { entryId: string; name: string }[] {
+  const normalized = plate.trim().toUpperCase();
+  const matches: { entryId: string; name: string }[] = [];
+  for (const other of blackbookEntries.values()) {
+    if (other.id === excludeEntryId || other.organizationId !== organizationId) continue;
+    if (other.vehicles.some(v => (v.plate || '').trim().toUpperCase() === normalized)) {
+      matches.push({ entryId: other.id, name: `${other.firstName} ${other.lastName}`.trim() });
+    }
+  }
+  return matches;
+}
+
 // POST /api/blackbook/:id/photos — multipart upload, up to 6 photos per call
 app.post('/api/blackbook/:id/photos', requireAuth, upload.array('photos', 6), async (req: any, res) => {
   const caller = req.supabaseUser!;
   if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
   const entry = blackbookEntries.get(req.params.id as string);
   if (!entry) return res.status(404).json({ error: 'Entry not found' });
+  if (!canAccessOrg(caller, entry.organizationId)) return res.status(403).json({ error: 'Not authorized for this entry' });
   if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files uploaded' });
   const newUrls: string[] = req.files.map((f: any) => `/uploads/${f.filename}`);
   entry.photos.push(...newUrls);
   entry.updatedAt = Date.now();
   blackbookEntries.set(entry.id, entry);
   saveBlackbookEntryToSupabase(entry).catch(() => {});
-  res.json({ photos: entry.photos });
+
+  // Opportunistic ANPR on the first uploaded file only — most Blackbook
+  // photos are of a person, not a vehicle, so this isn't guaranteed to
+  // find anything, and a failure here must never block the upload itself
+  // (recognizePlateFromFile never throws).
+  let plateSuggestion: (PlateRecognitionResult & { matchingEntries?: { entryId: string; name: string }[] }) | undefined;
+  const firstFile = req.files[0];
+  if (firstFile?.path) {
+    const result = await recognizePlateFromFile(firstFile.path);
+    plateSuggestion = result.ok
+      ? { ...result, matchingEntries: findEntriesWithPlate(result.plate, entry.organizationId, entry.id) }
+      : result;
+  }
+
+  res.json({ photos: entry.photos, plateSuggestion });
 });
 
 // DELETE /api/blackbook/:id/photos — body: { url }
@@ -10230,6 +10298,7 @@ app.delete('/api/blackbook/:id/photos', requireAuth, async (req, res) => {
   if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
   const entry = blackbookEntries.get(req.params.id as string);
   if (!entry) return res.status(404).json({ error: 'Entry not found' });
+  if (!canAccessOrg(caller, entry.organizationId)) return res.status(403).json({ error: 'Not authorized for this entry' });
   const { url } = req.body;
   entry.photos = entry.photos.filter(p => p !== url);
   entry.updatedAt = Date.now();

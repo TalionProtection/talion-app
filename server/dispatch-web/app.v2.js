@@ -2568,6 +2568,7 @@ function onSightingResidenceChange() {
 
 async function openBlackbookDetail(entryId) {
   currentBlackbookVehicles = [];
+  dismissPlateSuggestion();
   document.getElementById('addSightingForm').style.display = 'none';
   await ensureAllUsersLoaded();
   await populateSightingResidenceSelect();
@@ -2686,10 +2687,49 @@ async function uploadBlackbookPhotos() {
     currentBlackbookEntry.photos = data.photos;
     renderBlackbookPhotos();
     showToast('Photo(s) ajoutée(s)', 'success');
+    renderPlateSuggestion(data.plateSuggestion);
   } catch (e) {
     showToast('Erreur upload photo', 'error');
   }
   input.value = '';
+}
+
+// Vehicle/plate recognition (ANPR) suggestion — never auto-written, the
+// operator must explicitly click "Ajouter" and then still save the fiche.
+let pendingPlateSuggestion = null;
+function renderPlateSuggestion(suggestion) {
+  const box = document.getElementById('bbPlateSuggestion');
+  if (!box) return;
+  if (!suggestion || !suggestion.ok) { box.style.display = 'none'; pendingPlateSuggestion = null; return; }
+  pendingPlateSuggestion = suggestion;
+  const matchText = (suggestion.matchingEntries && suggestion.matchingEntries.length)
+    ? ` — cette plaque apparaît aussi sur : ${suggestion.matchingEntries.map(m => escapeHtml(m.name)).join(', ')}`
+    : '';
+  box.innerHTML = `
+    <span>🚗 Plaque détectée : <b>${escapeHtml(suggestion.plate)}</b> (${Math.round((suggestion.confidence || 0) * 100)}% confiance)${matchText}</span>
+    <span style="display:flex;gap:6px;">
+      <button class="btn btn-sm btn-primary" onclick="confirmPlateSuggestion()">Ajouter comme véhicule</button>
+      <button class="btn btn-sm btn-secondary" onclick="dismissPlateSuggestion()">Ignorer</button>
+    </span>
+  `;
+  box.style.display = 'flex';
+}
+
+function confirmPlateSuggestion() {
+  if (!pendingPlateSuggestion) return;
+  currentBlackbookVehicles.push({
+    plate: pendingPlateSuggestion.plate,
+    description: [pendingPlateSuggestion.vehicle?.make, pendingPlateSuggestion.vehicle?.color].filter(Boolean).join(' '),
+  });
+  renderBlackbookVehicles();
+  dismissPlateSuggestion();
+  showToast('Véhicule ajouté — pensez à enregistrer la fiche', 'success');
+}
+
+function dismissPlateSuggestion() {
+  pendingPlateSuggestion = null;
+  const box = document.getElementById('bbPlateSuggestion');
+  if (box) box.style.display = 'none';
 }
 
 async function deleteBlackbookPhoto(url) {
