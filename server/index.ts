@@ -1584,6 +1584,16 @@ const BLACKBOOK_PROXIMITY_RADIUS_METERS = 150;
 const ROUTE_GRID_CELL_DEGREES = 0.00068; // ~75m at Geneva's latitude, for coarse route-overlap comparison
 const ROUTE_DURATION_CAP_FACTOR = 1.25; // don't recommend a route more than 25% longer than the fastest option
 
+// Intelligence-layer tuning constants (site risk score + live responder
+// proximity alerts, built on top of Blackbook + incident + patrol data).
+const RISK_SCORE_INCIDENT_LOOKBACK_DAYS = 180; // incidents older than this don't count against a site's score
+const RISK_SCORE_SITE_RADIUS_METERS = 300; // wider than BLACKBOOK_PROXIMITY_RADIUS_METERS — site-level, not path-level
+const RISK_SCORE_PATROL_REPORT_SAMPLE = 20; // most-recent reports considered for the compliance signal
+const BLACKBOOK_TEMPORAL_PATTERN_MIN_OCCURRENCES = 3;
+const BLACKBOOK_TEMPORAL_BUCKET_HOURS = 3; // sightings grouped into same-weekday, same N-hour-of-day buckets
+const RESPONDER_PROXIMITY_ALERT_RADIUS_METERS = BLACKBOOK_PROXIMITY_RADIUS_METERS;
+const RESPONDER_PROXIMITY_ALERT_LOOKBACK_DAYS = BLACKBOOK_PROXIMITY_LOOKBACK_DAYS;
+
 // "Needs attention" notification for a round in progress — mirrors
 // handleSoftEscalation's pattern (audit + push loop + broadcast), but scopes
 // the push loop to the round's own organization (handleSoftEscalation's
@@ -1866,6 +1876,95 @@ function countBlackbookProximity(geometry: { latitude: number; longitude: number
   return { count: nearSightingIds.size, mostRecentTimestamp };
 }
 
+// ─── Site risk score ──────────────────────────────────────────────────
+// Same shape as scoreRouteCandidates below: small pure signal functions,
+// each returning a 0-100 score + a plain-language detail string, combined
+// by a weighted sum into a band + rationale. Deterministic scoring over
+// data already collected — not machine learning (see plan notes).
+interface SiteRiskSignal { label: string; weight: number; score: number; detail: string; }
+interface SiteRiskResult {
+  siteId: string; siteName: string; score: number;
+  band: 'low' | 'medium' | 'high' | 'critical';
+  signals: SiteRiskSignal[]; rationale: string; computedAt: number;
+}
+
+const RISK_LEVEL_WEIGHT: Record<string, number> = { low: 1, medium: 2, high: 3, critical: 4 };
+const ALERT_SEVERITY_WEIGHT: Record<string, number> = { low: 1, medium: 2, high: 3, critical: 4 };
+
+function scoreBlackbookProximitySignal(coords: { latitude: number; longitude: number }, organizationId?: string): SiteRiskSignal {
+  const cutoff = Date.now() - BLACKBOOK_PROXIMITY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+  let weightedCount = 0;
+  let nearestMeters: number | undefined;
+  for (const entry of blackbookEntries.values()) {
+    if (entry.organizationId !== organizationId) continue;
+    for (const s of entry.sightings) {
+      if (s.timestamp < cutoff || s.location?.latitude === undefined || s.location?.longitude === undefined) continue;
+      const dist = haversineDistance(coords.latitude, coords.longitude, s.location.latitude, s.location.longitude);
+      if (dist > RISK_SCORE_SITE_RADIUS_METERS) continue;
+      weightedCount += RISK_LEVEL_WEIGHT[entry.riskLevel] || 1;
+      if (nearestMeters === undefined || dist < nearestMeters) nearestMeters = dist;
+    }
+  }
+  const score = Math.min(100, weightedCount * 12);
+  const detail = weightedCount === 0
+    ? 'Aucun signalement Blackbook à proximité'
+    : `${weightedCount} point(s) de signalement Blackbook pondéré(s) à proximité${nearestMeters !== undefined ? ` (le plus proche à ${Math.round(nearestMeters)}m)` : ''}`;
+  return { label: 'Blackbook', weight: 0.45, score, detail };
+}
+
+function scoreIncidentHistorySignal(coords: { latitude: number; longitude: number }, organizationId?: string): SiteRiskSignal {
+  const cutoff = Date.now() - RISK_SCORE_INCIDENT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+  let weightedCount = 0;
+  let count = 0;
+  for (const alert of alerts.values()) {
+    if (alert.organizationId !== organizationId || alert.createdAt < cutoff) continue;
+    if (!alert.location) continue;
+    const dist = haversineDistance(coords.latitude, coords.longitude, alert.location.latitude, alert.location.longitude);
+    if (dist > RISK_SCORE_SITE_RADIUS_METERS) continue;
+    weightedCount += ALERT_SEVERITY_WEIGHT[alert.severity] || 1;
+    count++;
+  }
+  const score = Math.min(100, weightedCount * 10);
+  const detail = count === 0
+    ? 'Aucun incident à proximité'
+    : `${count} incident(s) à proximité sur ${RISK_SCORE_INCIDENT_LOOKBACK_DAYS} jours`;
+  return { label: 'Incidents', weight: 0.35, score, detail };
+}
+
+function scorePatrolComplianceSignal(siteId: string): SiteRiskSignal {
+  const reports = patrolReports
+    .filter(r => r.siteId === siteId && r.checkpoints && r.checkpoints.length > 0)
+    .slice(0, RISK_SCORE_PATROL_REPORT_SAMPLE);
+  if (reports.length === 0) return { label: 'Couverture rondes', weight: 0.20, score: 0, detail: 'Pas encore de ronde GPS effectuée sur ce site' };
+  let totalCheckpoints = 0, metCheckpoints = 0;
+  for (const r of reports) {
+    for (const cp of r.checkpoints!) {
+      totalCheckpoints++;
+      if (cp.dwellMet) metCheckpoints++;
+    }
+  }
+  const complianceRate = totalCheckpoints > 0 ? metCheckpoints / totalCheckpoints : 1;
+  const score = Math.round((1 - complianceRate) * 100);
+  const detail = `${Math.round(complianceRate * 100)}% des checkpoints validés sur les ${reports.length} dernière(s) ronde(s)`;
+  return { label: 'Couverture rondes', weight: 0.20, score, detail };
+}
+
+function computeSiteRiskScore(siteId: string, organizationId?: string): SiteRiskResult | null {
+  const site = patrolSites.get(siteId);
+  if (!site) return null;
+  const coords = resolveSiteDestination(siteId);
+  const signals: SiteRiskSignal[] = coords
+    ? [scoreBlackbookProximitySignal(coords, organizationId), scoreIncidentHistorySignal(coords, organizationId), scorePatrolComplianceSignal(siteId)]
+    : [scorePatrolComplianceSignal(siteId)]; // no address/checkpoints yet — compliance is all we can compute
+  const totalWeight = signals.reduce((s, sig) => s + sig.weight, 0) || 1;
+  const score = Math.round(signals.reduce((s, sig) => s + sig.score * sig.weight, 0) / totalWeight);
+  const band: SiteRiskResult['band'] = score >= 75 ? 'critical' : score >= 50 ? 'high' : score >= 25 ? 'medium' : 'low';
+  const rationale = coords
+    ? signals.map(s => `${s.label} : ${s.detail}`).join(' · ')
+    : `Site sans adresse configurée — score basé uniquement sur la couverture des rondes. ${signals[0].detail}`;
+  return { siteId, siteName: site.name, score, band, signals, rationale, computedAt: Date.now() };
+}
+
 interface ScoredRouteCandidate {
   geometry: { latitude: number; longitude: number }[];
   distanceMeters: number;
@@ -1933,6 +2032,71 @@ function checkActiveResponderRoute(userId: string, location: { latitude: number;
     broadcastToOrgRole(route.organizationId, 'dispatcher', payload);
     broadcastToOrgRole(route.organizationId, 'admin', payload);
     addAuditEntry('system', 'Navigation terminée', route.responderName, `Arrivée à "${route.toSiteName}"`, userId, route.organizationId);
+  }
+}
+
+// ─── Real-time responder proximity to historical Blackbook activity ────
+// IMPORTANT FRAMING: this alerts on one of OUR tracked staff (a responder
+// on duty) entering a zone with RECENT HISTORICAL Blackbook activity. It
+// is NOT live detection of a flagged person's current position — this
+// system has no way to track a suspect's live location. Every message
+// this produces must make that distinction explicit so it can never be
+// misread as "the suspect is here right now."
+interface NearbyBlackbookHit { entryId: string; name: string; riskLevel: string; distanceMeters: number; lastSightingAt: number; }
+function findNearbyBlackbookEntries(location: { latitude: number; longitude: number }, organizationId?: string): NearbyBlackbookHit[] {
+  const cutoff = Date.now() - RESPONDER_PROXIMITY_ALERT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+  const hits: NearbyBlackbookHit[] = [];
+  for (const entry of blackbookEntries.values()) {
+    if (entry.organizationId !== organizationId) continue;
+    for (const s of entry.sightings) {
+      if (s.timestamp < cutoff || s.location?.latitude === undefined || s.location?.longitude === undefined) continue;
+      const dist = haversineDistance(location.latitude, location.longitude, s.location.latitude, s.location.longitude);
+      if (dist <= RESPONDER_PROXIMITY_ALERT_RADIUS_METERS) {
+        hits.push({ entryId: entry.id, name: `${entry.firstName} ${entry.lastName}`.trim(), riskLevel: entry.riskLevel, distanceMeters: Math.round(dist), lastSightingAt: s.timestamp });
+        break; // one hit per entry is enough
+      }
+    }
+  }
+  return hits;
+}
+
+// Fire-once-per-episode dedup, mirrors perimeterState's enter/exit toggle:
+// key is `${responderId}:${entryId}`, set on entry, cleared once no longer
+// nearby (no exit alert needed — this is a heads-up, not a breach).
+const responderBlackbookProximityState = new Map<string, boolean>();
+
+function notifyResponderBlackbookProximity(responderId: string, hit: NearbyBlackbookHit, organizationId?: string) {
+  const responderName = adminUsers.get(responderId)?.name || responderId;
+  const daysAgo = Math.round((Date.now() - hit.lastSightingAt) / (24 * 60 * 60 * 1000));
+  const title = '📍 Zone à activité Blackbook connue';
+  const body = `${responderName} est entré(e) dans une zone où "${hit.name}" (risque ${hit.riskLevel}) a été signalé à ${hit.distanceMeters}m il y a ${daysAgo}j. Ceci ne signifie PAS que cette personne est détectée en ce moment.`;
+  addAuditEntry('system', 'Blackbook - proximité responder', responderName, body, responderId, organizationId);
+  const payload = { type: 'responderBlackbookProximityAlert', data: { responderId, responderName, entryId: hit.entryId, name: hit.name, riskLevel: hit.riskLevel, distanceMeters: hit.distanceMeters, title, body } };
+  broadcastToOrgRole(organizationId, 'dispatcher', payload);
+  broadcastToOrgRole(organizationId, 'admin', payload);
+  const notified = new Set<string>();
+  for (const [, entry] of pushTokens) {
+    if ((entry.userRole === 'dispatcher' || entry.userRole === 'admin' || entry.userRole === 'superadmin') && !notified.has(entry.userId)) {
+      if (!canAccessOrg({ role: entry.userRole, organizationId: adminUsers.get(entry.userId)?.organizationId }, organizationId)) continue;
+      notified.add(entry.userId);
+      sendPushToUser(entry.userId, title, body, { type: 'blackbook_proximity', entryId: hit.entryId }).catch(() => {});
+    }
+  }
+}
+
+function checkResponderBlackbookProximity(responderId: string, location: { latitude: number; longitude: number }, organizationId?: string) {
+  const nearby = findNearbyBlackbookEntries(location, organizationId);
+  const nearbyIds = new Set(nearby.map(h => h.entryId));
+  for (const hit of nearby) {
+    const key = `${responderId}:${hit.entryId}`;
+    if (responderBlackbookProximityState.get(key)) continue; // already alerted, still inside
+    responderBlackbookProximityState.set(key, true);
+    notifyResponderBlackbookProximity(responderId, hit, organizationId);
+  }
+  for (const key of responderBlackbookProximityState.keys()) {
+    if (!key.startsWith(`${responderId}:`)) continue;
+    const entryId = key.slice(responderId.length + 1);
+    if (!nearbyIds.has(entryId)) responderBlackbookProximityState.delete(key);
   }
 }
 
@@ -2807,6 +2971,7 @@ function handleLocationUpdate(ws: any, userId: string, userRole: string, locatio
     checkGeofences(userId, locationData);
     checkActivePatrolRound(userId, locationData);
     checkActiveResponderRoute(userId, locationData);
+    checkResponderBlackbookProximity(userId, locationData, locationOrgId);
   } else {
     // Regular user location update - broadcast as userLocationUpdate to dispatch (both
     // dispatcher and admin consoles), unless this user is in Ghost mode and hasn't
@@ -6657,6 +6822,23 @@ app.get('/admin/patrol-sites', requireAuth, requireRole('admin'), (req, res) => 
   res.json(sites);
 });
 
+// GET /admin/patrol-sites/risk-scores — batch, all sites this caller can
+// access, for a dashboard table. Computed on read (no precomputation/cache
+// — cheap at this data volume, see computeSiteRiskScore).
+app.get('/admin/patrol-sites/risk-scores', requireAuth, requireRole('admin'), (req, res) => {
+  const sites = Array.from(patrolSites.values()).filter(s => canAccessOrg(req.supabaseUser!, s.organizationId));
+  const results = sites.map(s => computeSiteRiskScore(s.id, s.organizationId)).filter((r): r is SiteRiskResult => r !== null);
+  res.json(results);
+});
+
+app.get('/admin/patrol-sites/:id/risk-score', requireAuth, requireRole('admin'), (req, res) => {
+  const site = patrolSites.get(req.params.id as string);
+  if (!site) return res.status(404).json({ error: 'Patrol site not found' });
+  if (!canAccessOrg(req.supabaseUser!, site.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  const result = computeSiteRiskScore(site.id, site.organizationId);
+  res.json(result);
+});
+
 app.post('/admin/patrol-sites', requireAuth, requireRole('admin'), (req, res) => {
   const name = (req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'name is required' });
@@ -9740,6 +9922,32 @@ function enrichBlackbookEntry(entry: BlackbookEntry) {
   return { ...entry, linkedUserName: entry.linkedUserId ? adminUsers.get(entry.linkedUserId)?.name : undefined };
 }
 
+// Cross-references vehicle plates (exact, normalized) and names/aliases
+// (case-insensitive) against every other entry in the same organization —
+// deterministic string matching, not AI. Same org-scoping convention as
+// countBlackbookProximity (direct equality, no cross-org matches).
+interface RelatedBlackbookEntry { entryId: string; name: string; riskLevel: string; matchType: 'plate' | 'name' | 'alias'; matchValue: string; }
+function findRelatedBlackbookEntries(entry: BlackbookEntry, organizationId?: string): RelatedBlackbookEntry[] {
+  const results: RelatedBlackbookEntry[] = [];
+  const myPlates = new Set(entry.vehicles.map(v => (v.plate || '').trim().toUpperCase()).filter(Boolean));
+  const myNames = new Set([entry.firstName, entry.lastName, ...entry.aliases].map(n => (n || '').trim().toLowerCase()).filter(Boolean));
+  for (const other of blackbookEntries.values()) {
+    if (other.id === entry.id || other.organizationId !== organizationId) continue;
+    const otherName = `${other.firstName} ${other.lastName}`.trim();
+    for (const v of other.vehicles) {
+      const p = (v.plate || '').trim().toUpperCase();
+      if (p && myPlates.has(p)) results.push({ entryId: other.id, name: otherName, riskLevel: other.riskLevel, matchType: 'plate', matchValue: p });
+    }
+    const firstLower = (other.firstName || '').trim().toLowerCase();
+    const lastLower = (other.lastName || '').trim().toLowerCase();
+    for (const n of [other.firstName, other.lastName, ...other.aliases].map(x => (x || '').trim().toLowerCase()).filter(Boolean)) {
+      if (myNames.has(n)) results.push({ entryId: other.id, name: otherName, riskLevel: other.riskLevel, matchType: (n === firstLower || n === lastLower) ? 'name' : 'alias', matchValue: n });
+    }
+  }
+  const seen = new Set<string>();
+  return results.filter(r => (seen.has(r.entryId) ? false : (seen.add(r.entryId), true)));
+}
+
 app.get('/api/blackbook', requireAuth, (req, res) => {
   const caller = req.supabaseUser!;
   if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
@@ -9765,6 +9973,17 @@ app.get('/api/blackbook/:id', requireAuth, (req, res) => {
   const callerAccess = { id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
   if (entry.linkedUserId && !canAccessUser(callerAccess, entry.linkedUserId)) return res.status(403).json({ error: 'Not authorized for this entry' });
   res.json(enrichBlackbookEntry(entry));
+});
+
+// GET /api/blackbook/:id/related — entries sharing a plate or name/alias
+// with this one (see findRelatedBlackbookEntries).
+app.get('/api/blackbook/:id/related', requireAuth, (req, res) => {
+  const caller = req.supabaseUser!;
+  if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
+  const entry = blackbookEntries.get(req.params.id as string);
+  if (!entry) return res.status(404).json({ error: 'Entry not found' });
+  if (!canAccessOrg(caller, entry.organizationId)) return res.status(403).json({ error: 'Not authorized for this entry' });
+  res.json(findRelatedBlackbookEntries(entry, entry.organizationId));
 });
 
 // POST /api/blackbook
@@ -9871,6 +10090,7 @@ app.post('/api/blackbook/:id/sightings', requireAuth, async (req, res) => {
   blackbookEntries.set(entry.id, entry);
   saveBlackbookEntryToSupabase(entry).catch(() => {});
   checkBlackbookCrossResidencePattern(entry, priorDistinctResidences);
+  checkBlackbookTemporalPattern(entry);
   res.status(201).json(sighting);
 });
 
@@ -9929,6 +10149,49 @@ async function notifyStaffBlackbookPatternPush(title: string, body: string) {
     });
     if (!response.ok) console.error(`[Push] Expo API error for blackbook pattern: ${response.status}`);
   } catch (err) { console.error('[Push] Failed to send blackbook pattern push:', err); }
+}
+
+// Second proactive signal alongside the cross-residence one above: the same
+// entity sighted repeatedly at a similar time of day/day of week suggests a
+// deliberate routine (surveillance/casing), not coincidence. Buckets recent
+// sightings by (weekday, N-hour-of-day) and fires once a bucket crosses a
+// minimum-occurrence threshold — deterministic bucketing/counting, not ML.
+const blackbookTemporalPatternsAlerted = new Set<string>(); // `${entryId}:${bucketKey}`, in-memory only — resets on restart, same category as other dedup state in this file
+function checkBlackbookTemporalPattern(entry: BlackbookEntry) {
+  const now = Date.now();
+  const recent = entry.sightings.filter(s => now - s.timestamp <= BLACKBOOK_CORRELATION_WINDOW_MS);
+  if (recent.length < BLACKBOOK_TEMPORAL_PATTERN_MIN_OCCURRENCES) return;
+
+  const buckets = new Map<string, BlackbookSighting[]>();
+  for (const s of recent) {
+    const d = new Date(s.timestamp);
+    const key = `${d.getDay()}:${Math.floor(d.getHours() / BLACKBOOK_TEMPORAL_BUCKET_HOURS)}`;
+    const bucket = buckets.get(key);
+    if (bucket) bucket.push(s); else buckets.set(key, [s]);
+  }
+  const top = Array.from(buckets.entries()).sort((a, b) => b[1].length - a[1].length)[0];
+  if (!top || top[1].length < BLACKBOOK_TEMPORAL_PATTERN_MIN_OCCURRENCES) return;
+
+  const [bucketKey, bucketSightings] = top;
+  const dedupKey = `${entry.id}:${bucketKey}`;
+  if (blackbookTemporalPatternsAlerted.has(dedupKey)) return;
+  blackbookTemporalPatternsAlerted.add(dedupKey);
+
+  const [weekdayStr, hourBucketStr] = bucketKey.split(':');
+  const weekday = Number(weekdayStr), hourBucket = Number(hourBucketStr);
+  const dayNames = ['Dim', 'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam'];
+  const name = `${entry.firstName} ${entry.lastName}`;
+  const title = `🕒 Pattern horaire détecté : ${name}`;
+  const body = `${bucketSightings.length} signalements ${dayNames[weekday]} entre ${hourBucket * BLACKBOOK_TEMPORAL_BUCKET_HOURS}h et ${(hourBucket + 1) * BLACKBOOK_TEMPORAL_BUCKET_HOURS}h sur 90 jours.`;
+
+  addAuditEntry('system', 'Blackbook - pattern horaire', name, body, undefined, entry.organizationId);
+  const payload = {
+    type: 'blackbookTemporalPatternDetected',
+    data: { entryId: entry.id, name, riskLevel: entry.riskLevel, weekday, hourBucket, occurrences: bucketSightings.length, title, body },
+  };
+  broadcastToOrgRole(entry.organizationId, 'dispatcher', payload);
+  broadcastToOrgRole(entry.organizationId, 'admin', payload);
+  notifyStaffBlackbookPatternPush(title, body).catch(() => {});
 }
 
 // DELETE /api/blackbook/:id/sightings/:sightingId
