@@ -1144,7 +1144,11 @@
         <button type="button" class="btn btn-sm" onclick="addBlackbookVehicleRow()">+ Ajouter un véhicule</button>
       </div>
 
-      <div class="form-group"><label>Notes libres</label><textarea id="bbNotes" class="form-control" placeholder="Toute information utile..." style="min-height:70px;"></textarea></div>
+      <div class="form-group">
+        <div style="display:flex;justify-content:space-between;align-items:center;"><label>Notes libres</label><button type="button" class="btn btn-sm" onclick="analyzeNotesField('bbNotes','bbNotesEntities','entry')">🔎 Analyser</button></div>
+        <textarea id="bbNotes" class="form-control" placeholder="Toute information utile..." style="min-height:70px;"></textarea>
+        <div id="bbNotesEntities" style="display:none;margin-top:6px;"></div>
+      </div>
 
       <div style="display:flex;justify-content:flex-end;gap:8px;margin:12px 0;">
         <button class="btn btn-secondary" onclick="closeBlackbookModal()">Annuler</button>
@@ -1190,7 +1194,9 @@
             <option value="">— Lieu libre (non enregistré) —</option>
           </select>
           <input type="text" id="sightingLocation" class="form-control" placeholder="Lieu (adresse ou description libre)" style="margin-bottom:8px;">
+          <div style="display:flex;justify-content:flex-end;margin-bottom:4px;"><button type="button" class="btn btn-sm" onclick="analyzeNotesField('sightingNotes','sightingNotesEntities','sighting')">🔎 Analyser</button></div>
           <textarea id="sightingNotes" class="form-control" placeholder="Notes sur ce signalement" style="margin-bottom:8px;min-height:50px;"></textarea>
+          <div id="sightingNotesEntities" style="display:none;margin-bottom:8px;"></div>
           <button class="btn btn-primary" style="width:100%;" onclick="saveSighting()">Enregistrer le signalement</button>
         </div>
         <div id="bbSightingsList"></div>

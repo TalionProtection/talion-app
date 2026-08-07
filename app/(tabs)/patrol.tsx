@@ -297,6 +297,8 @@ export default function PatrolScreen() {
   const [blackbookRiskFilter, setBlackbookRiskFilter] = useState('');
   const [currentBlackbookEntry, setCurrentBlackbookEntry] = useState<any>(null); // null = creating new
   const [relatedBlackbook, setRelatedBlackbook] = useState<any[]>([]); // deterministic plate/name matches, see findRelatedBlackbookEntries server-side
+  const [entityCandidates, setEntityCandidates] = useState<{ type: 'name' | 'plate' | 'location'; value: string; context: string }[]>([]);
+  const [entityAnalyzing, setEntityAnalyzing] = useState(false);
   const [bbFirstName, setBbFirstName] = useState('');
   const [bbLastName, setBbLastName] = useState('');
   const [bbAliases, setBbAliases] = useState('');
@@ -879,6 +881,7 @@ export default function PatrolScreen() {
     setBbRiskLevel('medium'); setBbStatus('active'); setBbPhysicalDescription('');
     setBbTags(''); setBbVehiclePlate(''); setBbVehicleDescription(''); setBbNotes('');
     setBbLinkedUserId(null); setBbUserSearch('');
+    setEntityCandidates([]);
   };
 
   const ensureAllUsersLoaded = useCallback(async () => {
@@ -919,6 +922,7 @@ export default function PatrolScreen() {
       setBbNotes(entry.notes || '');
       setBbLinkedUserId(entry.linkedUserId || null); setBbUserSearch('');
       setRelatedBlackbook([]);
+      setEntityCandidates([]);
       apiGet<any[]>(`/api/blackbook/${entry.id}/related`).then(setRelatedBlackbook).catch(() => setRelatedBlackbook([]));
     }
     setSightingResidenceId(null); setSightingResidenceSearch('');
@@ -935,6 +939,45 @@ export default function PatrolScreen() {
       Alert.alert('Erreur', 'Impossible de charger cette fiche.');
     }
   }, [blackbookData, openBlackbookForm]);
+
+  // Entity extraction from free-text notes — explicit "Analyser" trigger
+  // only, never automatic on keystroke/save.
+  const analyzeNotes = useCallback(async (text: string) => {
+    if (!text.trim()) { setEntityCandidates([]); return; }
+    setEntityAnalyzing(true);
+    try {
+      const res = await fetchWithTimeout(`${getApiBaseUrl()}/api/notes/extract-entities`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({ text }),
+        timeout: 15000,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        Alert.alert('Erreur', err.error || 'Analyse indisponible.');
+        setEntityCandidates([]);
+        return;
+      }
+      const data = await res.json();
+      setEntityCandidates(data.candidates || []);
+    } catch (e: any) {
+      Alert.alert('Erreur', e.message || 'Impossible de contacter le serveur.');
+      setEntityCandidates([]);
+    }
+    setEntityAnalyzing(false);
+  }, []);
+
+  const applyEntityCandidate = useCallback((c: { type: string; value: string }) => {
+    if (c.type === 'plate') {
+      if (!bbVehiclePlate.trim()) { setBbVehiclePlate(c.value); return; }
+      Alert.alert('Plaque détectée', `${c.value} (véhicule actuel : ${bbVehiclePlate})`);
+    } else if (c.type === 'name') {
+      const current = bbAliases.split(',').map(s => s.trim()).filter(Boolean);
+      if (!current.includes(c.value)) setBbAliases([...current, c.value].join(', '));
+    } else if (c.type === 'location') {
+      setSightingLocation(c.value);
+    }
+  }, [bbVehiclePlate, bbAliases]);
 
   const saveBlackbookEntry = useCallback(async () => {
     if (!bbFirstName.trim() && !bbLastName.trim()) { Alert.alert('Erreur', 'Nom ou prénom requis'); return; }
@@ -2155,8 +2198,22 @@ export default function PatrolScreen() {
               <Text style={styles.bbLabel}>Véhicule — description</Text>
               <TextInput style={styles.bbInput} value={bbVehicleDescription} onChangeText={setBbVehicleDescription} placeholder="Marque, modèle, couleur" placeholderTextColor="#9ca3af" />
 
-              <Text style={styles.bbLabel}>Notes libres</Text>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                <Text style={styles.bbLabel}>Notes libres</Text>
+                <TouchableOpacity style={styles.analyzeBtn} onPress={() => analyzeNotes(bbNotes)} disabled={entityAnalyzing}>
+                  {entityAnalyzing ? <ActivityIndicator size="small" color="#1e3a5f" /> : <Text style={styles.analyzeBtnText}>🔎 Analyser</Text>}
+                </TouchableOpacity>
+              </View>
               <TextInput style={[styles.bbInput, { minHeight: 70 }]} value={bbNotes} onChangeText={setBbNotes} multiline />
+              {entityCandidates.length > 0 && (
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 6, marginBottom: 8 }}>
+                  {entityCandidates.map((c, i) => (
+                    <TouchableOpacity key={i} style={styles.entityChip} onPress={() => applyEntityCandidate(c)}>
+                      <Text style={styles.entityChipText}>{c.type === 'plate' ? '🚗' : c.type === 'name' ? '🧑' : '📍'} {c.value}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
 
               <TouchableOpacity style={[styles.bbSaveBtn, bbSaving && { opacity: 0.6 }]} onPress={saveBlackbookEntry} disabled={bbSaving}>
                 {bbSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.bbSaveBtnText}>💾 Enregistrer</Text>}
@@ -2247,8 +2304,22 @@ export default function PatrolScreen() {
                       )}
                       <Text style={styles.bbLabel}>Lieu {sightingResidenceId ? '(auto-rempli)' : '(libre)'}</Text>
                       <TextInput style={styles.bbInput} value={sightingLocation} onChangeText={setSightingLocation} placeholder="Adresse ou description du lieu" placeholderTextColor="#9ca3af" editable={!sightingResidenceId} />
-                      <Text style={styles.bbLabel}>Notes</Text>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <Text style={styles.bbLabel}>Notes</Text>
+                        <TouchableOpacity style={styles.analyzeBtn} onPress={() => analyzeNotes(sightingNotes)} disabled={entityAnalyzing}>
+                          {entityAnalyzing ? <ActivityIndicator size="small" color="#1e3a5f" /> : <Text style={styles.analyzeBtnText}>🔎 Analyser</Text>}
+                        </TouchableOpacity>
+                      </View>
                       <TextInput style={[styles.bbInput, { minHeight: 50 }]} value={sightingNotes} onChangeText={setSightingNotes} multiline />
+                      {entityCandidates.length > 0 && (
+                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 6, marginBottom: 8 }}>
+                          {entityCandidates.map((c, i) => (
+                            <TouchableOpacity key={i} style={styles.entityChip} onPress={() => applyEntityCandidate(c)}>
+                              <Text style={styles.entityChipText}>{c.type === 'plate' ? '🚗' : c.type === 'name' ? '🧑' : '📍'} {c.value}</Text>
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+                      )}
                       <TouchableOpacity style={[styles.bbSaveBtn, sightingSaving && { opacity: 0.6 }]} onPress={saveSighting} disabled={sightingSaving}>
                         {sightingSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.bbSaveBtnText}>Enregistrer le signalement</Text>}
                       </TouchableOpacity>
@@ -2350,6 +2421,10 @@ const styles = StyleSheet.create({
   bbSaveBtnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
   bbSecondaryBtn: { backgroundColor: '#f3f4f6', borderRadius: 10, paddingVertical: 12, alignItems: 'center' },
   bbSecondaryBtnText: { color: '#374151', fontWeight: '600', fontSize: 13 },
+  analyzeBtn: { backgroundColor: '#eff6ff', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5 },
+  analyzeBtnText: { color: '#1e3a5f', fontWeight: '600', fontSize: 12 },
+  entityChip: { backgroundColor: '#f3f4f6', borderRadius: 14, paddingHorizontal: 10, paddingVertical: 6 },
+  entityChipText: { color: '#374151', fontSize: 12, fontWeight: '600' },
   bbSectionTitle: { fontSize: 13, fontWeight: '700', color: '#374151', textTransform: 'uppercase' },
   bbAddPhotoBtn: {
     width: 80, height: 80, borderRadius: 8, backgroundColor: '#f3f4f6', alignItems: 'center', justifyContent: 'center',

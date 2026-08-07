@@ -9845,6 +9845,67 @@ Si rien de notable ne ressort des données, renvoie un summary qui le dit explic
   }
 }
 
+// ─── Entity extraction from free-text notes ─────────────────────────────
+// Explicit-trigger only (an "Analyser" button client-side, never automatic
+// on keystroke/save) — same fetch/env-var/fence-stripping/error convention
+// as callThreatAnalysisAI above, copied deliberately rather than
+// reinvented. Only surfaces what's explicitly in the text; never invents.
+type EntityExtractionResult =
+  | { ok: true; candidates: { type: 'name' | 'plate' | 'location'; value: string; context: string }[] }
+  | { ok: false; reason: string };
+
+async function callEntityExtractionAI(freeText: string): Promise<EntityExtractionResult> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) { console.warn('[EntityExtraction] ANTHROPIC_API_KEY not set'); return { ok: false, reason: 'Clé API non configurée sur le serveur (ANTHROPIC_API_KEY absente)' }; }
+  if (!freeText.trim()) return { ok: true, candidates: [] };
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5',
+        max_tokens: 1000,
+        system: `Tu extrais des entités structurées depuis une note libre de sécurité résidentielle. Réponds UNIQUEMENT en JSON strict, sans texte autour ni bloc de code markdown (pas de \`\`\`), avec exactement cette forme :
+{"candidates": [{"type": "name|plate|location", "value": "...", "context": "extrait de phrase autour"}]}
+N'invente rien qui n'est pas explicitement présent dans le texte. Si rien n'est trouvé, renvoie candidates: [].`,
+        messages: [{ role: 'user', content: freeText }],
+      }),
+    });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      console.error('[EntityExtraction] Anthropic API error:', resp.status, body);
+      return { ok: false, reason: `Anthropic a répondu ${resp.status}: ${body.slice(0, 300)}` };
+    }
+    const data = await resp.json() as any;
+    const text = data?.content?.[0]?.text;
+    if (!text) return { ok: false, reason: 'Réponse Anthropic sans contenu texte exploitable' };
+    const fenceMatch = text.trim().match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
+    const jsonText = fenceMatch ? fenceMatch[1] : text.trim();
+    let parsed: any;
+    try {
+      parsed = JSON.parse(jsonText);
+    } catch (parseErr) {
+      return { ok: false, reason: `JSON invalide renvoyé par le modèle: ${String(text).slice(0, 300)}` };
+    }
+    if (!Array.isArray(parsed.candidates)) return { ok: false, reason: 'Forme JSON inattendue renvoyée par le modèle' };
+    return { ok: true, candidates: parsed.candidates };
+  } catch (e) {
+    console.error('[EntityExtraction] callEntityExtractionAI error:', e);
+    return { ok: false, reason: `Erreur réseau: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+// POST /api/notes/extract-entities — generic (Blackbook sighting notes,
+// patrol report notes, or any other free-text field), no persistence.
+app.post('/api/notes/extract-entities', requireAuth, async (req, res) => {
+  const caller = req.supabaseUser!;
+  if (!isBlackbookStaff(caller.role)) return res.status(403).json({ error: 'Staff only' });
+  const text = typeof req.body?.text === 'string' ? req.body.text : '';
+  const result = await callEntityExtractionAI(text);
+  if (!result.ok) return res.status(503).json({ error: 'Analyse IA indisponible : ' + result.reason });
+  res.json({ candidates: result.candidates });
+});
+
 // POST /admin/threat-analysis/generate - on-demand, 30-day window (dispatcher+)
 app.post('/admin/threat-analysis/generate', requireAuth, requireRole('dispatcher'), async (req, res) => {
   const caller = req.supabaseUser!;

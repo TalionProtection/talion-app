@@ -2569,6 +2569,8 @@ function onSightingResidenceChange() {
 async function openBlackbookDetail(entryId) {
   currentBlackbookVehicles = [];
   dismissPlateSuggestion();
+  document.getElementById('bbNotesEntities').style.display = 'none';
+  document.getElementById('sightingNotesEntities').style.display = 'none';
   document.getElementById('addSightingForm').style.display = 'none';
   await ensureAllUsersLoaded();
   await populateSightingResidenceSelect();
@@ -2730,6 +2732,63 @@ function dismissPlateSuggestion() {
   pendingPlateSuggestion = null;
   const box = document.getElementById('bbPlateSuggestion');
   if (box) box.style.display = 'none';
+}
+
+// Entity extraction from free-text notes — explicit "Analyser" trigger
+// only, never automatic on keystroke/save (LLM cost + avoid surprising
+// staff). Candidates are suggestions only; applying one still requires
+// the existing save action to persist.
+let lastEntityCandidates = [];
+async function analyzeNotesField(textareaId, chipsId, scope) {
+  const text = document.getElementById(textareaId).value;
+  const chipsEl = document.getElementById(chipsId);
+  if (!text.trim()) { chipsEl.style.display = 'none'; chipsEl.innerHTML = ''; return; }
+  chipsEl.style.display = 'block';
+  chipsEl.innerHTML = '<span style="font-size:11px;color:var(--text-muted);">Analyse en cours...</span>';
+  try {
+    const res = await fetch(`${API_BASE}/api/notes/extract-entities`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      chipsEl.innerHTML = `<span style="font-size:11px;color:#dc2626;">${escapeHtml(err.error || 'Erreur')}</span>`;
+      return;
+    }
+    const data = await res.json();
+    lastEntityCandidates = data.candidates || [];
+    if (lastEntityCandidates.length === 0) {
+      chipsEl.innerHTML = '<span style="font-size:11px;color:var(--text-muted);">Aucune entité détectée</span>';
+      return;
+    }
+    const icon = { name: '🧑', plate: '🚗', location: '📍' };
+    chipsEl.innerHTML = lastEntityCandidates.map((c, i) => `
+      <button type="button" class="btn btn-sm" style="cursor:pointer;margin:2px;" onclick="applyEntityCandidate(${i}, '${scope}')" title="${escapeHtml(c.context || '')}">
+        ${icon[c.type] || ''} ${escapeHtml(c.value)}
+      </button>
+    `).join('');
+  } catch (e) {
+    chipsEl.innerHTML = '<span style="font-size:11px;color:#dc2626;">Erreur réseau</span>';
+  }
+}
+
+function applyEntityCandidate(idx, scope) {
+  const c = lastEntityCandidates[idx];
+  if (!c) return;
+  if (c.type === 'plate') {
+    currentBlackbookVehicles.push({ plate: c.value, description: '' });
+    renderBlackbookVehicles();
+    showToast('Plaque ajoutée à la liste des véhicules', 'success');
+  } else if (c.type === 'name') {
+    const aliasesEl = document.getElementById('bbAliases');
+    const current = aliasesEl.value.split(',').map(s => s.trim()).filter(Boolean);
+    if (!current.includes(c.value)) { current.push(c.value); aliasesEl.value = current.join(', '); }
+    showToast('Nom ajouté aux alias', 'success');
+  } else if (c.type === 'location' && scope === 'sighting') {
+    document.getElementById('sightingLocation').value = c.value;
+    showToast('Lieu ajouté au signalement', 'success');
+  } else {
+    showToast(`Détecté : ${c.value}`, 'info');
+  }
 }
 
 async function deleteBlackbookPhoto(url) {
