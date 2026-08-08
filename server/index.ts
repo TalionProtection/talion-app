@@ -329,6 +329,35 @@ const storage = multer.diskStorage({
 const upload = multer({ storage, limits: { fileSize: 20 * 1024 * 1024 } }); // 20MB — a modern phone photo at moderate compression can exceed the old 5MB cap
 const uploadMedia = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB for patrol media (photos + videos)
 app.use('/uploads', express.static(uploadsDir));
+
+// Render's filesystem is EPHEMERAL — everything under uploadsDir is wiped
+// on every deploy/restart. Multer still writes here first (a same-request
+// staging area, safe to read from immediately after), but nothing may be
+// treated as durably stored unless it's also pushed to Supabase Storage.
+// Mirrors the exact pattern already used for conversation media
+// (POST /api/conversations/:id/media) — same bucket, same
+// upload-then-getPublicUrl shape, same fallback-to-local-path-on-failure
+// (better a broken-after-next-deploy link than no link at all, e.g. if
+// Supabase Storage itself is briefly down).
+async function uploadFileToSupabaseStorage(file: { path: string; filename: string; mimetype?: string }): Promise<string> {
+  let mediaUrl = `/uploads/${file.filename}`;
+  try {
+    const fileBuffer = fs.readFileSync(file.path);
+    const fileName = `${Date.now()}-${file.filename}`;
+    const { data: uploadData, error: uploadError } = await supabaseAdmin.storage
+      .from('media')
+      .upload(fileName, fileBuffer, { contentType: file.mimetype || 'application/octet-stream', upsert: false });
+    if (!uploadError && uploadData) {
+      const { data: { publicUrl } } = supabaseAdmin.storage.from('media').getPublicUrl(fileName);
+      mediaUrl = publicUrl;
+    } else {
+      console.warn('[Storage] Supabase Storage upload failed, using local (ephemeral) fallback:', uploadError?.message);
+    }
+  } catch (e) {
+    console.warn('[Storage] Storage error, using local (ephemeral) fallback:', e);
+  }
+  return mediaUrl;
+}
 app.use('/assets', express.static(path.join(PROJECT_ROOT, 'assets')));
 
 // Dynamic file serving for console static files to bypass CDN/proxy cache
@@ -3392,12 +3421,12 @@ app.get('/admin/login-stats', requireAuth, requireRole('admin'), (req, res) => {
 });
 
 // Photo upload endpoint
-app.post('/admin/users/:id/photo', requireAuth, requireRole('admin'), upload.single('photo'), (req: any, res) => {
+app.post('/admin/users/:id/photo', requireAuth, requireRole('admin'), upload.single('photo'), async (req: any, res) => {
   const user = adminUsers.get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   if (!canAccessOrg(req.supabaseUser!, user.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  user.photoUrl = `/uploads/${req.file.filename}`;
+  user.photoUrl = await uploadFileToSupabaseStorage(req.file);
   adminUsers.set(user.id, user);
   saveAdminUserToSupabase(user);
   addAuditEntry('user_updated', `Profile photo updated for ${user.firstName} ${user.lastName}`, 'admin');
@@ -4060,13 +4089,13 @@ app.post('/api/sos', async (req, res) => {
 
 // ─── Alert Photo Upload ──────────────────────────────────────────────
 // Upload photos to an existing alert (called after alert creation)
-app.post('/api/alerts/:id/photos', requireAuth, upload.array('photos', 4), (req: any, res) => {
+app.post('/api/alerts/:id/photos', requireAuth, upload.array('photos', 4), async (req: any, res) => {
   const alert = alerts.get(req.params.id);
   if (!alert) return res.status(404).json({ error: 'Alert not found' });
   if (!canAccessOrg(req.supabaseUser!, alert.organizationId)) return res.status(403).json({ error: 'Not authorized' });
   if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files uploaded' });
 
-  const photoUrls: string[] = req.files.map((f: any) => `/uploads/${f.filename}`);
+  const photoUrls: string[] = await Promise.all(req.files.map((f: any) => uploadFileToSupabaseStorage(f)));
   if (!alert.photos) alert.photos = [];
   alert.photos.push(...photoUrls);
   persistAlerts();
@@ -7338,7 +7367,7 @@ app.post('/api/patrol/reports/:id/escalate-to-incident', async (req, res) => {
 });
 
 // POST /api/patrol/reports/:id/media - upload media (photo/video) to a patrol report
-app.post('/api/patrol/reports/:id/media', uploadMedia.single('media'), (req: any, res) => {
+app.post('/api/patrol/reports/:id/media', uploadMedia.single('media'), async (req: any, res) => {
   const report = patrolReports.find(r => r.id === req.params.id);
   if (!report) return res.status(404).json({ error: 'Patrol report not found' });
   if (!canAccessOrg(req.supabaseUser!, report.organizationId)) return res.status(403).json({ error: 'Not authorized' });
@@ -7346,10 +7375,11 @@ app.post('/api/patrol/reports/:id/media', uploadMedia.single('media'), (req: any
 
   const ext = req.file.originalname.split('.').pop()?.toLowerCase() || '';
   const isVideo = ['mp4', 'mov', 'avi', 'webm', 'm4v'].includes(ext);
+  const mediaUrl = await uploadFileToSupabaseStorage(req.file);
   const mediaItem: PatrolMedia = {
     id: uuidv4().slice(0, 8),
     type: isVideo ? 'video' : 'photo',
-    url: `/uploads/${req.file.filename}`,
+    url: mediaUrl,
     filename: req.file.originalname,
     uploadedAt: Date.now(),
   };
@@ -10348,7 +10378,7 @@ app.post('/api/blackbook/:id/photos', requireAuth, upload.array('photos', 6), as
   if (!entry) return res.status(404).json({ error: 'Entry not found' });
   if (!canAccessOrg(caller, entry.organizationId)) return res.status(403).json({ error: 'Not authorized for this entry' });
   if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files uploaded' });
-  const newUrls: string[] = req.files.map((f: any) => `/uploads/${f.filename}`);
+  const newUrls: string[] = await Promise.all(req.files.map((f: any) => uploadFileToSupabaseStorage(f)));
   entry.photos.push(...newUrls);
   entry.updatedAt = Date.now();
   blackbookEntries.set(entry.id, entry);
