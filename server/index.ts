@@ -10420,17 +10420,9 @@ app.post('/api/blackbook/:id/photos', requireAuth, upload.array('photos', 6), as
     const firstFile = req.files[0];
     if (firstFile?.path) {
       const result = await recognizePlateFromFile(firstFile.path);
-      // TEMPORARY: routed through logHealthError (visible in the Santé
-      // Système tab) regardless of outcome, not just on exception — there's
-      // no other way to see server-side console output right now, and the
-      // client was reporting "nothing happens" with no way to tell why.
-      // Remove once ANPR is confirmed working end-to-end.
-      logHealthError('ANPR result', new Error(JSON.stringify(result)));
       plateSuggestion = result.ok
         ? { ...result, matchingEntries: findEntriesWithPlate(result.plate, entry.organizationId, entry.id) }
         : result;
-    } else {
-      logHealthError('ANPR skipped', new Error('first uploaded file has no local path'));
     }
   } catch (e) {
     console.error('[ANPR] plate suggestion block error (upload itself already succeeded):', e);
