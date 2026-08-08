@@ -317,6 +317,7 @@ export default function PatrolScreen() {
   const [sightingNotes, setSightingNotes] = useState('');
   const [sightingSaving, setSightingSaving] = useState(false);
   const [photoUploading, setPhotoUploading] = useState(false);
+  const [plateAnalysisNote, setPlateAnalysisNote] = useState<string | null>(null); // last ANPR result, shown near the photo gallery so it's clear analysis ran even when it finds nothing
   // Link to a specific family/user and, per-sighting, to a registered residence —
   // makes "where they were seen" point at real data instead of free text alone.
   const [allUsersCache, setAllUsersCache] = useState<any[] | null>(null);
@@ -909,6 +910,7 @@ export default function PatrolScreen() {
     setShowAddSightingForm(false);
     ensureAllUsersLoaded();
     ensureAllResidencesLoaded();
+    setPlateAnalysisNote(null);
     if (!entry) {
       resetBlackbookForm();
       setRelatedBlackbook([]);
@@ -1114,6 +1116,7 @@ export default function PatrolScreen() {
       // overwriting it.
       if (data.plateSuggestion?.ok) {
         const detectedPlate = data.plateSuggestion.plate;
+        setPlateAnalysisNote(`🚗 Plaque détectée : ${detectedPlate}`);
         if (!bbVehiclePlate.trim()) {
           Alert.alert('Plaque détectée', `Plaque détectée sur la photo : ${detectedPlate}. Utiliser ?`, [
             { text: 'Ignorer', style: 'cancel' },
@@ -1122,6 +1125,16 @@ export default function PatrolScreen() {
         } else if (bbVehiclePlate.trim().toUpperCase() !== detectedPlate) {
           Alert.alert('Plaque détectée', `Une plaque différente a été détectée sur la photo : ${detectedPlate} (véhicule actuel : ${bbVehiclePlate}).`);
         }
+      } else if (data.plateSuggestion) {
+        // "No plate on this photo" is the normal case for most Blackbook
+        // photos (portraits) — show it quietly inline rather than an
+        // intrusive Alert, but a real service/config error still needs to
+        // be visible so it gets noticed and fixed.
+        setPlateAnalysisNote(data.plateSuggestion.reason === 'Aucune plaque détectée sur la photo'
+          ? '🔍 Aucune plaque détectée sur cette photo'
+          : `⚠️ Analyse de plaque indisponible : ${data.plateSuggestion.reason}`);
+      } else {
+        setPlateAnalysisNote(null);
       }
     } catch (e: any) {
       Alert.alert('Erreur', e.message && e.message !== 'failed' ? e.message : 'Envoi de la photo impossible');
@@ -2245,6 +2258,7 @@ export default function PatrolScreen() {
                     </TouchableOpacity>
                   </ScrollView>
                   {(currentBlackbookEntry.photos || []).length > 0 && <Text style={styles.bbHint}>Appui long pour supprimer une photo</Text>}
+                  {!!plateAnalysisNote && <Text style={[styles.bbHint, { marginTop: 2 }]}>{plateAnalysisNote}</Text>}
 
                   <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 16, marginBottom: 8 }}>
                     <Text style={styles.bbSectionTitle}>Signalements</Text>

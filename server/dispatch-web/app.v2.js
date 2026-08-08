@@ -2705,7 +2705,19 @@ let pendingPlateSuggestion = null;
 function renderPlateSuggestion(suggestion) {
   const box = document.getElementById('bbPlateSuggestion');
   if (!box) return;
-  if (!suggestion || !suggestion.ok) { box.style.display = 'none'; pendingPlateSuggestion = null; return; }
+  if (!suggestion) { box.style.display = 'none'; pendingPlateSuggestion = null; return; }
+  if (!suggestion.ok) {
+    pendingPlateSuggestion = null;
+    // "No plate on this photo" is the normal/expected case for most
+    // Blackbook photos (portraits) — don't alarm the user over it, just a
+    // quiet confirmation that analysis did run. Anything else (missing
+    // token, service/network error) is a real configuration problem worth
+    // surfacing clearly so it gets noticed and fixed.
+    const isNoPlateFound = suggestion.reason === 'Aucune plaque détectée sur la photo';
+    box.innerHTML = `<span style="color:${isNoPlateFound ? 'var(--text-muted)' : '#dc2626'};">${isNoPlateFound ? '🔍' : '⚠️'} ${escapeHtml(suggestion.reason || 'Analyse de plaque indisponible')}</span>`;
+    box.style.display = 'flex';
+    return;
+  }
   pendingPlateSuggestion = suggestion;
   const matchText = (suggestion.matchingEntries && suggestion.matchingEntries.length)
     ? ` — cette plaque apparaît aussi sur : ${suggestion.matchingEntries.map(m => escapeHtml(m.name)).join(', ')}`
