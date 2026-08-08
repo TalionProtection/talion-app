@@ -2414,11 +2414,16 @@ function renderBlackbookPhotos() {
     container.innerHTML = '<p style="color:var(--text-muted);font-size:12px;">Aucune photo</p>';
     return;
   }
-  container.innerHTML = photos.map(url => `
+  container.innerHTML = photos.map(url => {
+    const fullUrl = url.startsWith('http') ? url : API_BASE + url;
+    return `
     <div style="position:relative;">
-      <img src="${url.startsWith('http') ? url : API_BASE + url}" style="width:90px;height:90px;object-fit:cover;border-radius:8px;border:1px solid var(--border-main);">
+      <a href="${fullUrl}" target="_blank" rel="noopener">
+        <img src="${fullUrl}" style="width:90px;height:90px;object-fit:cover;border-radius:8px;border:1px solid var(--border-main);cursor:pointer;">
+      </a>
       <button onclick="deleteBlackbookPhoto('${url}')" style="position:absolute;top:-6px;right:-6px;background:#ef4444;color:#fff;border:none;border-radius:50%;width:20px;height:20px;cursor:pointer;font-size:11px;line-height:1;">✕</button>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 function renderBlackbookSightings() {

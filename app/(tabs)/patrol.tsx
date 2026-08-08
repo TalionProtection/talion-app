@@ -2254,7 +2254,12 @@ export default function PatrolScreen() {
                   <Text style={[styles.bbSectionTitle, { marginTop: 20 }]}>Photos</Text>
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }}>
                     {(currentBlackbookEntry.photos || []).map((url: string) => (
-                      <TouchableOpacity key={url} onLongPress={() => deleteBlackbookPhoto(url)} style={{ marginRight: 8 }}>
+                      <TouchableOpacity
+                        key={url}
+                        onPress={() => setShowMediaPreview(url.startsWith('http') ? url : `${getApiBaseUrl()}${url}`)}
+                        onLongPress={() => deleteBlackbookPhoto(url)}
+                        style={{ marginRight: 8 }}
+                      >
                         <Image source={{ uri: url.startsWith('http') ? url : `${getApiBaseUrl()}${url}` }} style={{ width: 80, height: 80, borderRadius: 8 }} />
                       </TouchableOpacity>
                     ))}
@@ -2390,6 +2395,26 @@ export default function PatrolScreen() {
             </ScrollView>
           )}
         </KeyboardAvoidingView>
+      </Modal>
+
+      {/* Media Preview Modal (Blackbook) — the two other instances of this
+          same shared showMediaPreview state live inside renderCreateView/
+          renderDetailView, neither of which is mounted while the Blackbook
+          modal is open from the list view, so this dedicated instance is
+          needed for photo previews to actually work from there. */}
+      <Modal visible={!!showMediaPreview} transparent animationType="fade">
+        <TouchableOpacity
+          style={styles.previewOverlay}
+          activeOpacity={1}
+          onPress={() => setShowMediaPreview(null)}
+        >
+          {showMediaPreview && (
+            <Image source={{ uri: showMediaPreview }} style={styles.previewImage} resizeMode="contain" />
+          )}
+          <TouchableOpacity style={styles.previewCloseButton} onPress={() => setShowMediaPreview(null)}>
+            <Text style={styles.previewCloseText}>✕ Fermer</Text>
+          </TouchableOpacity>
+        </TouchableOpacity>
       </Modal>
     </TalionScreen>
   );
