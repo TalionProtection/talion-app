@@ -2416,7 +2416,7 @@ function renderBlackbookPhotos() {
   }
   container.innerHTML = photos.map(url => `
     <div style="position:relative;">
-      <img src="${API_BASE}${url}" style="width:90px;height:90px;object-fit:cover;border-radius:8px;border:1px solid var(--border-main);">
+      <img src="${url.startsWith('http') ? url : API_BASE + url}" style="width:90px;height:90px;object-fit:cover;border-radius:8px;border:1px solid var(--border-main);">
       <button onclick="deleteBlackbookPhoto('${url}')" style="position:absolute;top:-6px;right:-6px;background:#ef4444;color:#fff;border:none;border-radius:50%;width:20px;height:20px;cursor:pointer;font-size:11px;line-height:1;">✕</button>
     </div>`).join('');
 }
@@ -7995,12 +7995,13 @@ function showPatrolDetail(reportId) {
     html += `<h4 style="font-size:13px;text-transform:uppercase;letter-spacing:0.5px;color:#374151;margin-bottom:8px;">Pièces jointes (${report.media.length})</h4>`;
     html += '<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px;">';
     report.media.forEach(media => {
+      const mediaUrl = media.url.startsWith('http') ? media.url : API_BASE + media.url;
       if (media.type === 'photo') {
-        html += `<a href="${API_BASE}${media.url}" target="_blank" style="display:block;width:120px;height:120px;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;">
-          <img src="${API_BASE}${media.url}" style="width:100%;height:100%;object-fit:cover;" />
+        html += `<a href="${mediaUrl}" target="_blank" style="display:block;width:120px;height:120px;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;">
+          <img src="${mediaUrl}" style="width:100%;height:100%;object-fit:cover;" />
         </a>`;
       } else {
-        html += `<a href="${API_BASE}${media.url}" target="_blank" style="display:flex;flex-direction:column;align-items:center;justify-content:center;width:120px;height:120px;border-radius:8px;background:#1e293b;color:#94a3b8;text-decoration:none;border:1px solid #334155;">
+        html += `<a href="${mediaUrl}" target="_blank" style="display:flex;flex-direction:column;align-items:center;justify-content:center;width:120px;height:120px;border-radius:8px;background:#1e293b;color:#94a3b8;text-decoration:none;border:1px solid #334155;">
           <span style="font-size:28px;">&#x1F3AC;</span>
           <span style="font-size:10px;margin-top:4px;text-align:center;padding:0 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;">${media.filename}</span>
         </a>`;

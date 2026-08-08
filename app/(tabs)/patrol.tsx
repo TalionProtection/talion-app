@@ -12,6 +12,7 @@ import {
   Alert,
   Image,
   Linking,
+  KeyboardAvoidingView,
 } from 'react-native';
 import { TextInput } from 'react-native';
 import { TalionScreen, TalionBanner } from '@/components/talion-banner';
@@ -1692,11 +1693,11 @@ export default function PatrolScreen() {
                   <View key={media.id} style={styles.detailMediaItem}>
                     {media.type === 'photo' ? (
                       <TouchableOpacity
-                        onPress={() => setShowMediaPreview(`${getApiBaseUrl()}${media.url}`)}
+                        onPress={() => setShowMediaPreview(media.url.startsWith('http') ? media.url : `${getApiBaseUrl()}${media.url}`)}
                         activeOpacity={0.8}
                       >
                         <Image
-                          source={{ uri: `${getApiBaseUrl()}${media.url}` }}
+                          source={{ uri: media.url.startsWith('http') ? media.url : `${getApiBaseUrl()}${media.url}` }}
                           style={styles.detailMediaImage}
                         />
                       </TouchableOpacity>
@@ -2064,7 +2065,11 @@ export default function PatrolScreen() {
 
       {/* Blackbook Modal — suspicious persons registry */}
       <Modal visible={showBlackbookModal} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowBlackbookModal(false)}>
-        <View style={styles.bbModalContainer}>
+        <KeyboardAvoidingView
+          style={styles.bbModalContainer}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : undefined}
+        >
           <View style={styles.bbModalHeader}>
             {blackbookView === 'form' ? (
               <TouchableOpacity onPress={() => setBlackbookView('list')}><Text style={styles.bbBackText}>← Retour</Text></TouchableOpacity>
@@ -2250,7 +2255,7 @@ export default function PatrolScreen() {
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }}>
                     {(currentBlackbookEntry.photos || []).map((url: string) => (
                       <TouchableOpacity key={url} onLongPress={() => deleteBlackbookPhoto(url)} style={{ marginRight: 8 }}>
-                        <Image source={{ uri: `${getApiBaseUrl()}${url}` }} style={{ width: 80, height: 80, borderRadius: 8 }} />
+                        <Image source={{ uri: url.startsWith('http') ? url : `${getApiBaseUrl()}${url}` }} style={{ width: 80, height: 80, borderRadius: 8 }} />
                       </TouchableOpacity>
                     ))}
                     <TouchableOpacity style={styles.bbAddPhotoBtn} onPress={pickAndUploadBlackbookPhoto} disabled={photoUploading}>
@@ -2384,7 +2389,7 @@ export default function PatrolScreen() {
               )}
             </ScrollView>
           )}
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </TalionScreen>
   );
