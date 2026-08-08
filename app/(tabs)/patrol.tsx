@@ -2394,27 +2394,24 @@ export default function PatrolScreen() {
               )}
             </ScrollView>
           )}
-        </KeyboardAvoidingView>
-      </Modal>
-
-      {/* Media Preview Modal (Blackbook) — the two other instances of this
-          same shared showMediaPreview state live inside renderCreateView/
-          renderDetailView, neither of which is mounted while the Blackbook
-          modal is open from the list view, so this dedicated instance is
-          needed for photo previews to actually work from there. */}
-      <Modal visible={!!showMediaPreview} transparent animationType="fade">
-        <TouchableOpacity
-          style={styles.previewOverlay}
-          activeOpacity={1}
-          onPress={() => setShowMediaPreview(null)}
-        >
-          {showMediaPreview && (
-            <Image source={{ uri: showMediaPreview }} style={styles.previewImage} resizeMode="contain" />
+          {/* Photo preview overlay — rendered inline (not a second <Modal>)
+              because iOS doesn't reliably stack two independently-presented
+              native Modals, especially on top of this one's pageSheet
+              presentation. An absolutely-positioned overlay within the
+              already-presented modal avoids that entirely. */}
+          {!!showMediaPreview && (
+            <TouchableOpacity
+              style={[styles.previewOverlay, { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }]}
+              activeOpacity={1}
+              onPress={() => setShowMediaPreview(null)}
+            >
+              <Image source={{ uri: showMediaPreview }} style={styles.previewImage} resizeMode="contain" />
+              <TouchableOpacity style={styles.previewCloseButton} onPress={() => setShowMediaPreview(null)}>
+                <Text style={styles.previewCloseText}>✕ Fermer</Text>
+              </TouchableOpacity>
+            </TouchableOpacity>
           )}
-          <TouchableOpacity style={styles.previewCloseButton} onPress={() => setShowMediaPreview(null)}>
-            <Text style={styles.previewCloseText}>✕ Fermer</Text>
-          </TouchableOpacity>
-        </TouchableOpacity>
+        </KeyboardAvoidingView>
       </Modal>
     </TalionScreen>
   );
