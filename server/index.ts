@@ -10341,6 +10341,15 @@ async function recognizePlateFromFile(filePath: string): Promise<PlateRecognitio
     let uploadBuffer: Buffer;
     try {
       uploadBuffer = await sharp(filePath)
+        // Bakes the EXIF orientation tag into the actual pixel data before
+        // re-encoding — .jpeg().toBuffer() strips metadata by default, so
+        // without this a photo whose orientation depends on that tag (very
+        // common straight out of a phone camera) would be sent to Plate
+        // Recognizer sideways/upside-down with no way for it to know, even
+        // though it displays correctly everywhere else that does respect
+        // EXIF. Suspected cause of a very legible plate coming back as "no
+        // plate detected".
+        .rotate()
         .resize({ width: 1920, height: 1920, fit: 'inside', withoutEnlargement: true })
         .jpeg({ quality: 85 })
         .toBuffer();
