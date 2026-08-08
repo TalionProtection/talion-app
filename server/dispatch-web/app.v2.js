@@ -2684,14 +2684,17 @@ async function uploadBlackbookPhotos() {
   for (const file of input.files) formData.append('photos', file);
   try {
     const res = await fetch(`${API_BASE}/api/blackbook/${currentBlackbookEntry.id}/photos`, { method: 'POST', body: formData });
-    if (!res.ok) throw new Error('failed');
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
     const data = await res.json();
     currentBlackbookEntry.photos = data.photos;
     renderBlackbookPhotos();
     showToast('Photo(s) ajoutée(s)', 'success');
     renderPlateSuggestion(data.plateSuggestion);
   } catch (e) {
-    showToast('Erreur upload photo', 'error');
+    showToast('Erreur upload photo : ' + (e.message || 'inconnue'), 'error');
   }
   input.value = '';
 }

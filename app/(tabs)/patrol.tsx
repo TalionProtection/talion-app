@@ -1101,7 +1101,10 @@ export default function PatrolScreen() {
       const res = await fetchWithTimeout(`${baseUrl}/api/blackbook/${currentBlackbookEntry.id}/photos`, {
         method: 'POST', headers: await authHeader(), body: formData, timeout: 20000,
       });
-      if (!res.ok) throw new Error('failed');
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
       const data = await res.json();
       setCurrentBlackbookEntry({ ...currentBlackbookEntry, photos: data.photos });
       // Vehicle/plate recognition (ANPR) suggestion — never auto-written.
@@ -1120,8 +1123,8 @@ export default function PatrolScreen() {
           Alert.alert('Plaque détectée', `Une plaque différente a été détectée sur la photo : ${detectedPlate} (véhicule actuel : ${bbVehiclePlate}).`);
         }
       }
-    } catch (e) {
-      Alert.alert('Erreur', 'Envoi de la photo impossible');
+    } catch (e: any) {
+      Alert.alert('Erreur', e.message && e.message !== 'failed' ? e.message : 'Envoi de la photo impossible');
     }
     setPhotoUploading(false);
   }, [currentBlackbookEntry, bbVehiclePlate]);

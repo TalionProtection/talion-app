@@ -10339,15 +10339,20 @@ app.post('/api/blackbook/:id/photos', requireAuth, upload.array('photos', 6), as
 
   // Opportunistic ANPR on the first uploaded file only — most Blackbook
   // photos are of a person, not a vehicle, so this isn't guaranteed to
-  // find anything, and a failure here must never block the upload itself
-  // (recognizePlateFromFile never throws).
+  // find anything. The photo itself is already saved above, so wrap this
+  // whole block defensively — a bonus suggestion must never be able to
+  // break the response for an upload that already succeeded.
   let plateSuggestion: (PlateRecognitionResult & { matchingEntries?: { entryId: string; name: string }[] }) | undefined;
-  const firstFile = req.files[0];
-  if (firstFile?.path) {
-    const result = await recognizePlateFromFile(firstFile.path);
-    plateSuggestion = result.ok
-      ? { ...result, matchingEntries: findEntriesWithPlate(result.plate, entry.organizationId, entry.id) }
-      : result;
+  try {
+    const firstFile = req.files[0];
+    if (firstFile?.path) {
+      const result = await recognizePlateFromFile(firstFile.path);
+      plateSuggestion = result.ok
+        ? { ...result, matchingEntries: findEntriesWithPlate(result.plate, entry.organizationId, entry.id) }
+        : result;
+    }
+  } catch (e) {
+    console.error('[ANPR] plate suggestion block error (upload itself already succeeded):', e);
   }
 
   res.json({ photos: entry.photos, plateSuggestion });
