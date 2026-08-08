@@ -326,7 +326,7 @@ const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, uploadsDir),
   filename: (_req, file, cb) => cb(null, `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9.]/g, '_')}`),
 });
-const upload = multer({ storage, limits: { fileSize: 5 * 1024 * 1024 } });
+const upload = multer({ storage, limits: { fileSize: 20 * 1024 * 1024 } }); // 20MB — a modern phone photo at moderate compression can exceed the old 5MB cap
 const uploadMedia = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB for patrol media (photos + videos)
 app.use('/uploads', express.static(uploadsDir));
 app.use('/assets', express.static(path.join(PROJECT_ROOT, 'assets')));
@@ -7905,6 +7905,23 @@ app.post('/api/ptt/transmit', (req, res) => {
   });
 
   res.json({ success: true, messageId: pttMsg.id });
+});
+
+// ─── Global error handler ────────────────────────────────────────────────
+// Express 5 auto-catches thrown/rejected errors from async route handlers
+// AND from middleware (e.g. multer) and forwards them here — without this,
+// they fall through to Express's default handler, which returns an opaque
+// HTML page (not JSON) and never surfaces in recentErrors, making failures
+// like this one invisible both to the client and to /admin/health. Must be
+// registered after every route (Express matches error middleware by
+// position), right before server.listen.
+app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`[GlobalErrorHandler] ${req.method} ${req.path}:`, err);
+  logHealthError(`${req.method} ${req.path}`, err);
+  if (res.headersSent) return;
+  const status = err?.status || err?.statusCode || (err?.code === 'LIMIT_FILE_SIZE' ? 413 : 500);
+  res.status(status).json({ error: err?.code === 'LIMIT_FILE_SIZE' ? 'Fichier trop volumineux' : (message || 'Internal server error') });
 });
 
 // ─── Start server ─────────────────────────────────────────────────────────────────────────────────────
