@@ -7,6 +7,7 @@ import path from 'path';
 import bcrypt from 'bcryptjs';
 import multer from 'multer';
 import fs from 'fs';
+import sharp from 'sharp';
 import { requireAuth, requireRole, optionalAuth } from './auth-middleware';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 
@@ -10331,8 +10332,24 @@ async function recognizePlateFromFile(filePath: string): Promise<PlateRecognitio
   const token = process.env.PLATERECOGNIZER_API_TOKEN;
   if (!token) { console.warn('[ANPR] PLATERECOGNIZER_API_TOKEN not set'); return { ok: false, reason: 'Reconnaissance de plaque non configurée sur le serveur' }; }
   try {
+    // Resize/recompress before sending — plate OCR doesn't need full
+    // resolution, and a modern phone photo can comfortably exceed Plate
+    // Recognizer's own upload size limit even though it's well within
+    // ours (confirmed via a live 413 from their API on an unresized
+    // upload). Falls back to the original bytes if sharp itself fails for
+    // any reason, rather than skipping recognition entirely.
+    let uploadBuffer: Buffer;
+    try {
+      uploadBuffer = await sharp(filePath)
+        .resize({ width: 1920, height: 1920, fit: 'inside', withoutEnlargement: true })
+        .jpeg({ quality: 85 })
+        .toBuffer();
+    } catch (resizeErr) {
+      console.warn('[ANPR] Resize failed, sending original file:', resizeErr);
+      uploadBuffer = fs.readFileSync(filePath);
+    }
     const form = new FormData();
-    form.append('upload', new Blob([fs.readFileSync(filePath)]));
+    form.append('upload', new Blob([new Uint8Array(uploadBuffer)]));
     const resp = await fetch('https://api.platerecognizer.com/v1/plate-reader/', {
       method: 'POST',
       headers: { Authorization: `Token ${token}` },
