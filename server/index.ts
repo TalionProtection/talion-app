@@ -2095,11 +2095,26 @@ function findNearbyBlackbookEntries(location: { latitude: number; longitude: num
 // nearby (no exit alert needed — this is a heads-up, not a breach).
 const responderBlackbookProximityState = new Map<string, boolean>();
 
+// Same "à l'instant / il y a Xmin / il y a Xh / il y a Xj" convention
+// already used client-side (patrol.tsx's formatRelativeTime) — "il y a 0j"
+// for a sighting from minutes ago reads as a bug, not a feature.
+function formatRelativeTimeFr(timestamp: number): string {
+  const minutes = Math.floor((Date.now() - timestamp) / 60000);
+  if (minutes < 1) return "à l'instant";
+  if (minutes < 60) return `il y a ${minutes}min`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `il y a ${hours}h`;
+  return `il y a ${Math.floor(hours / 24)}j`;
+}
+
 function notifyResponderBlackbookProximity(responderId: string, hit: NearbyBlackbookHit, organizationId?: string) {
   const responderName = adminUsers.get(responderId)?.name || responderId;
-  const daysAgo = Math.round((Date.now() - hit.lastSightingAt) / (24 * 60 * 60 * 1000));
-  const title = '📍 Zone à activité Blackbook connue';
-  const body = `${responderName} est entré(e) dans une zone où "${hit.name}" (risque ${hit.riskLevel}) a été signalé à ${hit.distanceMeters}m il y a ${daysAgo}j. Ceci ne signifie PAS que cette personne est détectée en ce moment.`;
+  // Risk-level icon (not a generic 📍) so the notification itself signals
+  // severity at a glance, matching the color/emoji convention already used
+  // for risk badges everywhere else in the app (BLACKBOOK_RISK_LABELS).
+  const riskIcon = hit.riskLevel === 'critical' ? '🔴' : hit.riskLevel === 'high' ? '🟠' : hit.riskLevel === 'medium' ? '🟡' : '🟢';
+  const title = `${riskIcon} Zone à activité Blackbook connue`;
+  const body = `${responderName} est entré(e) dans une zone où "${hit.name}" (risque ${hit.riskLevel}) a été signalé à ${hit.distanceMeters}m, ${formatRelativeTimeFr(hit.lastSightingAt)}. Ceci ne signifie PAS que cette personne est détectée en ce moment.`;
   addAuditEntry('system', 'Blackbook - proximité responder', responderName, body, responderId, organizationId);
   const payload = { type: 'responderBlackbookProximityAlert', data: { responderId, responderName, entryId: hit.entryId, name: hit.name, riskLevel: hit.riskLevel, distanceMeters: hit.distanceMeters, title, body } };
   broadcastToOrgRole(organizationId, 'dispatcher', payload);
