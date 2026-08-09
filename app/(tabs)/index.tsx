@@ -143,6 +143,7 @@ export default function HomeScreen() {
   const { location, state: locationState, startBackgroundTracking, stopBackgroundTracking } = useLocation();
   const [userStatus, setUserStatus] = useState<UserStatus>('available');
   const [showAlertModal, setShowAlertModal] = useState(false);
+  const [kidSosMode, setKidSosMode] = useState(false); // family accounts can switch the SOS button to the simplified kid variant before handing the phone over
   const [incidentFilter, setIncidentFilter] = useState<'all' | 'assigned'>('all');
   const { sendLocation, isConnected: wsConnected } = useWebSocketProvider();
   const sharingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -673,7 +674,13 @@ export default function HomeScreen() {
           userName={user?.name || 'Unknown'}
           userRole={user?.role || 'user'}
           userId={user?.id || ''}
+          variant={kidSosMode ? 'kid' : 'standard'}
         />
+        {user?.role === 'user' && (
+          <TouchableOpacity onPress={() => setKidSosMode(v => !v)} style={styles.kidSosToggle}>
+            <Text style={styles.kidSosToggleText}>{kidSosMode ? '← Revenir au mode standard' : 'Mode enfant 🖐️'}</Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       <AlertCreationModal
@@ -1097,5 +1104,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     borderTopWidth: 1,
     borderTopColor: '#e5e7eb',
+  },
+  kidSosToggle: {
+    marginTop: 8,
+  },
+  kidSosToggleText: {
+    fontSize: 12,
+    color: '#6b7280',
+    fontWeight: '600',
   },
 });

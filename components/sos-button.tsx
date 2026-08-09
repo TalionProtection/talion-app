@@ -22,11 +22,20 @@ interface SOSButtonProps {
   userName?: string;
   userRole?: string;
   userId?: string;
+  // 'kid' reuses the exact same POST /api/sos flow (same countdown, same
+  // live GPS tracking, no backend change) but with a bigger/friendlier
+  // presentation and no duress-PIN deactivation step — that's an adult
+  // concept a child shouldn't need to navigate under stress. Kept as a
+  // variant on one component rather than a separate file: the two only
+  // differ in presentation, duplicating the ~400 lines of SOS/countdown/
+  // live-tracking logic for that would be the wrong trade-off.
+  variant?: 'standard' | 'kid';
 }
 
 const CANCEL_WINDOW = 5; // seconds before SOS is sent
 
-export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', userRole = 'user', userId = '' }: SOSButtonProps) {
+export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', userRole = 'user', userId = '', variant = 'standard' }: SOSButtonProps) {
+  const isKid = variant === 'kid';
   const [isActive, setIsActive] = useState(false);
   const [showConfirmation, setShowConfirmation] = useState(false);
   const [showCountdown, setShowCountdown] = useState(false);
@@ -119,6 +128,7 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
 
   const handlePress = async () => {
     if (isActive) {
+      if (isKid) { completeDeactivation(); return; } // no duress-PIN step for the kid variant
       const enabled = await checkDuressEnabled();
       setDuressEnabled(enabled);
       if (enabled) {
@@ -345,12 +355,12 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
     <>
       <Animated.View style={[styles.container, { transform: [{ scale: pulseAnim }] }]}>
         <TouchableOpacity
-          style={[styles.button, isActive && styles.buttonActive]}
+          style={[styles.button, isKid && styles.buttonKid, isActive && styles.buttonActive]}
           onPress={handlePress}
           activeOpacity={0.8}
         >
-          <Text style={styles.buttonIcon}>🆘</Text>
-          <Text style={styles.buttonText}>SOS</Text>
+          <Text style={[styles.buttonIcon, isKid && styles.buttonIconKid]}>{isKid ? '🖐️' : '🆘'}</Text>
+          <Text style={[styles.buttonText, isKid && styles.buttonTextKid]}>{isKid ? "J'AI BESOIN D'AIDE" : 'SOS'}</Text>
         </TouchableOpacity>
       </Animated.View>
 
@@ -358,17 +368,18 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
       <Modal visible={showConfirmation} transparent animationType="fade" onRequestClose={() => setShowConfirmation(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Confirmer l'alerte SOS</Text>
+            <Text style={styles.modalTitle}>{isKid ? 'Demander de l\'aide ?' : "Confirmer l'alerte SOS"}</Text>
             <Text style={styles.modalText}>
-              Ceci alertera immédiatement tous les dispatchers et intervenants.{'\n\n'}
-              Votre position sera partagée jusqu'à désactivation.
+              {isKid
+                ? "On va prévenir quelqu'un pour venir t'aider tout de suite."
+                : <>Ceci alertera immédiatement tous les dispatchers et intervenants.{'\n\n'}Votre position sera partagée jusqu&apos;à désactivation.</>}
             </Text>
             <View style={styles.modalButtons}>
               <TouchableOpacity style={styles.cancelButton} onPress={() => setShowConfirmation(false)}>
                 <Text style={styles.cancelButtonText}>Annuler</Text>
               </TouchableOpacity>
               <TouchableOpacity style={styles.confirmButton} onPress={handleConfirmSOS}>
-                <Text style={styles.confirmButtonText}>ENVOYER SOS</Text>
+                <Text style={styles.confirmButtonText}>{isKid ? "OUI, AIDE-MOI" : 'ENVOYER SOS'}</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -379,13 +390,13 @@ export function SOSButton({ onActivate, onDeactivate, userName = 'Unknown', user
       <Modal visible={showCountdown} transparent animationType="fade" onRequestClose={handleCancelSOS}>
         <View style={styles.modalOverlay}>
           <View style={[styles.modalContent, styles.countdownContent]}>
-            <Text style={styles.countdownTitle}>🆘 SOS en cours d'envoi</Text>
-            <Text style={styles.countdownSubtitle}>Acquisition de votre position GPS...</Text>
+            <Text style={styles.countdownTitle}>{isKid ? '🖐️ On arrive !' : "🆘 SOS en cours d'envoi"}</Text>
+            <Text style={styles.countdownSubtitle}>{isKid ? 'On repère où tu es...' : 'Acquisition de votre position GPS...'}</Text>
             <View style={styles.countdownCircle}>
               <Text style={styles.countdownNumber}>{countdown}</Text>
             </View>
             <Text style={styles.countdownHint}>
-              L'alerte sera envoyée dans {countdown} seconde{countdown > 1 ? 's' : ''}
+              {isKid ? `On envoie dans ${countdown} seconde${countdown > 1 ? 's' : ''}` : `L'alerte sera envoyée dans ${countdown} seconde${countdown > 1 ? 's' : ''}`}
             </Text>
             <TouchableOpacity style={styles.cancelWindowButton} onPress={handleCancelSOS}>
               <Text style={styles.cancelWindowButtonText}>ANNULER</Text>
@@ -463,6 +474,23 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     fontSize: 13,
     letterSpacing: 1,
+  },
+  // Bigger tap target (easier for a child to hit reliably), rounder icon,
+  // friendlier blue rather than alarm-red — same underlying SOS mechanism.
+  buttonKid: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: '#2563eb',
+    shadowColor: '#2563eb',
+  },
+  buttonIconKid: {
+    fontSize: 36,
+  },
+  buttonTextKid: {
+    fontSize: 12,
+    textAlign: 'center',
+    paddingHorizontal: 8,
   },
   modalOverlay: {
     flex: 1,

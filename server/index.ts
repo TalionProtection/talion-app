@@ -2763,6 +2763,36 @@ async function sendProximityPush(ownerId: string, alert: ProximityAlert, perimet
   } catch (e) { console.error('[Proximity Push] Error:', e); }
 }
 
+// Generic family-facing push helper — same shape as sendProximityPush but
+// for any (title, body, data) rather than one hardcoded proximity-alert
+// message, so new family features don't each hand-roll their own Expo-push
+// call. channelId:'family-alerts' throughout (distinct from staff's
+// 'incident-updates'/'sos-alerts'), matching the existing convention.
+async function sendFamilyPush(userIds: string[], title: string, body: string, data: Record<string, any> = {}, opts?: { priority?: 'normal' | 'high' }) {
+  const targetTokens: string[] = [];
+  const idSet = new Set(userIds);
+  for (const [token, entry] of pushTokens) {
+    if (idSet.has(entry.userId)) targetTokens.push(token);
+  }
+  if (targetTokens.length === 0) return;
+  const messages = targetTokens.map(token => ({
+    to: token,
+    sound: 'default',
+    title,
+    body,
+    data,
+    priority: opts?.priority || 'normal',
+    channelId: 'family-alerts',
+  }));
+  try {
+    await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(messages),
+    });
+  } catch (e) { console.error('[Family Push] Error:', e); }
+}
+
 // ─── Curfew Checks ──────────────────────────────────────────────────────
 // One-off or daily "alert me if this person hasn't arrived" checks, modeled on the
 // acceptance-timer pattern (setTimeout-per-entity in a Map) but — unlike acceptance
@@ -4098,7 +4128,25 @@ app.post('/api/sos', async (req, res) => {
   sendPushToDispatchersAndResponders(alert, userName || userId || 'Unknown').catch(err => {
     console.error('[SOS REST] Push notification error:', err);
   });
-  
+
+  // Also notify the reporter's own parents directly (never done today —
+  // family members otherwise have no way to know a child triggered an
+  // SOS). Deliberately NOT done on the duress-check path — that must stay
+  // dispatch-only, notifying family there could tip off a coerced person's
+  // own device.
+  if (alert.reporterId) {
+    const parentIds = getFamilyParentIds(alert.reporterId).filter(id => id !== alert.reporterId);
+    if (parentIds.length > 0) {
+      sendFamilyPush(
+        parentIds,
+        `🚨 SOS de ${userName || 'votre enfant'}`,
+        `Alerte déclenchée${alert.location?.address ? ' — ' + alert.location.address : ''}`,
+        { type: 'family_sos', alertId: alert.id },
+        { priority: 'high' }
+      ).catch(() => {});
+    }
+  }
+
   console.log(`[SOS REST] Alert ${alert.id} created and broadcast to ${wss.clients.size} clients`);
   res.json({ success: true, alertId: alert.id, broadcast: true });
 });
