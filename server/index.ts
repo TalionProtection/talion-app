@@ -947,7 +947,7 @@ interface ProximityAlert {
   targetUserId: string;
   targetUserName: string;
   ownerId: string;
-  eventType: 'exit' | 'entry' | 'curfew_violation';
+  eventType: 'exit' | 'entry' | 'curfew_violation' | 'route_deviation';
   /** Distance from center when alert triggered */
   distanceMeters: number;
   location: { latitude: number; longitude: number };
@@ -1854,6 +1854,49 @@ function simplifyGeometry(geometry: { latitude: number; longitude: number }[], m
   const result: { latitude: number; longitude: number }[] = [];
   for (let i = 0; i < maxPoints; i++) result.push(geometry[Math.floor(i * step)]);
   return result;
+}
+
+// Min distance from a point to a polyline (min over consecutive segments of
+// point-to-segment distance), in meters. No point-to-polyline helper existed
+// anywhere in this file before — snapGeometryToGrid/jaccardOverlap above
+// compare whole-route footprints for patrol variety scoring, not live
+// point-to-path distance. Uses a local equirectangular projection centered on
+// `point` (so it's always at the origin) rather than a proper geodesic —
+// plenty accurate at city/commute scale, same tradeoff snapGeometryToGrid
+// already makes.
+function distanceToPolylineMeters(point: { latitude: number; longitude: number }, geometry: { latitude: number; longitude: number }[]): number {
+  if (geometry.length === 0) return Infinity;
+  if (geometry.length === 1) return haversineDistance(point.latitude, point.longitude, geometry[0].latitude, geometry[0].longitude);
+  const metersPerDegLat = 111320;
+  const metersPerDegLon = 111320 * Math.cos((point.latitude * Math.PI) / 180);
+  const toXY = (p: { latitude: number; longitude: number }) => ({
+    x: (p.longitude - point.longitude) * metersPerDegLon,
+    y: (p.latitude - point.latitude) * metersPerDegLat,
+  });
+  let minDist = Infinity;
+  for (let i = 0; i < geometry.length - 1; i++) {
+    const a = toXY(geometry[i]);
+    const b = toXY(geometry[i + 1]);
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const lengthSq = dx * dx + dy * dy;
+    let t = lengthSq === 0 ? 0 : (-a.x * dx - a.y * dy) / lengthSq;
+    t = Math.max(0, Math.min(1, t));
+    const closestX = a.x + t * dx;
+    const closestY = a.y + t * dy;
+    const dist = Math.sqrt(closestX * closestX + closestY * closestY);
+    if (dist < minDist) minDist = dist;
+  }
+  return minDist;
+}
+
+function isWithinCommuteWindow(windows: { hour: number; minute: number; durationMinutes: number; daysOfWeek: number[] }[], now: Date = new Date()): boolean {
+  const day = now.getDay();
+  const minutesNow = now.getHours() * 60 + now.getMinutes();
+  return windows.some(w => {
+    if (!w.daysOfWeek.includes(day)) return false;
+    const start = w.hour * 60 + w.minute;
+    return minutesNow >= start && minutesNow <= start + w.durationMinutes;
+  });
 }
 
 async function fetchRecentRouteHistory(organizationId: string, toSiteId: string): Promise<{ geometry: { latitude: number; longitude: number }[] }[]> {
@@ -2763,6 +2806,65 @@ function checkFamilyPerimeters(userId: string, locationData: any) {
   }
 }
 
+// Minimum time a reading must persist before it's treated as a confirmed
+// on_route/off_route state — requires 2 consecutive readings roughly this far
+// apart before a deviation fires, so a single noisy GPS ping never triggers a
+// security escalation on its own.
+const SCHOOL_ROUTE_CONFIRM_MS = 30 * 1000;
+
+function checkSchoolRouteDeviation(userId: string, locationData: any) {
+  if (!locationData?.latitude || !locationData?.longitude) return;
+  const routes = schoolRoutes.get(userId) || [];
+  if (routes.length === 0) return;
+  const now = new Date();
+
+  for (const route of routes) {
+    if (!route.active) continue;
+    if (!isWithinCommuteWindow(route.commuteWindows, now)) continue; // time-window gate
+
+    const dist = distanceToPolylineMeters({ latitude: locationData.latitude, longitude: locationData.longitude }, route.geometry);
+    const currentReading: 'on_route' | 'off_route' = dist > route.corridorMeters ? 'off_route' : 'on_route';
+    const prev = schoolRouteState.get(route.id);
+
+    if (!prev || prev.state !== currentReading) {
+      // Reading changed (or first ever reading for this route) — start a
+      // fresh, not-yet-confirmed streak.
+      schoolRouteState.set(route.id, { state: currentReading, since: Date.now(), confirmed: false });
+      continue;
+    }
+    if (prev.confirmed || Date.now() - prev.since < SCHOOL_ROUTE_CONFIRM_MS) continue;
+
+    prev.confirmed = true;
+    if (currentReading !== 'off_route') continue; // confirmed back on route — no alert needed, just update state above
+
+    const alert: ProximityAlert = {
+      id: uuidv4(),
+      perimeterId: route.id,
+      targetUserId: userId,
+      targetUserName: route.targetUserName,
+      ownerId: route.ownerId,
+      eventType: 'route_deviation',
+      distanceMeters: Math.round(dist),
+      location: { latitude: locationData.latitude, longitude: locationData.longitude },
+      timestamp: Date.now(),
+      acknowledged: false,
+    };
+    proximityAlerts.unshift(alert);
+    if (proximityAlerts.length > 500) proximityAlerts.length = 500;
+    persistProximityAlerts();
+
+    broadcastToUsers([route.ownerId], { type: 'proximityAlert', data: alert });
+
+    const parentIds = getFamilyParentIds(userId).filter(id => id !== userId);
+    const notifyIds = Array.from(new Set([route.ownerId, ...parentIds]));
+    sendFamilyPush(notifyIds, '🚸 Écart de trajet détecté',
+      `${route.targetUserName} s'est écarté(e) du trajet habituel vers ${route.schoolLabel}.`,
+      { type: 'route_deviation', routeId: route.id, alertId: alert.id }, { priority: 'high' }).catch(() => {});
+
+    console.log(`[SchoolRoute] ${route.targetUserName} deviated from route ${route.id} (${Math.round(dist)}m from corridor, tolerance ${route.corridorMeters}m)`);
+  }
+}
+
 // Send push notification for proximity alert
 async function sendProximityPush(ownerId: string, alert: ProximityAlert, perimeter: FamilyPerimeter) {
   const targetTokens: string[] = [];
@@ -3052,6 +3154,7 @@ function handleLocationUpdate(ws: any, userId: string, userRole: string, locatio
 
   // Check family perimeters (proximity alerts)
   checkFamilyPerimeters(userId, locationData);
+  checkSchoolRouteDeviation(userId, locationData);
 
   // Broadcast to dispatchers - use appropriate event type based on role
   const userName = adminUsers.get(userId)?.name || userId;
@@ -8241,6 +8344,7 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
     loadPreauthorizedGuestsFromSupabase(),
     loadAuthorizedPickupPeopleFromSupabase(),
     loadMedicalInfoFromSupabase(),
+    loadSchoolRoutesFromSupabase(),
     loadMainCouranteNotesFromSupabase(),
     loadThreatAnalysesFromSupabase(),
   ]);
@@ -9165,12 +9269,38 @@ interface MedicalInfo {
   updatedAt: number;
 }
 
+// A reference commute route (e.g. home -> school) with a deviation
+// "corridor" — the one genuinely new geometry primitive in the family
+// features work, everything else reuses point/radius perimeters. Time-window
+// gated (commuteWindows) so it's only ever evaluated during an actual
+// commute, and only alerts on a confirmed multi-reading transition (see
+// checkSchoolRouteDeviation) to keep false positives bounded.
+interface SchoolRoute {
+  id: string;
+  ownerId: string;
+  targetUserId: string;
+  targetUserName: string;
+  homeAddressId?: string;
+  schoolLabel: string;
+  schoolLocation: { latitude: number; longitude: number; address?: string };
+  geometry: { latitude: number; longitude: number }[];
+  corridorMeters: number;
+  commuteWindows: { hour: number; minute: number; durationMinutes: number; daysOfWeek: number[] }[];
+  active: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
 const knownPeople = new Map<string, KnownPerson[]>(); // addressId -> people
 const plannedInterventions = new Map<string, PlannedIntervention[]>(); // addressId -> interventions
 const travelItineraries = new Map<string, TravelItinerary[]>(); // userId -> itineraries
 const preauthorizedGuests = new Map<string, PreAuthorizedGuest[]>(); // addressId -> guests
 const authorizedPickupPeople = new Map<string, AuthorizedPickupPerson[]>(); // childUserId -> people
 const medicalInfoByUser = new Map<string, MedicalInfo>(); // userId -> record
+const schoolRoutes = new Map<string, SchoolRoute[]>(); // targetUserId -> routes
+// route deviation hysteresis: only alert on a confirmed on_route -> off_route
+// transition across 2 consecutive readings, not a single noisy GPS ping.
+const schoolRouteState = new Map<string, { state: 'on_route' | 'off_route'; since: number; confirmed: boolean }>(); // routeId -> state
 
 async function loadKnownPeopleFromSupabase(): Promise<void> {
   try {
@@ -9234,6 +9364,43 @@ async function loadMedicalInfoFromSupabase(): Promise<void> {
       console.log(`[Supabase] Loaded ${data.length} medical info records`);
     }
   } catch (e) { console.error('[Supabase] loadMedicalInfoFromSupabase error:', e); }
+}
+
+async function loadSchoolRoutesFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('school_routes').select('*');
+    if (error) { console.error('[Supabase] Failed to load school_routes:', error.message); return; }
+    if (data && data.length > 0) {
+      schoolRoutes.clear();
+      data.forEach((r: any) => {
+        const route: SchoolRoute = {
+          id: r.id, ownerId: r.owner_id, targetUserId: r.target_user_id, targetUserName: r.target_user_name || '',
+          homeAddressId: r.home_address_id || undefined, schoolLabel: r.school_label || '',
+          schoolLocation: { latitude: r.school_lat, longitude: r.school_lon, address: r.school_address || undefined },
+          geometry: r.geometry || [], corridorMeters: r.corridor_meters || 275,
+          commuteWindows: r.commute_windows || [], active: r.active !== false,
+          createdAt: r.created_at, updatedAt: r.updated_at,
+        };
+        if (!schoolRoutes.has(route.targetUserId)) schoolRoutes.set(route.targetUserId, []);
+        schoolRoutes.get(route.targetUserId)!.push(route);
+      });
+      console.log(`[Supabase] Loaded ${data.length} school routes`);
+    }
+  } catch (e) { console.error('[Supabase] loadSchoolRoutesFromSupabase error:', e); }
+}
+
+async function saveSchoolRouteToSupabase(route: SchoolRoute): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('school_routes').upsert({
+      id: route.id, owner_id: route.ownerId, target_user_id: route.targetUserId, target_user_name: route.targetUserName,
+      home_address_id: route.homeAddressId || null, school_label: route.schoolLabel,
+      school_lat: route.schoolLocation.latitude, school_lon: route.schoolLocation.longitude,
+      school_address: route.schoolLocation.address || null,
+      geometry: route.geometry, corridor_meters: route.corridorMeters, commute_windows: route.commuteWindows,
+      active: route.active, created_at: route.createdAt, updated_at: route.updatedAt,
+    });
+    if (error) console.error('[Supabase] saveSchoolRoute error:', error.message);
+  } catch (e) { console.error('[Supabase] saveSchoolRoute error:', e); }
 }
 
 async function loadPlannedInterventionsFromSupabase(): Promise<void> {
@@ -9575,6 +9742,91 @@ app.get('/api/family/weekly-summary', requireAuth, (req, res) => {
   });
 
   res.json({ userId, since, until: Date.now(), residences });
+});
+
+// ─── School commute route deviation alerts ───────────────────────────────
+app.get('/api/family/school-routes', requireAuth, (req, res) => {
+  const targetUserId = req.query.targetUserId as string;
+  if (!targetUserId) return res.status(400).json({ error: 'targetUserId required' });
+  if (!canEditAddressAssets(targetUserId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
+  res.json(schoolRoutes.get(targetUserId) || []);
+});
+
+// Fetches the route geometry once via fetchDirectionsAlternatives/Mapbox (the
+// same routing engine the patrol route-planning feature uses) and stores it
+// simplified — the corridor is checked against this stored geometry on every
+// location update, not recomputed live.
+app.post('/api/family/school-routes', requireAuth, async (req, res) => {
+  const { targetUserId, targetUserName, homeAddressId, schoolLabel, schoolLocation, corridorMeters, commuteWindows, mode } = req.body;
+  if (!targetUserId || !schoolLabel || schoolLocation?.latitude == null || schoolLocation?.longitude == null) {
+    return res.status(400).json({ error: 'targetUserId, schoolLabel and schoolLocation are required' });
+  }
+  const caller = req.supabaseUser!;
+  if (!canEditAddressAssets(targetUserId, caller)) return res.status(403).json({ error: 'Not authorized' });
+
+  const targetAddresses = userAddresses.get(targetUserId) || [];
+  let origin: { latitude: number; longitude: number } | null = null;
+  if (homeAddressId) {
+    const addr = targetAddresses.find(a => a.id === homeAddressId);
+    if (addr?.latitude != null && addr?.longitude != null) origin = { latitude: addr.latitude, longitude: addr.longitude };
+  }
+  if (!origin) {
+    const primary = targetAddresses.find(a => a.isPrimary) || targetAddresses[0];
+    if (primary?.latitude != null && primary?.longitude != null) origin = { latitude: primary.latitude, longitude: primary.longitude };
+  }
+  if (!origin) return res.status(400).json({ error: 'No home address with coordinates found for this family member' });
+
+  let geometry: { latitude: number; longitude: number }[];
+  try {
+    const candidates = await fetchDirectionsAlternatives(origin, { latitude: schoolLocation.latitude, longitude: schoolLocation.longitude }, mode === 'walking' ? 'walking' : 'driving');
+    geometry = simplifyGeometry(candidates[0].geometry, 80);
+  } catch (e) {
+    console.error('[SchoolRoute] Failed to fetch route geometry:', e);
+    return res.status(502).json({ error: "Impossible de calculer l'itinéraire" });
+  }
+
+  const now = Date.now();
+  const route: SchoolRoute = {
+    id: uuidv4(), ownerId: caller.id, targetUserId,
+    targetUserName: targetUserName || adminUsers.get(targetUserId)?.name || targetUserId,
+    homeAddressId: homeAddressId || undefined, schoolLabel, schoolLocation, geometry,
+    corridorMeters: corridorMeters ? Number(corridorMeters) : 275,
+    commuteWindows: Array.isArray(commuteWindows) ? commuteWindows : [],
+    active: true, createdAt: now, updatedAt: now,
+  };
+  if (!schoolRoutes.has(targetUserId)) schoolRoutes.set(targetUserId, []);
+  schoolRoutes.get(targetUserId)!.push(route);
+  saveSchoolRouteToSupabase(route).catch(e => console.error('[Supabase] Failed to persist school route:', e));
+  res.status(201).json(route);
+});
+
+app.put('/api/family/school-routes/:id', requireAuth, async (req, res) => {
+  let found: SchoolRoute | undefined;
+  for (const list of schoolRoutes.values()) { const r = list.find(x => x.id === (req.params.id as string)); if (r) { found = r; break; } }
+  if (!found) return res.status(404).json({ error: 'Route not found' });
+  if (!canEditAddressAssets(found.targetUserId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
+  const { active, corridorMeters, commuteWindows } = req.body;
+  if (active !== undefined) found.active = Boolean(active);
+  if (corridorMeters !== undefined) found.corridorMeters = Number(corridorMeters);
+  if (Array.isArray(commuteWindows)) found.commuteWindows = commuteWindows;
+  found.updatedAt = Date.now();
+  saveSchoolRouteToSupabase(found).catch(e => console.error('[Supabase] Failed to persist school route update:', e));
+  res.json(found);
+});
+
+app.delete('/api/family/school-routes/:id', requireAuth, async (req, res) => {
+  for (const list of schoolRoutes.values()) {
+    const idx = list.findIndex(x => x.id === (req.params.id as string));
+    if (idx !== -1) {
+      if (!canEditAddressAssets(list[idx].targetUserId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
+      list.splice(idx, 1);
+      schoolRouteState.delete(req.params.id as string);
+      const { error } = await supabaseAdmin.from('school_routes').delete().eq('id', req.params.id as string);
+      if (error) console.error('[Supabase] Failed to persist school route deletion:', error.message);
+      return res.json({ success: true });
+    }
+  }
+  res.status(404).json({ error: 'Route not found' });
 });
 
 // GET /api/addresses/:addressId/guests

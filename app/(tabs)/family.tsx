@@ -53,7 +53,7 @@ interface ProximityAlert {
   targetUserId: string;
   targetUserName: string;
   ownerId: string;
-  eventType: 'exit' | 'entry' | 'curfew_violation';
+  eventType: 'exit' | 'entry' | 'curfew_violation' | 'route_deviation';
   distanceMeters: number;
   location: { latitude: number; longitude: number };
   timestamp: number;
@@ -177,6 +177,20 @@ interface WeeklySummary {
   since: number;
   until: number;
   residences: WeeklySummaryResidence[];
+}
+
+interface SchoolRoute {
+  id: string;
+  ownerId: string;
+  targetUserId: string;
+  targetUserName: string;
+  schoolLabel: string;
+  schoolLocation: { latitude: number; longitude: number; address?: string };
+  corridorMeters: number;
+  commuteWindows: { hour: number; minute: number; durationMinutes: number; daysOfWeek: number[] }[];
+  active: boolean;
+  createdAt: number;
+  updatedAt: number;
 }
 
 interface MedicalInfo {
@@ -432,6 +446,23 @@ export default function FamilyScreen() {
   const [weeklySummaryTarget, setWeeklySummaryTarget] = useState<FamilyMember | null>(null);
   const [weeklySummaryData, setWeeklySummaryData] = useState<WeeklySummary | null>(null);
   const [weeklySummaryLoading, setWeeklySummaryLoading] = useState(false);
+
+  // School commute route deviation alerts — reuses perimeterAddress/perimeterCenter
+  // for the school's own address search (never open at the same time as the
+  // perimeter/curfew modals that also share that state).
+  const [showSchoolRouteModal, setShowSchoolRouteModal] = useState(false);
+  const [schoolRouteTarget, setSchoolRouteTarget] = useState<FamilyMember | null>(null);
+  const [schoolRoutesList, setSchoolRoutesList] = useState<SchoolRoute[]>([]);
+  const [schoolRoutesLoading, setSchoolRoutesLoading] = useState(false);
+  const [showAddSchoolRouteForm, setShowAddSchoolRouteForm] = useState(false);
+  const [schoolLabel, setSchoolLabel] = useState('');
+  const [schoolRouteCorridor, setSchoolRouteCorridor] = useState('275');
+  const [schoolRouteHour, setSchoolRouteHour] = useState('8');
+  const [schoolRouteMinute, setSchoolRouteMinute] = useState('00');
+  const [schoolRouteDuration, setSchoolRouteDuration] = useState('45');
+  const [schoolRouteDays, setSchoolRouteDays] = useState<number[]>([1, 2, 3, 4, 5]);
+  const [schoolRouteMode, setSchoolRouteMode] = useState<'driving' | 'walking'>('walking');
+  const [schoolRouteSaving, setSchoolRouteSaving] = useState(false);
 
   // Address autocomplete
   const [addressSuggestions, setAddressSuggestions] = useState<Array<{ display_name: string; lat: string; lon: string }>>([]);
@@ -1590,6 +1621,105 @@ export default function FamilyScreen() {
     setWeeklySummaryLoading(false);
   }, [BASE]);
 
+  // ─── School Commute Route CRUD ───────────────────────────────────────────
+
+  const openSchoolRouteModal = useCallback(async (member: FamilyMember) => {
+    setSchoolRouteTarget(member);
+    setShowSchoolRouteModal(true);
+    setShowAddSchoolRouteForm(false);
+    setSchoolLabel(''); setPerimeterAddress(''); setPerimeterCenter(null);
+    setSchoolRouteCorridor('275'); setSchoolRouteHour('8'); setSchoolRouteMinute('00');
+    setSchoolRouteDuration('45'); setSchoolRouteDays([1, 2, 3, 4, 5]); setSchoolRouteMode('walking');
+    setSchoolRoutesList([]);
+    setSchoolRoutesLoading(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family/school-routes?targetUserId=${member.userId}`, { timeout: 10000, headers: await authHeader() });
+      const data = await res.json();
+      setSchoolRoutesList(Array.isArray(data) ? data : []);
+    } catch (e) {
+      console.error('[Family] Error fetching school routes:', e);
+    }
+    setSchoolRoutesLoading(false);
+  }, [BASE]);
+
+  const toggleSchoolRouteDay = (day: number) => {
+    setSchoolRouteDays(prev => prev.includes(day) ? prev.filter(d => d !== day) : [...prev, day].sort());
+  };
+
+  const createSchoolRoute = useCallback(async () => {
+    if (!schoolRouteTarget || !schoolLabel.trim() || !perimeterCenter) {
+      Alert.alert('Erreur', 'Indiquez le nom et l\'adresse de l\'école');
+      return;
+    }
+    if (schoolRouteDays.length === 0) {
+      Alert.alert('Erreur', 'Sélectionnez au moins un jour');
+      return;
+    }
+    setSchoolRouteSaving(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family/school-routes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({
+          targetUserId: schoolRouteTarget.userId,
+          targetUserName: schoolRouteTarget.name,
+          schoolLabel: schoolLabel.trim(),
+          schoolLocation: { latitude: perimeterCenter.latitude, longitude: perimeterCenter.longitude, address: perimeterAddress },
+          corridorMeters: Number(schoolRouteCorridor) || 275,
+          commuteWindows: [{
+            hour: Number(schoolRouteHour) || 0, minute: Number(schoolRouteMinute) || 0,
+            durationMinutes: Number(schoolRouteDuration) || 45, daysOfWeek: schoolRouteDays,
+          }],
+          mode: schoolRouteMode,
+        }),
+        timeout: 15000,
+      });
+      if (res.ok) {
+        const route = await res.json();
+        setSchoolRoutesList(prev => [...prev, route]);
+        setShowAddSchoolRouteForm(false);
+        setSchoolLabel(''); setPerimeterAddress(''); setPerimeterCenter(null);
+      } else {
+        const err = await res.json();
+        Alert.alert('Erreur', err.error || 'Impossible de créer le trajet');
+      }
+    } catch (e) {
+      Alert.alert('Erreur', 'Erreur réseau');
+    }
+    setSchoolRouteSaving(false);
+  }, [BASE, schoolRouteTarget, schoolLabel, perimeterCenter, perimeterAddress, schoolRouteCorridor, schoolRouteHour, schoolRouteMinute, schoolRouteDuration, schoolRouteDays, schoolRouteMode]);
+
+  const toggleSchoolRouteActive = useCallback(async (route: SchoolRoute) => {
+    setSchoolRoutesList(prev => prev.map(r => r.id === route.id ? { ...r, active: !r.active } : r));
+    try {
+      await fetchWithTimeout(`${BASE}/api/family/school-routes/${route.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({ active: !route.active }),
+        timeout: 10000,
+      });
+    } catch (e) {
+      console.error('[Family] Error toggling school route:', e);
+      setSchoolRoutesList(prev => prev.map(r => r.id === route.id ? { ...r, active: route.active } : r));
+    }
+  }, [BASE]);
+
+  const deleteSchoolRoute = useCallback((route: SchoolRoute) => {
+    Alert.alert('Supprimer', `Supprimer le trajet vers ${route.schoolLabel} ?`, [
+      { text: 'Annuler', style: 'cancel' },
+      {
+        text: 'Supprimer', style: 'destructive', onPress: async () => {
+          try {
+            await fetchWithTimeout(`${BASE}/api/family/school-routes/${route.id}`, { method: 'DELETE', headers: await authHeader(), timeout: 10000 });
+            setSchoolRoutesList(prev => prev.filter(r => r.id !== route.id));
+          } catch (e) {
+            console.error('[Family] Error deleting school route:', e);
+          }
+        },
+      },
+    ]);
+  }, [BASE]);
+
   // ─── Acknowledge Alert ──────────────────────────────────────────────────
 
   const acknowledgeAlert = useCallback(async (alertId: string) => {
@@ -1845,6 +1975,13 @@ export default function FamilyScreen() {
           <IconSymbol name="chart.bar.fill" size={18} color="#1e3a5f" />
           <Text style={styles.actionBtnText}>Résumé hebdo</Text>
         </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.actionBtn}
+          onPress={() => openSchoolRouteModal(item)}
+        >
+          <IconSymbol name="map.fill" size={18} color="#1e3a5f" />
+          <Text style={styles.actionBtnText}>Trajet école</Text>
+        </TouchableOpacity>
       </View>
     </View>
     );
@@ -1891,10 +2028,13 @@ export default function FamilyScreen() {
   const renderAlertCard = ({ item }: { item: ProximityAlert }) => {
     const isExit = item.eventType === 'exit';
     const isCurfew = item.eventType === 'curfew_violation';
-    const needsAck = isExit || isCurfew;
+    const isRouteDeviation = item.eventType === 'route_deviation';
+    const needsAck = isExit || isCurfew || isRouteDeviation;
     const title = isCurfew
       ? `${item.targetUserName} ${item.curfewResult === 'inside' ? 'était' : 'n\'était pas'} dans la zone surveillée à l'heure du couvre-feu`
-      : `${item.targetUserName} ${isExit ? 'a quitté' : 'est revenu(e) dans'} le périmètre`;
+      : isRouteDeviation
+        ? `${item.targetUserName} s'est écarté(e) du trajet habituel`
+        : `${item.targetUserName} ${isExit ? 'a quitté' : 'est revenu(e) dans'} le périmètre`;
     return (
       <View style={[styles.card, needsAck && !item.acknowledged && styles.cardAlert]}>
         <View style={styles.cardHeader}>
@@ -3220,6 +3360,138 @@ export default function FamilyScreen() {
               )}
             </ScrollView>
           )}
+        </View>
+      </Modal>
+
+      <Modal visible={showSchoolRouteModal} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowSchoolRouteModal(false)}>
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Trajet école — {schoolRouteTarget?.name}</Text>
+            <TouchableOpacity onPress={() => { setShowSchoolRouteModal(false); setSchoolRouteTarget(null); }}>
+              <IconSymbol name="xmark.circle.fill" size={28} color="#6B7280" />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView style={{ padding: 16 }}>
+            <Text style={styles.emptySubtitle}>
+              Recevez une alerte si {schoolRouteTarget?.name} s&apos;écarte du trajet habituel pendant l&apos;heure de commute configurée.
+            </Text>
+
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, marginBottom: 8 }}>
+              <Text style={styles.formLabel}>Trajets configurés</Text>
+              <TouchableOpacity onPress={() => setShowAddSchoolRouteForm(v => !v)}>
+                <Text style={styles.providerAddLink}>{showAddSchoolRouteForm ? 'Annuler' : '+ Ajouter'}</Text>
+              </TouchableOpacity>
+            </View>
+
+            {showAddSchoolRouteForm && (
+              <View style={styles.providerFormCard}>
+                <TextInput style={styles.textInput} value={schoolLabel} onChangeText={setSchoolLabel} placeholder="Nom de l'école" placeholderTextColor="#9CA3AF" />
+
+                <Text style={styles.formLabel}>Adresse de l&apos;école</Text>
+                <View style={{ zIndex: 10 }}>
+                  <View style={styles.addressInputRow}>
+                    <TextInput
+                      style={[styles.textInput, { flex: 1 }]}
+                      value={perimeterAddress}
+                      onChangeText={handleAddressChange}
+                      placeholder="Rechercher une adresse..."
+                      placeholderTextColor="#9CA3AF"
+                      returnKeyType="search"
+                    />
+                    {addressSearching && (
+                      <ActivityIndicator size="small" color="#1e3a5f" style={{ position: 'absolute', right: 12 }} />
+                    )}
+                  </View>
+                  {addressSuggestions.length > 0 && (
+                    <View style={styles.suggestionsContainer}>
+                      {addressSuggestions.map((s, idx) => (
+                        <TouchableOpacity
+                          key={`${s.lat}-${s.lon}-${idx}`}
+                          style={[styles.suggestionItem, idx < addressSuggestions.length - 1 && styles.suggestionBorder]}
+                          onPress={() => selectSuggestion(s)}
+                        >
+                          <Text style={styles.suggestionIcon}>📍</Text>
+                          <Text style={styles.suggestionText} numberOfLines={2}>{s.display_name}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  )}
+                  {perimeterCenter && (
+                    <Text style={styles.formHint}>✅ École: {perimeterAddress}</Text>
+                  )}
+                </View>
+
+                <Text style={styles.formLabel}>Mode de transport</Text>
+                <View style={styles.memberSelector}>
+                  <TouchableOpacity style={[styles.memberChip, schoolRouteMode === 'walking' && styles.memberChipActive]} onPress={() => setSchoolRouteMode('walking')}>
+                    <Text style={[styles.memberChipText, schoolRouteMode === 'walking' && styles.memberChipTextActive]}>🚶 À pied</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.memberChip, schoolRouteMode === 'driving' && styles.memberChipActive]} onPress={() => setSchoolRouteMode('driving')}>
+                    <Text style={[styles.memberChipText, schoolRouteMode === 'driving' && styles.memberChipTextActive]}>🚗 En voiture</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <Text style={styles.formLabel}>Tolérance d&apos;écart (mètres)</Text>
+                <TextInput style={styles.textInput} value={schoolRouteCorridor} onChangeText={setSchoolRouteCorridor} placeholder="275" placeholderTextColor="#9CA3AF" keyboardType="numeric" />
+
+                <Text style={styles.formLabel}>Heure de départ habituelle</Text>
+                <View style={{ flexDirection: 'row', gap: 8 }}>
+                  <TextInput style={[styles.textInput, { flex: 1 }]} value={schoolRouteHour} onChangeText={setSchoolRouteHour} placeholder="Heure (0-23)" placeholderTextColor="#9CA3AF" keyboardType="numeric" />
+                  <TextInput style={[styles.textInput, { flex: 1 }]} value={schoolRouteMinute} onChangeText={setSchoolRouteMinute} placeholder="Minute" placeholderTextColor="#9CA3AF" keyboardType="numeric" />
+                </View>
+
+                <Text style={styles.formLabel}>Durée de la fenêtre (minutes)</Text>
+                <TextInput style={styles.textInput} value={schoolRouteDuration} onChangeText={setSchoolRouteDuration} placeholder="45" placeholderTextColor="#9CA3AF" keyboardType="numeric" />
+
+                <Text style={styles.formLabel}>Jours</Text>
+                <View style={styles.memberSelector}>
+                  {['Dim', 'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam'].map((label, day) => (
+                    <TouchableOpacity
+                      key={day}
+                      style={[styles.memberChip, schoolRouteDays.includes(day) && styles.memberChipActive]}
+                      onPress={() => toggleSchoolRouteDay(day)}
+                    >
+                      <Text style={[styles.memberChipText, schoolRouteDays.includes(day) && styles.memberChipTextActive]}>{label}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                <TouchableOpacity
+                  style={[styles.createBtn, schoolRouteSaving && { opacity: 0.6 }]}
+                  onPress={createSchoolRoute}
+                  disabled={schoolRouteSaving || !schoolLabel.trim() || !perimeterCenter}
+                >
+                  {schoolRouteSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.createBtnText}>Enregistrer</Text>}
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {schoolRoutesLoading ? (
+              <ActivityIndicator color="#1e3a5f" style={{ marginTop: 20 }} />
+            ) : schoolRoutesList.length === 0 ? (
+              <Text style={styles.emptySubtitle}>Aucun trajet configuré.</Text>
+            ) : (
+              schoolRoutesList.map(route => (
+                <View key={route.id} style={styles.providerRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.providerName}>🏫 {route.schoolLabel}</Text>
+                    {!!route.schoolLocation.address && <Text style={styles.providerDetail}>{route.schoolLocation.address}</Text>}
+                    <Text style={styles.providerDetail}>
+                      Tolérance: {route.corridorMeters}m
+                      {route.commuteWindows.length > 0
+                        ? ` • ${String(route.commuteWindows[0].hour).padStart(2, '0')}:${String(route.commuteWindows[0].minute).padStart(2, '0')} (${route.commuteWindows[0].durationMinutes}min)`
+                        : ''}
+                    </Text>
+                  </View>
+                  <Switch value={route.active} onValueChange={() => toggleSchoolRouteActive(route)} />
+                  <TouchableOpacity onPress={() => deleteSchoolRoute(route)} style={{ marginLeft: 12 }}>
+                    <IconSymbol name="trash.fill" size={18} color="#EF4444" />
+                  </TouchableOpacity>
+                </View>
+              ))
+            )}
+          </ScrollView>
         </View>
       </Modal>
     </SafeAreaView>
