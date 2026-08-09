@@ -3695,6 +3695,12 @@ app.post('/admin/users/:id/photo', requireAuth, requireRole('admin'), upload.sin
   res.json({ success: true, user: safe });
 });
 
+// Public, unauthenticated — required by Apple/Google app store submission
+// (App Privacy / Data safety forms both require a live privacy policy URL).
+app.get('/privacy', (req, res) => {
+  res.sendFile(path.join(PROJECT_ROOT, 'server', 'privacy-policy.html'));
+});
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
