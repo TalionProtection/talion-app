@@ -508,6 +508,12 @@ interface AdminUser {
   // their OWN family. undefined/true = shared (today's behavior, non-regressive);
   // false = masked from family the same way a member with no known location is.
   shareLocationWithFamily?: boolean;
+  // Temporary override: when set and in the future, location is shared with
+  // family regardless of shareLocationWithFamily === false — lets someone who
+  // normally keeps their location private opt in for a bounded window (e.g.
+  // "share for the next 2h while I'm out"). Expires on its own; no explicit
+  // "turn back off" action needed.
+  shareLocationUntil?: number;
   // Duress code: an opt-in alternate SOS-deactivation PIN. Entering the normal
   // PIN cancels SOS exactly as before; entering the duress PIN shows the
   // identical "SOS Désactivé" confirmation but silently raises a real alert to
@@ -1980,12 +1986,23 @@ function scorePatrolComplianceSignal(siteId: string): SiteRiskSignal {
   return { label: 'Couverture rondes', weight: 0.20, score, detail };
 }
 
+// Family-registered residences left unoccupied are a softer target — this
+// signal is neutral (score 0) when the site isn't near any occupancy-tracked
+// residence, so it never penalizes sites with nothing to report.
+function scoreOccupancyStatusSignal(coords: { latitude: number; longitude: number }): SiteRiskSignal {
+  const occupancy = findResidenceOccupancyForCoords(coords);
+  if (occupancy === null) return { label: 'Occupation', weight: 0.20, score: 0, detail: 'Occupation non suivie pour ce site' };
+  const score = occupancy === 'unoccupied' ? 80 : 10;
+  const detail = occupancy === 'unoccupied' ? 'Résidence signalée inoccupée' : 'Résidence signalée occupée';
+  return { label: 'Occupation', weight: 0.20, score, detail };
+}
+
 function computeSiteRiskScore(siteId: string, organizationId?: string): SiteRiskResult | null {
   const site = patrolSites.get(siteId);
   if (!site) return null;
   const coords = resolveSiteDestination(siteId);
   const signals: SiteRiskSignal[] = coords
-    ? [scoreBlackbookProximitySignal(coords, organizationId), scoreIncidentHistorySignal(coords, organizationId), scorePatrolComplianceSignal(siteId)]
+    ? [scoreBlackbookProximitySignal(coords, organizationId), scoreIncidentHistorySignal(coords, organizationId), scorePatrolComplianceSignal(siteId), scoreOccupancyStatusSignal(coords)]
     : [scorePatrolComplianceSignal(siteId)]; // no address/checkpoints yet — compliance is all we can compute
   const totalWeight = signals.reduce((s, sig) => s + sig.weight, 0) || 1;
   const score = Math.round(signals.reduce((s, sig) => s + sig.score * sig.weight, 0) / totalWeight);
@@ -2504,6 +2521,15 @@ function canAccessFamilyMemberData(targetUserId: string, caller: { id: string; r
   if (getFamilyMemberIds(targetUserId).includes(caller.id)) return true;
   const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder' || caller.role === 'superadmin';
   return isStaff && canAccessOrg(caller, adminUsers.get(targetUserId)?.organizationId);
+}
+
+// Family-facing location-sharing consent check: on by default, can be turned
+// off permanently (shareLocationWithFamily === false), or temporarily
+// re-enabled for a bounded window (shareLocationUntil in the future) even
+// while off — e.g. "share for the next 2h while I'm out with friends".
+function sharesLocationWithFamily(adminUser?: { shareLocationWithFamily?: boolean; shareLocationUntil?: number }): boolean {
+  if (adminUser?.shareLocationWithFamily !== false) return true;
+  return (adminUser.shareLocationUntil ?? 0) > Date.now();
 }
 
 // POST /api/access/emergency-override — break-glass: temporarily lifts the
@@ -4343,7 +4369,7 @@ app.get('/api/family/locations', requireAuth, (req, res) => {
       const adminUser = adminUsers.get(fid);
       const rel = adminUsers.get(userId)?.relationships?.find(r => r.userId === fid);
       if (!u || !u.location) return null;
-      if (adminUser?.shareLocationWithFamily === false) return null;
+      if (!sharesLocationWithFamily(adminUser)) return null;
       return {
         userId: fid,
         userName: adminUser?.name || fid,
@@ -4376,7 +4402,7 @@ app.get('/api/family/members', requireAuth, (req, res) => {
       // shareLocationWithFamily is the separate, family-facing consent switch:
       // when explicitly off, mask location/presence the same way an unknown
       // location renders today (member still listed, just no position/status).
-      const sharesLocation = relUser?.shareLocationWithFamily !== false;
+      const sharesLocation = sharesLocationWithFamily(relUser);
       const presence = sharesLocation ? computeEffectivePresence(r.userId, false) : null;
       return {
         userId: r.userId,
@@ -6243,6 +6269,27 @@ app.put('/api/users/:id/location-sharing', requireAuth, (req, res) => {
   res.json({ success: true, shareLocationWithFamily: user.shareLocationWithFamily });
 });
 
+// POST /api/users/:id/share-location-temporary - self only. Lets someone who
+// keeps shareLocationWithFamily off share their live position with family for
+// a bounded window without permanently flipping the main toggle — e.g. "share
+// for the next 2h while I'm out with friends". Expires on its own.
+app.post('/api/users/:id/share-location-temporary', requireAuth, (req, res) => {
+  const targetId = req.params.id as string;
+  const caller = req.supabaseUser!;
+  if (caller.id !== targetId) {
+    return res.status(403).json({ error: 'Not authorized to change this user\'s location sharing' });
+  }
+  const user = adminUsers.get(targetId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  const minutes = Number(req.body.minutes);
+  if (!Number.isFinite(minutes) || minutes <= 0) return res.status(400).json({ error: 'minutes must be a positive number' });
+  const cappedMinutes = Math.min(minutes, 360);
+  user.shareLocationUntil = Date.now() + cappedMinutes * 60 * 1000;
+  adminUsers.set(user.id, user);
+  saveAdminUserToSupabase(user).catch(e => console.error('[LocationSharing] Supabase save error:', e));
+  res.json({ success: true, shareLocationUntil: user.shareLocationUntil });
+});
+
 // GET /api/users/:id/duress-settings — self only, never exposes the hashes,
 // only whether the feature is turned on (the app uses this to decide whether
 // to prompt for a PIN on SOS deactivation at all).
@@ -7414,17 +7461,24 @@ app.get('/api/patrol/reports', (req, res) => {
 app.get('/api/patrol/coverage', requireAuth, (req, res) => {
   const now = Date.now();
   const orgSites = Array.from(patrolSites.values()).filter(s => canAccessOrg(req.supabaseUser!, s.organizationId));
-  const sites = orgSites.map(({ name: location }) => {
+  const sites = orgSites.map((site) => {
+    const location = site.name;
     const reportsForSite = patrolReports.filter(r => r.location === location && canAccessOrg(req.supabaseUser!, r.organizationId));
     const lastReportAt = reportsForSite.length
       ? Math.max(...reportsForSite.map(r => r.createdAt))
       : null;
     const hoursSince = lastReportAt !== null ? (now - lastReportAt) / (60 * 60 * 1000) : null;
+    // An unoccupied family residence is a softer target — flag it and tighten
+    // the coverage thresholds so it reads as overdue sooner than an occupied site.
+    const coords = resolveSiteDestination(site.id);
+    const occupancyBoost = coords ? findResidenceOccupancyForCoords(coords) === 'unoccupied' : false;
+    const criticalHours = occupancyBoost ? PATROL_COVERAGE_CRITICAL_HOURS / 2 : PATROL_COVERAGE_CRITICAL_HOURS;
+    const warningHours = occupancyBoost ? PATROL_COVERAGE_WARNING_HOURS / 2 : PATROL_COVERAGE_WARNING_HOURS;
     const level: 'ok' | 'warning' | 'critical' =
-      hoursSince === null || hoursSince >= PATROL_COVERAGE_CRITICAL_HOURS ? 'critical'
-      : hoursSince >= PATROL_COVERAGE_WARNING_HOURS ? 'warning'
+      hoursSince === null || hoursSince >= criticalHours ? 'critical'
+      : hoursSince >= warningHours ? 'warning'
       : 'ok';
-    return { location, lastReportAt, hoursSince, level };
+    return { location, lastReportAt, hoursSince, level, ...(occupancyBoost ? { occupancyBoost: true } : {}) };
   });
   res.json({ sites });
 });
@@ -8177,6 +8231,7 @@ async function loadAdminUsersFromSupabase(): Promise<void> {
           relationships: u.relationships || [], passwordHash: u.password_hash || undefined,
           ghostMode: u.ghost_mode || false,
           shareLocationWithFamily: u.share_location_with_family !== false,
+          shareLocationUntil: u.share_location_until || undefined,
           duressCodeEnabled: u.duress_code_enabled || false,
           normalPinHash: u.normal_pin_hash || undefined,
           duressPinHash: u.duress_pin_hash || undefined,
@@ -8305,6 +8360,7 @@ async function saveAdminUserToSupabase(user: AdminUser): Promise<void> {
       relationships: user.relationships || [], password_hash: user.passwordHash || null,
       ghost_mode: user.ghostMode || false,
       share_location_with_family: user.shareLocationWithFamily !== false,
+      share_location_until: user.shareLocationUntil || null,
       duress_code_enabled: user.duressCodeEnabled || false,
       normal_pin_hash: user.normalPinHash || null,
       duress_pin_hash: user.duressPinHash || null,
@@ -9990,6 +10046,24 @@ async function resolvePatrolSiteFamily(siteName: string): Promise<{ ownerId: str
   return result;
 }
 
+// Synchronous counterpart to resolvePatrolSiteFamily for callers that already
+// have coordinates (e.g. via resolveSiteDestination) and don't want a geocode
+// round-trip just to check whether a site sits on a family's registered,
+// occupancy-tracked residence. Returns the matched address's occupancyStatus
+// ('occupied'/'unoccupied'), or null if no residence is within range or the
+// matched residence doesn't track occupancy.
+function findResidenceOccupancyForCoords(coords: { latitude: number; longitude: number }): 'occupied' | 'unoccupied' | null {
+  let best: { addr: UserAddress; dist: number } | null = null;
+  for (const addresses of userAddresses.values()) {
+    for (const a of addresses) {
+      if (a.latitude == null || a.longitude == null) continue;
+      const dist = haversineDistance(coords.latitude, coords.longitude, a.latitude, a.longitude);
+      if (dist <= PATROL_SITE_FAMILY_MATCH_METERS && (!best || dist < best.dist)) best = { addr: a, dist };
+    }
+  }
+  return best?.addr.occupancyStatus || null;
+}
+
 interface MainCouranteEntry {
   id: string;
   timestamp: number;
@@ -10895,7 +10969,7 @@ function computeResidenceMembersFor(memberIds: string[], primaryOwnerId: string,
         || 'family');
     const visible = forDispatch
       ? !(adminUser?.ghostMode && !isRevealedForActiveIncident(memberId))
-      : adminUser?.shareLocationWithFamily !== false;
+      : sharesLocationWithFamily(adminUser);
     // Reuse the same presence computation as the rest of the app (Famille
     // tab, dispatch map) instead of a fresh distance check against only the
     // live `users` location — that map is never persisted and has no

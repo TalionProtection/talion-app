@@ -2551,7 +2551,7 @@ export default function FamilyScreen() {
                       style={[styles.textInput, { flex: 1 }]}
                       value={perimeterAddress}
                       onChangeText={handleAddressChange}
-                      placeholder="Rechercher une adresse..."
+                      placeholder="Rechercher une adresse... (ex: nom de l'école)"
                       placeholderTextColor="#9CA3AF"
                       returnKeyType="search"
                     />

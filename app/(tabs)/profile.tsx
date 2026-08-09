@@ -49,6 +49,8 @@ export default function ProfileScreen() {
   const [ghostModeSaving, setGhostModeSaving] = useState(false);
   const [shareLocation, setShareLocation] = useState(user?.shareLocationWithFamily !== false);
   const [shareLocationSaving, setShareLocationSaving] = useState(false);
+  const [tempShareSaving, setTempShareSaving] = useState<number | null>(null); // minutes currently being sent
+  const [tempShareUntil, setTempShareUntil] = useState<number | null>(null);
   const [familyNames, setFamilyNames] = useState<string[]>([]);
 
   const [duressEnabled, setDuressEnabled] = useState(false);
@@ -263,6 +265,31 @@ export default function ProfileScreen() {
     }
     setShareLocationSaving(false);
   }, [user, shareLocation]);
+
+  const handleTemporaryShare = useCallback(async (minutes: number) => {
+    if (!user) return;
+    setTempShareSaving(minutes);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetchWithTimeout(`${getApiBaseUrl()}/api/users/${user.id}/share-location-temporary`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+        },
+        body: JSON.stringify({ minutes }),
+        timeout: 10000,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setTempShareUntil(data.shareLocationUntil);
+      if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (e) {
+      console.error('[Profile] Failed to enable temporary location sharing:', e);
+      Alert.alert('Erreur', 'Impossible d\'activer le partage temporaire. Réessayez.');
+    }
+    setTempShareSaving(null);
+  }, [user]);
 
   const handlePickPhoto = async () => {
     try {
@@ -579,6 +606,33 @@ export default function ProfileScreen() {
                 )}
               </View>
             </View>
+
+            {!shareLocation && (
+              <View style={[styles.fieldGroup, { marginTop: 4 }]}>
+                <Text style={styles.fieldLabel}>Sortie entre amis — partager temporairement</Text>
+                <Text style={styles.fieldHint}>
+                  {tempShareUntil && tempShareUntil > Date.now()
+                    ? `Position partagée jusqu'à ${new Date(tempShareUntil).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}.`
+                    : 'Partagez votre position avec votre famille pendant une durée limitée, sans désactiver le masquage.'}
+                </Text>
+                <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+                  {[{ label: '1h', minutes: 60 }, { label: '2h', minutes: 120 }, { label: '4h', minutes: 240 }].map(opt => (
+                    <Pressable
+                      key={opt.minutes}
+                      style={({ pressed }) => [styles.tempShareChip, pressed && { opacity: 0.7 }]}
+                      onPress={() => handleTemporaryShare(opt.minutes)}
+                      disabled={tempShareSaving !== null}
+                    >
+                      {tempShareSaving === opt.minutes ? (
+                        <ActivityIndicator size="small" color="#1e3a5f" />
+                      ) : (
+                        <Text style={styles.tempShareChipText}>{opt.label}</Text>
+                      )}
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
+            )}
           </View>
         )}
 
@@ -1065,6 +1119,21 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingVertical: 8,
+  },
+  tempShareChip: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+  },
+  tempShareChipText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1e3a5f',
   },
   input: {
     fontSize: 16,
