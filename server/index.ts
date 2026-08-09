@@ -5261,6 +5261,7 @@ app.post('/admin/users', requireAuth, requireRole('admin'), async (req, res) => 
       if (!relUser.relationships.find(r => r.userId === id)) {
         relUser.relationships.push({ userId: id, type: reciprocal });
         adminUsers.set(relUser.id, relUser);
+        saveAdminUserToSupabase(relUser);
       }
     }
   });
@@ -5311,6 +5312,7 @@ app.put('/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => {
       if (relUser && relUser.relationships) {
         relUser.relationships = relUser.relationships.filter(r => r.userId !== user.id);
         adminUsers.set(relUser.id, relUser);
+        saveAdminUserToSupabase(relUser);
       }
     });
     user.relationships = relationships;
@@ -5341,13 +5343,18 @@ app.delete('/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => 
   const user = adminUsers.get(req.params.id as string);
   if (!user) return res.status(404).json({ error: 'User not found' });
   if (!canAccessOrg(req.supabaseUser!, user.organizationId)) return res.status(403).json({ error: 'Not authorized' });
-  // Remove reciprocal relationships
-  (user.relationships || []).forEach(rel => {
-    const relUser = adminUsers.get(rel.userId);
-    if (relUser && relUser.relationships) {
-      relUser.relationships = relUser.relationships.filter(r => r.userId !== user.id);
-      adminUsers.set(relUser.id, relUser);
-    }
+  // Remove every relationship pointing to this user, from every other user —
+  // not just the ones this user's own (possibly incomplete/never-reciprocated)
+  // relationships list happens to know about. A one-directional relationship
+  // (the reciprocal side written but never mirrored back onto this user, e.g.
+  // from an earlier bug) would otherwise survive as a dangling reference that
+  // resolves to nothing once this user is gone (shows as the raw id — e.g.
+  // "usr-xxxxxxxx" — wherever that other user's family is displayed).
+  adminUsers.forEach(relUser => {
+    if (relUser.id === user.id || !relUser.relationships?.some(r => r.userId === user.id)) return;
+    relUser.relationships = relUser.relationships.filter(r => r.userId !== user.id);
+    adminUsers.set(relUser.id, relUser);
+    saveAdminUserToSupabase(relUser);
   });
   adminUsers.delete(user.id);
   deleteAdminUserFromSupabase(user.id);
