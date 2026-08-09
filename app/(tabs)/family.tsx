@@ -5,6 +5,7 @@ import {
   StyleSheet, Keyboard, Switch,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { router } from 'expo-router';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 import { useAuth } from '@/hooks/useAuth';
 import { isStaffRole } from '@/lib/auth-context';
@@ -856,6 +857,28 @@ export default function FamilyScreen() {
       Alert.alert('Erreur', 'Impossible de mettre à jour le statut d\'occupation');
     }
   }, [BASE, providersTarget, selectedProviderAddressId, providersAddresses]);
+
+  const [residenceChatOpening, setResidenceChatOpening] = useState(false);
+
+  const openResidenceChat = useCallback(async () => {
+    if (!selectedProviderAddressId) return;
+    setResidenceChatOpening(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/addresses/${selectedProviderAddressId}/conversation`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        timeout: 10000,
+      });
+      if (!res.ok) throw new Error('request failed');
+      const conv = await res.json();
+      setShowProvidersModal(false);
+      router.push(`/(tabs)/messages?conversationId=${encodeURIComponent(conv.id)}`);
+    } catch (e) {
+      console.error('[Family] Error opening residence chat:', e);
+      Alert.alert('Erreur', 'Impossible d\'ouvrir la discussion résidence');
+    }
+    setResidenceChatOpening(false);
+  }, [BASE, selectedProviderAddressId]);
 
   const resetInterventionForm = () => {
     setInterventionPersonId(null); setInterventionDate(''); setInterventionTime('09:00');
@@ -2283,6 +2306,18 @@ export default function FamilyScreen() {
                     </Text>
                   </TouchableOpacity>
 
+                  <TouchableOpacity
+                    onPress={openResidenceChat}
+                    style={styles.residenceChatBtn}
+                    disabled={residenceChatOpening}
+                  >
+                    {residenceChatOpening ? (
+                      <ActivityIndicator size="small" color="#166534" />
+                    ) : (
+                      <Text style={styles.residenceChatBtnText}>💬 Discussion résidence</Text>
+                    )}
+                  </TouchableOpacity>
+
                   <View style={styles.memberSelector}>
                     <TouchableOpacity style={[styles.memberChip, providersSubtab === 'people' && styles.memberChipActive]} onPress={() => setProvidersSubtab('people')}>
                       <Text style={[styles.memberChipText, providersSubtab === 'people' && styles.memberChipTextActive]}>Personnes & Visites</Text>
@@ -3690,6 +3725,11 @@ const styles = StyleSheet.create({
   },
   occupancyToggleUnoccupied: { backgroundColor: '#FFFBEB', borderColor: '#FDE68A' },
   occupancyToggleText: { fontSize: 14, fontWeight: '700', color: '#374151' },
+  residenceChatBtn: {
+    backgroundColor: '#DCFCE7', borderRadius: 10, borderWidth: 1, borderColor: '#BBF7D0',
+    paddingVertical: 10, alignItems: 'center', marginBottom: 16,
+  },
+  residenceChatBtnText: { fontSize: 14, fontWeight: '700', color: '#166534' },
   verificationPill: {
     alignSelf: 'flex-start', backgroundColor: '#F3F4F6', borderRadius: 6,
     paddingHorizontal: 8, paddingVertical: 3, marginTop: 6,

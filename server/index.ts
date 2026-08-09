@@ -586,13 +586,15 @@ interface ChatMessage {
 
 interface Conversation {
   id: string;
-  type: 'direct' | 'group';
+  type: 'direct' | 'group' | 'residence';
   name: string;
   participantIds: string[];
   /** For group by role */
   filterRole?: string;
   /** For group by tags */
   filterTags?: string[];
+  /** For type === 'residence' — membership resolves live to the address owner + their family, see resolveGroupParticipants */
+  addressId?: string;
   createdBy: string;
   createdAt: number;
   lastMessageTime: number;
@@ -6158,6 +6160,14 @@ function resolveGroupParticipants(conv: Conversation, organizationId: string | u
       if (u.organizationId === organizationId && activeStatuses.includes(u.status) && u.tags && conv.filterTags!.some(t => u.tags!.includes(t))) ids.add(u.id);
     });
   }
+  if (conv.type === 'residence' && conv.addressId) {
+    // Computed live from the address owner's current family, never stale.
+    const ownerId = resolveAddressOwner(conv.addressId);
+    if (ownerId) {
+      ids.add(ownerId);
+      getFamilyMemberIds(ownerId).forEach(id => ids.add(id));
+    }
+  }
   return Array.from(ids);
 }
 
@@ -6434,7 +6444,10 @@ app.get('/api/conversations', (req, res) => {
   conversations.forEach((conv) => {
     if (!canAccessOrg(caller, conv.organizationId)) return;
     const allParticipants = resolveGroupParticipants(conv, conv.organizationId);
-    if (allParticipants.includes(userId) || conv.createdBy === userId) {
+    const isStaffCaller = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder' || caller.role === 'superadmin';
+    const staffSeesResidence = conv.type === 'residence' && isStaffCaller && userId === caller.id
+      && conv.addressId && canAccessUser(caller, resolveAddressOwner(conv.addressId) || '');
+    if (allParticipants.includes(userId) || conv.createdBy === userId || staffSeesResidence) {
       const convMessages = messages.get(conv.id) || [];
       const lastMsg = convMessages.length > 0 ? convMessages[convMessages.length - 1] : null;
       // For direct conversations, resolve the other participant's name
@@ -6528,6 +6541,70 @@ app.post('/api/conversations', (req, res) => {
   };
   messages.get(convId)!.push(sysMsg);
 
+  res.json(conv);
+});
+
+// POST /api/family/team-conversation - get-or-create the standing group chat
+// between a family and their dispatch team. Deterministic id per family
+// (team-${familyGroupId}) so every tap of "Parler à mon équipe" reopens the
+// same thread instead of spawning duplicates; membership resolves live via
+// filterRole:'dispatcher' (resolveGroupParticipants), same as any other
+// role-filtered group.
+app.post('/api/family/team-conversation', requireAuth, (req, res) => {
+  const caller = req.supabaseUser!;
+  const convId = `team-${getFamilyGroupId(caller.id)}`;
+  const existing = conversations.get(convId);
+  if (existing) return res.json(existing);
+  const conv: Conversation = {
+    id: convId,
+    type: 'group',
+    name: 'Mon équipe sécurité',
+    participantIds: [caller.id],
+    filterRole: 'dispatcher',
+    createdBy: caller.id,
+    createdAt: Date.now(),
+    lastMessageTime: Date.now(),
+    lastMessage: '',
+    organizationId: caller.organizationId,
+  };
+  conversations.set(conv.id, conv);
+  messages.set(conv.id, []);
+  saveConversationToSupabase(conv).catch(() => {});
+  res.json(conv);
+});
+
+// POST /api/addresses/:addressId/conversation - get-or-create the standing
+// chat channel for a residence (family + assigned staff of that address).
+// Idempotent (deterministic id res-${addressId}) so "💬 Discussion résidence"
+// always opens the same thread; membership resolves live via
+// resolveGroupParticipants's 'residence' branch, never goes stale as family
+// membership changes.
+app.post('/api/addresses/:addressId/conversation', requireAuth, (req, res) => {
+  const addressId = req.params.addressId as string;
+  const ownerId = resolveAddressOwner(addressId);
+  if (!ownerId) return res.status(404).json({ error: 'Address not found' });
+  const caller = req.supabaseUser!;
+  if (!canViewAddressAssets(ownerId, caller)) return res.status(403).json({ error: 'Not authorized' });
+  const convId = `res-${addressId}`;
+  const existing = conversations.get(convId);
+  if (existing) return res.json(existing);
+  const owner = adminUsers.get(ownerId);
+  const addr = (userAddresses.get(ownerId) || []).find(a => a.id === addressId);
+  const conv: Conversation = {
+    id: convId,
+    type: 'residence',
+    name: addr?.label ? `Résidence — ${addr.label}` : `Résidence de ${owner?.name || ownerId}`,
+    participantIds: [],
+    addressId,
+    createdBy: caller.id,
+    createdAt: Date.now(),
+    lastMessageTime: Date.now(),
+    lastMessage: '',
+    organizationId: owner?.organizationId,
+  };
+  conversations.set(conv.id, conv);
+  messages.set(conv.id, []);
+  saveConversationToSupabase(conv).catch(() => {});
   res.json(conv);
 });
 
@@ -8797,7 +8874,8 @@ async function saveConversationToSupabase(conv: Conversation): Promise<void> {
     const { error } = await supabaseAdmin.from('conversations').upsert({
       id: conv.id, type: conv.type, name: conv.name,
       participant_ids: conv.participantIds, filter_role: conv.filterRole || null,
-      filter_tags: conv.filterTags || null, created_by: conv.createdBy,
+      filter_tags: conv.filterTags || null, address_id: conv.addressId || null,
+      created_by: conv.createdBy,
       created_at: conv.createdAt, last_message: conv.lastMessage || '',
       last_message_time: conv.lastMessageTime || 0,
       organization_id: conv.organizationId || null,
@@ -8829,7 +8907,8 @@ async function loadConversationsFromSupabase(): Promise<void> {
         const conv: any = {
           id: c.id, type: c.type, name: c.name,
           participantIds: c.participant_ids || [], filterRole: c.filter_role,
-          filterTags: c.filter_tags, createdBy: c.created_by,
+          filterTags: c.filter_tags, addressId: c.address_id || undefined,
+          createdBy: c.created_by,
           createdAt: c.created_at, lastMessage: c.last_message || '',
           lastMessageTime: c.last_message_time || 0,
           unreadCounts: c.unread_counts || {},

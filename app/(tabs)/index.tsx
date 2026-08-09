@@ -145,6 +145,7 @@ export default function HomeScreen() {
   const [showAlertModal, setShowAlertModal] = useState(false);
   const [kidSosMode, setKidSosMode] = useState(false); // family accounts can switch the SOS button to the simplified kid variant before handing the phone over
   const [malaiseSending, setMalaiseSending] = useState(false);
+  const [teamChatOpening, setTeamChatOpening] = useState(false);
   const [incidentFilter, setIncidentFilter] = useState<'all' | 'assigned'>('all');
   const { sendLocation, isConnected: wsConnected } = useWebSocketProvider();
   const sharingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -294,6 +295,24 @@ export default function HomeScreen() {
         },
       ]
     );
+  };
+
+  const handleOpenTeamChat = async () => {
+    setTeamChatOpening(true);
+    try {
+      const apiBase = getApiBaseUrl();
+      const res = await fetchWithTimeout(`${apiBase}/api/family/team-conversation`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        timeout: 10000,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const conv = await res.json();
+      router.push(`/(tabs)/messages?conversationId=${encodeURIComponent(conv.id)}`);
+    } catch (e) {
+      Alert.alert('Erreur', 'Impossible d\'ouvrir la discussion avec votre équipe');
+    }
+    setTeamChatOpening(false);
   };
 
   const handleRespondToIncident = (incident: Incident) => {
@@ -721,6 +740,15 @@ export default function HomeScreen() {
               <ActivityIndicator size="small" color="#B45309" />
             ) : (
               <Text style={styles.malaiseBtnText}>⚕️ Je ne me sens pas bien</Text>
+            )}
+          </TouchableOpacity>
+        )}
+        {user?.role === 'user' && !kidSosMode && (
+          <TouchableOpacity onPress={handleOpenTeamChat} style={styles.teamChatBtn} disabled={teamChatOpening}>
+            {teamChatOpening ? (
+              <ActivityIndicator size="small" color="#1e3a5f" />
+            ) : (
+              <Text style={styles.teamChatBtnText}>💬 Parler à mon équipe</Text>
             )}
           </TouchableOpacity>
         )}
@@ -1169,5 +1197,19 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
     color: '#B45309',
+  },
+  teamChatBtn: {
+    marginTop: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 10,
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+  },
+  teamChatBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#1e3a5f',
   },
 });

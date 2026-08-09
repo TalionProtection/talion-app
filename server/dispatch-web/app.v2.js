@@ -6021,13 +6021,16 @@ function renderConversationList() {
 
   list.innerHTML = filtered.map(c => {
     const name = getConvDisplayName(c);
+    const isResidence = c.type === 'residence';
     const isGroup = c.type === 'group';
-    const avatarColor = isGroup ? '#8b5cf6' : '#3b82f6';
-    const avatarText = isGroup ? (name.charAt(0) || 'G') : (name.charAt(0) || '?');
+    const avatarColor = isResidence ? '#22c55e' : isGroup ? '#8b5cf6' : '#3b82f6';
+    const avatarText = isResidence ? '\u{1F3E0}' : isGroup ? (name.charAt(0) || 'G') : (name.charAt(0) || '?');
     const time = c.lastMessageAt ? formatMsgTime(c.lastMessageAt) : '';
-    const preview = c.lastMessage || (isGroup ? `${c.participants?.length || 0} members` : 'No messages yet');
+    const preview = c.lastMessage || (isGroup || isResidence ? `${c.participants?.length || 0} members` : 'No messages yet');
     const active = c.id === msgCurrentConvId ? 'active' : '';
-    const typeBadge = isGroup
+    const typeBadge = isResidence
+      ? `<span class="msg-conv-badge" style="background:rgba(34,197,94,0.15);color:#22c55e;">residence</span>`
+      : isGroup
       ? `<span class="msg-conv-badge" style="background:rgba(139,92,246,0.15);color:#8b5cf6;">${c.groupType || 'group'}</span>`
       : `<span class="msg-conv-badge" style="background:rgba(59,130,246,0.15);color:#60a5fa;">direct</span>`;
 
@@ -6048,7 +6051,7 @@ function renderConversationList() {
 }
 
 function getConvDisplayName(conv) {
-  if (conv.type === 'group') return conv.name || 'Group';
+  if (conv.type === 'group' || conv.type === 'residence') return conv.name || 'Group';
   // Direct: find the other participant
   const other = (conv.participants || []).find(p => p !== currentDispatchUser().id);
   if (other) {
@@ -6091,12 +6094,15 @@ async function selectConversation(convId) {
 
   // Update header
   const name = getConvDisplayName(conv);
+  const isResidence = conv.type === 'residence';
   const isGroup = conv.type === 'group';
-  const avatarColor = isGroup ? '#8b5cf6' : '#3b82f6';
+  const avatarColor = isResidence ? '#22c55e' : isGroup ? '#8b5cf6' : '#3b82f6';
   document.getElementById('msgChatAvatar').style.background = avatarColor;
-  document.getElementById('msgChatAvatar').textContent = name.charAt(0) || '?';
+  document.getElementById('msgChatAvatar').textContent = isResidence ? '\u{1F3E0}' : (name.charAt(0) || '?');
   document.getElementById('msgChatName').textContent = name;
-  document.getElementById('msgChatMeta').textContent = isGroup
+  document.getElementById('msgChatMeta').textContent = isResidence
+    ? `${conv.participants?.length || 0} members | residence`
+    : isGroup
     ? `${conv.participants?.length || 0} members | ${conv.groupType || 'group'}`
     : 'Direct message';
 

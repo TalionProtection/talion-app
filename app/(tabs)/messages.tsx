@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useLocalSearchParams } from 'expo-router';
 import {
   StyleSheet,
   View,
@@ -41,7 +42,7 @@ interface ServerUser {
 
 interface ServerConversation {
   id: string;
-  type: 'direct' | 'group';
+  type: 'direct' | 'group' | 'residence';
   name: string;
   displayName: string;
   participantIds: string[];
@@ -288,6 +289,8 @@ type ViewState = 'list' | 'chat' | 'new-direct' | 'new-group';
 export default function MessagesScreen() {
   const { user } = useAuth();
   const { markConversationRead, syncConversations } = useMessaging();
+  const { conversationId: deepLinkConversationId } = useLocalSearchParams<{ conversationId?: string }>();
+  const openedDeepLinkRef = useRef<string | null>(null);
 
   // Navigation state
   const [view, setView] = useState<ViewState>('list');
@@ -415,6 +418,19 @@ export default function MessagesScreen() {
     markConversationRead(conv.id);
     setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, unreadCount: 0 } : c));
   }, [user?.id]);
+
+  // Deep-link support (?conversationId=...) — e.g. "Parler à mon équipe" or
+  // "Discussion résidence" buttons elsewhere in the app get-or-create a
+  // conversation server-side then navigate here with its id, so it should
+  // open directly instead of landing on the conversation list.
+  useEffect(() => {
+    if (!deepLinkConversationId || openedDeepLinkRef.current === deepLinkConversationId) return;
+    const conv = conversations.find(c => c.id === deepLinkConversationId);
+    if (conv) {
+      openedDeepLinkRef.current = deepLinkConversationId;
+      openConversation(conv);
+    }
+  }, [deepLinkConversationId, conversations, openConversation]);
 
   const handleSendMessage = useCallback(async () => {
     if (!messageText.trim() || !selectedConversation || !user?.id) return;
@@ -641,17 +657,19 @@ export default function MessagesScreen() {
             <TouchableOpacity onPress={() => { setView('list'); setSelectedConversation(null); }} style={styles.backButton}>
               <Text style={styles.backIcon}>←</Text>
             </TouchableOpacity>
-            <View style={[styles.chatAvatar, { backgroundColor: selectedConversation.type === 'group' ? '#f59e0b' : '#1e3a5f' }]}>
+            <View style={[styles.chatAvatar, { backgroundColor: selectedConversation.type === 'residence' ? '#22C55E' : selectedConversation.type === 'group' ? '#f59e0b' : '#1e3a5f' }]}>
               <Text style={styles.chatAvatarText}>
-                {selectedConversation.type === 'group' ? '👥' : selectedConversation.displayName?.charAt(0) || '?'}
+                {selectedConversation.type === 'residence' ? '🏠' : selectedConversation.type === 'group' ? '👥' : selectedConversation.displayName?.charAt(0) || '?'}
               </Text>
             </View>
             <View style={styles.chatHeaderInfo}>
               <Text style={styles.chatHeaderName} numberOfLines={1}>{selectedConversation.displayName || selectedConversation.name}</Text>
               <Text style={styles.chatStatusText}>
-                {selectedConversation.type === 'group'
-                  ? `${selectedConversation.participantCount || selectedConversation.participantIds?.length || 0} membres`
-                  : 'Message direct'}
+                {selectedConversation.type === 'residence'
+                  ? 'Discussion résidence'
+                  : selectedConversation.type === 'group'
+                    ? `${selectedConversation.participantCount || selectedConversation.participantIds?.length || 0} membres`
+                    : 'Message direct'}
               </Text>
             </View>
           </View>
@@ -703,7 +721,7 @@ export default function MessagesScreen() {
                     isAudio && styles.audioBubble,
                     isVideo && styles.imageBubble,
                   ]}>
-                    {!isMe && selectedConversation.type === 'group' && (
+                    {!isMe && (selectedConversation.type === 'group' || selectedConversation.type === 'residence') && (
                       <Text style={[styles.senderLabel, { color: isMe ? 'rgba(255,255,255,0.7)' : ROLE_COLORS[item.senderRole] || '#6b7280' }]}>
                         {item.senderName}
                       </Text>
@@ -1079,9 +1097,9 @@ export default function MessagesScreen() {
           keyExtractor={(item) => item.id}
           renderItem={({ item }) => (
             <TouchableOpacity style={styles.conversationItem} onPress={() => openConversation(item)}>
-              <View style={[styles.conversationAvatar, { backgroundColor: item.type === 'group' ? '#f59e0b' : '#1e3a5f' }]}>
+              <View style={[styles.conversationAvatar, { backgroundColor: item.type === 'residence' ? '#22C55E' : item.type === 'group' ? '#f59e0b' : '#1e3a5f' }]}>
                 <Text style={styles.avatarText}>
-                  {item.type === 'group' ? '👥' : (item.displayName?.charAt(0) || '?')}
+                  {item.type === 'residence' ? '🏠' : item.type === 'group' ? '👥' : (item.displayName?.charAt(0) || '?')}
                 </Text>
               </View>
               <View style={styles.conversationContent}>
@@ -1098,9 +1116,9 @@ export default function MessagesScreen() {
                   {item.lastSenderName ? `${item.lastSenderName}: ${item.lastMessage}` : item.lastMessage || 'Aucun message'}
                 </Text>
                 <View style={styles.conversationMeta}>
-                  <View style={[styles.typeBadge, { backgroundColor: item.type === 'group' ? '#fef3c7' : '#eff6ff' }]}>
-                    <Text style={[styles.typeBadgeText, { color: item.type === 'group' ? '#92400e' : '#1e40af' }]}>
-                      {item.type === 'group' ? `Groupe · ${item.participantCount}` : 'Direct'}
+                  <View style={[styles.typeBadge, { backgroundColor: item.type === 'residence' ? '#dcfce7' : item.type === 'group' ? '#fef3c7' : '#eff6ff' }]}>
+                    <Text style={[styles.typeBadgeText, { color: item.type === 'residence' ? '#166534' : item.type === 'group' ? '#92400e' : '#1e40af' }]}>
+                      {item.type === 'residence' ? 'Résidence' : item.type === 'group' ? `Groupe · ${item.participantCount}` : 'Direct'}
                     </Text>
                   </View>
                 </View>
