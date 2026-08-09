@@ -2600,7 +2600,7 @@ function isParentOf(callerId: string, targetUserId: string): boolean {
 // value (the standard "break-glass" convention: log the grant, not every use).
 app.post('/api/access/emergency-override', requireAuth, (req, res) => {
   const caller = req.supabaseUser!;
-  const isStaff = caller.role === 'dispatcher' || caller.role === 'responder' || caller.role === 'admin';
+  const isStaff = caller.role === 'dispatcher' || caller.role === 'responder' || caller.role === 'admin' || caller.role === 'superadmin';
   if (!isStaff) return res.status(403).json({ error: 'Staff only' });
   const { enable, reason } = req.body;
   const callerName = adminUsers.get(caller.id)?.name || caller.id;
@@ -11460,7 +11460,7 @@ app.get('/api/users/:id/addresses', requireAuth, (req, res) => {
   const targetId = req.params.id as string;
   const isSelf = caller.id === targetId;
   const isFamilyMember = getFamilyMemberIds(targetId).includes(caller.id);
-  const isStaff = caller.role === 'dispatcher' || caller.role === 'responder' || caller.role === 'admin';
+  const isStaff = caller.role === 'dispatcher' || caller.role === 'responder' || caller.role === 'admin' || caller.role === 'superadmin';
   const callerAccess = { id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
   if (!isSelf && !isFamilyMember && !(isStaff && canAccessUser(callerAccess, targetId))) {
     return res.status(403).json({ error: 'Not authorized' });

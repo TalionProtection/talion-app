@@ -1636,12 +1636,17 @@ function parseAddrLabel(label) {
 async function loadUserAddresses(userId) {
   try {
     const res = await fetch(`${API_BASE}/api/users/${userId}/addresses`);
-    currentAddresses = await res.json();
-    renderAddressesInDrawer();
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      currentAddresses = [];
+      showToast(`❌ Impossible de charger les adresses: ${err.error || 'Échec'}`, 'error');
+    } else {
+      currentAddresses = await res.json();
+    }
   } catch (e) {
     currentAddresses = [];
-    renderAddressesInDrawer();
   }
+  renderAddressesInDrawer();
   updateSameAddressInfo();
 }
 
