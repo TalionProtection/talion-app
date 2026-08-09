@@ -14,6 +14,7 @@ import { UnreadProvider } from '@/lib/unread-context';
 import { WebSocketProvider } from '@/lib/websocket-provider';
 import { useAuth } from '@/hooks/useAuth';
 import { usePushNotifications } from '@/hooks/usePushNotifications';
+import { medicationReminderService } from '@/services/medication-reminder-service';
 import React, { useEffect } from 'react';
 
 function RootLayoutContent() {
@@ -21,6 +22,13 @@ function RootLayoutContent() {
   const { isSignedIn, isLoading } = useAuth();
   const segments = useSegments();
   const router = useRouter();
+
+  // Local-only medication reminders — re-schedule anything the OS may have
+  // dropped (reinstall/update), independent of auth state since this is
+  // per-device data, not server-synced.
+  useEffect(() => {
+    medicationReminderService.rehydrate().catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (isLoading) return;

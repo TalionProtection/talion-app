@@ -25,6 +25,7 @@ import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
 import { authHeader } from '@/lib/auth-fetch';
 import { supabase } from '@/lib/auth-context';
+import { medicationReminderService, type MedicationReminder } from '@/services/medication-reminder-service';
 
 const ROLE_LABELS: Record<string, string> = {
   user: 'Utilisateur',
@@ -51,6 +52,17 @@ export default function ProfileScreen() {
   const [shareLocationSaving, setShareLocationSaving] = useState(false);
   const [tempShareSaving, setTempShareSaving] = useState<number | null>(null); // minutes currently being sent
   const [tempShareUntil, setTempShareUntil] = useState<number | null>(null);
+
+  // Medication reminders — local-only (AsyncStorage + scheduled local
+  // notifications), never sent to the server. See medication-reminder-service.
+  const [medReminders, setMedReminders] = useState<MedicationReminder[]>([]);
+  const [medRemindersLoading, setMedRemindersLoading] = useState(true);
+  const [showAddMedForm, setShowAddMedForm] = useState(false);
+  const [medName, setMedName] = useState('');
+  const [medDosage, setMedDosage] = useState('');
+  const [medHour, setMedHour] = useState('8');
+  const [medMinute, setMedMinute] = useState('00');
+  const [medSaving, setMedSaving] = useState(false);
   const [familyNames, setFamilyNames] = useState<string[]>([]);
 
   const [duressEnabled, setDuressEnabled] = useState(false);
@@ -290,6 +302,55 @@ export default function ProfileScreen() {
     }
     setTempShareSaving(null);
   }, [user]);
+
+  const loadMedReminders = useCallback(async () => {
+    setMedRemindersLoading(true);
+    const list = await medicationReminderService.getReminders();
+    setMedReminders(list);
+    setMedRemindersLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (user?.role === 'user' && Platform.OS !== 'web') loadMedReminders();
+  }, [user?.role, loadMedReminders]);
+
+  const handleAddMedReminder = useCallback(async () => {
+    if (!medName.trim()) return;
+    const hour = Math.max(0, Math.min(23, parseInt(medHour, 10) || 0));
+    const minute = Math.max(0, Math.min(59, parseInt(medMinute, 10) || 0));
+    setMedSaving(true);
+    try {
+      const granted = await medicationReminderService.requestPermission();
+      if (!granted) {
+        Alert.alert('Permission requise', 'Autorisez les notifications pour recevoir vos rappels.');
+        setMedSaving(false);
+        return;
+      }
+      await medicationReminderService.addReminder({ name: medName.trim(), dosage: medDosage.trim() || undefined, hour, minute });
+      setMedName(''); setMedDosage(''); setMedHour('8'); setMedMinute('00'); setShowAddMedForm(false);
+      await loadMedReminders();
+    } catch (e) {
+      Alert.alert('Erreur', 'Impossible de créer le rappel');
+    }
+    setMedSaving(false);
+  }, [medName, medDosage, medHour, medMinute, loadMedReminders]);
+
+  const handleToggleMedReminder = useCallback(async (reminder: MedicationReminder) => {
+    setMedReminders(prev => prev.map(r => r.id === reminder.id ? { ...r, active: !r.active } : r));
+    await medicationReminderService.setActive(reminder.id, !reminder.active);
+  }, []);
+
+  const handleDeleteMedReminder = useCallback((reminder: MedicationReminder) => {
+    Alert.alert('Supprimer', `Supprimer le rappel pour ${reminder.name} ?`, [
+      { text: 'Annuler', style: 'cancel' },
+      {
+        text: 'Supprimer', style: 'destructive', onPress: async () => {
+          await medicationReminderService.deleteReminder(reminder.id);
+          await loadMedReminders();
+        },
+      },
+    ]);
+  }, [loadMedReminders]);
 
   const handlePickPhoto = async () => {
     try {
@@ -682,6 +743,58 @@ export default function ProfileScreen() {
             </View>
           )}
         </View>
+
+        {/* Health: local-only medication reminders */}
+        {user.role === 'user' && Platform.OS !== 'web' && (
+          <View style={styles.formSection}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Text style={styles.sectionTitle}>Santé</Text>
+              <Pressable onPress={() => setShowAddMedForm(v => !v)}>
+                <Text style={[styles.fieldLabel, { color: '#1e3a5f' }]}>{showAddMedForm ? 'Annuler' : '+ Ajouter'}</Text>
+              </Pressable>
+            </View>
+            <Text style={styles.fieldHint}>
+              Rappels de prise de médicaments — stockés uniquement sur cet appareil, jamais transmis à votre équipe sécurité.
+            </Text>
+
+            {showAddMedForm && (
+              <View style={{ marginTop: 12 }}>
+                <TextInput style={styles.duressPinInput} value={medName} onChangeText={setMedName} placeholder="Nom du médicament" placeholderTextColor="#9CA3AF" />
+                <TextInput style={styles.duressPinInput} value={medDosage} onChangeText={setMedDosage} placeholder="Dosage (optionnel)" placeholderTextColor="#9CA3AF" />
+                <View style={{ flexDirection: 'row', gap: 8 }}>
+                  <TextInput style={[styles.duressPinInput, { flex: 1 }]} value={medHour} onChangeText={setMedHour} placeholder="Heure (0-23)" placeholderTextColor="#9CA3AF" keyboardType="numeric" />
+                  <TextInput style={[styles.duressPinInput, { flex: 1 }]} value={medMinute} onChangeText={setMedMinute} placeholder="Minute" placeholderTextColor="#9CA3AF" keyboardType="numeric" />
+                </View>
+                <Pressable
+                  style={[styles.saveButton, (medSaving || !medName.trim()) && styles.saveButtonDisabled]}
+                  onPress={handleAddMedReminder}
+                  disabled={medSaving || !medName.trim()}
+                >
+                  {medSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.saveButtonText}>Enregistrer</Text>}
+                </Pressable>
+              </View>
+            )}
+
+            {medRemindersLoading ? (
+              <ActivityIndicator size="small" color="#1e3a5f" style={{ marginTop: 12 }} />
+            ) : medReminders.length === 0 ? (
+              <Text style={[styles.fieldHint, { marginTop: 8 }]}>Aucun rappel configuré.</Text>
+            ) : (
+              medReminders.map(r => (
+                <View key={r.id} style={[styles.fieldGroup, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }]}>
+                  <View style={{ flex: 1, marginRight: 12 }}>
+                    <Text style={styles.fieldLabel}>{r.name}{r.dosage ? ` — ${r.dosage}` : ''}</Text>
+                    <Text style={styles.fieldHint}>{String(r.hour).padStart(2, '0')}:{String(r.minute).padStart(2, '0')}</Text>
+                  </View>
+                  <Switch value={r.active} onValueChange={() => handleToggleMedReminder(r)} />
+                  <Pressable onPress={() => handleDeleteMedReminder(r)} style={{ marginLeft: 12 }} hitSlop={8}>
+                    <MaterialIcons name="delete" size={20} color="#EF4444" />
+                  </Pressable>
+                </View>
+              ))
+            )}
+          </View>
+        )}
 
         {/* History: archived alerts */}
         <View style={styles.formSection}>
