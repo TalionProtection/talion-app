@@ -45,6 +45,8 @@ const MAPPING = {
   'checkmark.seal.fill': 'verified',
   'arrow.left': 'arrow-back',
   'airplane': 'flight',
+  'cross.case.fill': 'medical-services',
+  'person.badge.key.fill': 'badge',
 } as IconMapping;
 
 /**

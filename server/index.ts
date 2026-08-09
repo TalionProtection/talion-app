@@ -158,6 +158,7 @@ const INCIDENT_TYPE_LABELS: Record<string, string> = {
   animal_perdu: 'Animal perdu', evenement_climatique: 'Événement climatique',
   rodage: 'Rodage', vehicule_suspect: 'Véhicule suspect', fugue: 'Fugue',
   route_bloquee: 'Route bloquée', route_fermee: 'Route fermée',
+  malaise: 'Malaise', colis_suspect: 'Colis suspect',
 };
 
 function startAcceptanceTimer(alertId: string, responderId: string) {
@@ -604,7 +605,7 @@ interface StatusHistoryEntry {
 
 interface Alert {
   id: string;
-  type: 'sos' | 'medical' | 'fire' | 'accident' | 'other' | 'broadcast' | 'home_jacking' | 'cambriolage' | 'animal_perdu' | 'evenement_climatique' | 'rodage' | 'vehicule_suspect' | 'fugue' | 'route_bloquee' | 'route_fermee';
+  type: 'sos' | 'medical' | 'fire' | 'accident' | 'other' | 'broadcast' | 'home_jacking' | 'cambriolage' | 'animal_perdu' | 'evenement_climatique' | 'rodage' | 'vehicule_suspect' | 'fugue' | 'route_bloquee' | 'route_fermee' | 'malaise' | 'colis_suspect';
   severity: 'low' | 'medium' | 'high' | 'critical';
   location: { latitude: number; longitude: number; address: string };
   description: string;
@@ -4151,6 +4152,62 @@ app.post('/api/sos', async (req, res) => {
   res.json({ success: true, alertId: alert.id, broadcast: true });
 });
 
+// POST /api/family/quick-alert — non-emergency family-initiated alerts
+// ("je ne me sens pas bien" / colis suspect). Unlike /api/sos this doesn't
+// need the no-auth emergency exception, so it's a normal requireAuth route.
+// Mirrors /api/sos's alert-construction, fixed at severity 'medium'.
+app.post('/api/family/quick-alert', requireAuth, async (req, res) => {
+  const { type, description, location } = req.body;
+  if (type !== 'malaise' && type !== 'colis_suspect') {
+    return res.status(400).json({ error: "type doit être 'malaise' ou 'colis_suspect'" });
+  }
+  const caller = req.supabaseUser!;
+  const userName = adminUsers.get(caller.id)?.name || caller.id;
+
+  const alert: Alert = {
+    id: await generateIncidentId(type, userName, location || {}),
+    type,
+    severity: 'medium',
+    location: location || { latitude: 0, longitude: 0, address: 'Unknown' },
+    description: description || (type === 'malaise' ? `${userName} ne se sent pas bien` : `Colis suspect signalé par ${userName}`),
+    createdBy: userName,
+    reporterId: caller.id,
+    organizationId: caller.organizationId,
+    origin: 'mobile',
+    createdAt: Date.now(),
+    status: 'active',
+    respondingUsers: [],
+    photos: [],
+  };
+
+  alerts.set(alert.id, alert);
+  linkPossibleDuplicates(alert);
+  persistAlerts();
+  saveAlertToSupabase(alert).catch(e => console.error('[QuickAlert] Supabase save error:', e));
+  addAuditEntry('incident', 'Quick Alert Created', caller.id, `${INCIDENT_TYPE_LABELS[type]} ${alert.id}: ${alert.location.address}`, undefined, alert.organizationId);
+
+  broadcastToOrg(alert.organizationId, { type: 'newAlert', data: alert });
+  sendPushToDispatchersAndResponders(alert, userName).catch(err => console.error('[QuickAlert] Push error:', err));
+
+  // A non-emergency medical signal from a minor is still worth telling a
+  // parent about directly, same rationale as the SOS parent-notification
+  // above — "colis suspect" doesn't need this, it's not about the reporter.
+  if (type === 'malaise') {
+    const parentIds = getFamilyParentIds(caller.id).filter(id => id !== caller.id);
+    if (parentIds.length > 0) {
+      sendFamilyPush(
+        parentIds,
+        `⚕️ ${userName} ne se sent pas bien`,
+        alert.location.address && alert.location.address !== 'Unknown' ? `Position : ${alert.location.address}` : 'Signalement envoyé à votre équipe sécurité.',
+        { type: 'family_malaise', alertId: alert.id },
+        { priority: 'high' }
+      ).catch(() => {});
+    }
+  }
+
+  res.json({ success: true, alertId: alert.id });
+});
+
 // ─── Alert Photo Upload ──────────────────────────────────────────────
 // Upload photos to an existing alert (called after alert creation)
 app.post('/api/alerts/:id/photos', requireAuth, upload.array('photos', 4), async (req: any, res) => {
@@ -5481,6 +5538,7 @@ app.put('/dispatch/incidents/:id/assign', (req, res) => {
     evenement_climatique: '\u00c9v\u00e9nement climatique', rodage: 'Rodage',
     vehicule_suspect: 'V\u00e9hicule suspect', fugue: 'Fugue',
     route_bloquee: 'Route bloqu\u00e9e', route_fermee: 'Route ferm\u00e9e', other: 'Autre',
+    malaise: 'Malaise', colis_suspect: 'Colis suspect',
   };
   const typeLabel = TYPE_LABELS[alert.type] || alert.type;
   const sevLabel = alert.severity === 'critical' ? 'CRITIQUE' : alert.severity === 'high' ? '\u00c9LEV\u00c9' : alert.severity === 'medium' ? 'MOYEN' : 'FAIBLE';
@@ -8050,6 +8108,8 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
     loadPlannedInterventionsFromSupabase(),
     loadTravelItinerariesFromSupabase(),
     loadPreauthorizedGuestsFromSupabase(),
+    loadAuthorizedPickupPeopleFromSupabase(),
+    loadMedicalInfoFromSupabase(),
     loadMainCouranteNotesFromSupabase(),
     loadThreatAnalysesFromSupabase(),
   ]);
@@ -8637,6 +8697,7 @@ async function generateIncidentId(type: string, createdBy: string, location: { a
       sos: 'SOS', medical: 'MÉDICAL', fire: 'INCENDIE', security: 'SÉCURITÉ',
       accident: 'ACCIDENT', broadcast: 'BROADCAST', home_jacking: 'HOME-JACKING',
       cambriolage: 'CAMBRIOLAGE', other: 'INCIDENT',
+      malaise: 'MALAISE', colis_suspect: 'COLIS SUSPECT',
     };
     const typeLabel = TYPE_LABELS[type] || type.toUpperCase();
 
@@ -8933,10 +8994,47 @@ interface PreAuthorizedGuest {
   createdAt: number;
 }
 
+// Authorization belongs to the CHILD, not a residence — a pickup list
+// shouldn't need to be duplicated per address the way guests/interventions are.
+interface AuthorizedPickupPerson {
+  id: string;
+  childUserId: string;
+  name: string;
+  relationship?: string;
+  phone?: string;
+  photoUrl?: string;
+  notes?: string;
+  addedBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+// One record per person, self/family-editable, staff-readable during an
+// active incident. Backed by Supabase (not a local-JSON-only Map like
+// scheduledCheckIns) — this session already found that local-disk-only
+// data silently vanishes on every Render redeploy, and medical info is
+// exactly the kind of data that must never be lost that way.
+interface MedicalInfo {
+  userId: string;
+  bloodType?: string;
+  allergies?: string;
+  conditions?: string;
+  medications?: string;
+  physicianName?: string;
+  physicianPhone?: string;
+  emergencyContactName?: string;
+  emergencyContactPhone?: string;
+  notes?: string;
+  updatedBy: string;
+  updatedAt: number;
+}
+
 const knownPeople = new Map<string, KnownPerson[]>(); // addressId -> people
 const plannedInterventions = new Map<string, PlannedIntervention[]>(); // addressId -> interventions
 const travelItineraries = new Map<string, TravelItinerary[]>(); // userId -> itineraries
 const preauthorizedGuests = new Map<string, PreAuthorizedGuest[]>(); // addressId -> guests
+const authorizedPickupPeople = new Map<string, AuthorizedPickupPerson[]>(); // childUserId -> people
+const medicalInfoByUser = new Map<string, MedicalInfo>(); // userId -> record
 
 async function loadKnownPeopleFromSupabase(): Promise<void> {
   try {
@@ -8959,6 +9057,47 @@ async function loadKnownPeopleFromSupabase(): Promise<void> {
       console.log(`[Supabase] Loaded ${data.length} known people`);
     }
   } catch (e) { console.error('[Supabase] loadKnownPeopleFromSupabase error:', e); }
+}
+
+async function loadAuthorizedPickupPeopleFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('authorized_pickup_people').select('*');
+    if (error) { console.error('[Supabase] Failed to load authorized_pickup_people:', error.message); return; }
+    if (data && data.length > 0) {
+      authorizedPickupPeople.clear();
+      data.forEach((p: any) => {
+        const person: AuthorizedPickupPerson = {
+          id: p.id, childUserId: p.child_user_id, name: p.name,
+          relationship: p.relationship || undefined, phone: p.phone || undefined,
+          photoUrl: p.photo_url || undefined, notes: p.notes || undefined,
+          addedBy: p.added_by, createdAt: p.created_at, updatedAt: p.updated_at,
+        };
+        if (!authorizedPickupPeople.has(person.childUserId)) authorizedPickupPeople.set(person.childUserId, []);
+        authorizedPickupPeople.get(person.childUserId)!.push(person);
+      });
+      console.log(`[Supabase] Loaded ${data.length} authorized pickup people`);
+    }
+  } catch (e) { console.error('[Supabase] loadAuthorizedPickupPeopleFromSupabase error:', e); }
+}
+
+async function loadMedicalInfoFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('medical_info').select('*');
+    if (error) { console.error('[Supabase] Failed to load medical_info:', error.message); return; }
+    if (data && data.length > 0) {
+      medicalInfoByUser.clear();
+      data.forEach((m: any) => {
+        medicalInfoByUser.set(m.user_id, {
+          userId: m.user_id, bloodType: m.blood_type || undefined, allergies: m.allergies || undefined,
+          conditions: m.conditions || undefined, medications: m.medications || undefined,
+          physicianName: m.physician_name || undefined, physicianPhone: m.physician_phone || undefined,
+          emergencyContactName: m.emergency_contact_name || undefined, emergencyContactPhone: m.emergency_contact_phone || undefined,
+          notes: m.notes || undefined, updatedBy: m.updated_by, updatedAt: m.updated_at,
+        });
+      });
+      console.log(`[Supabase] Loaded ${data.length} medical info records`);
+    }
+  } catch (e) { console.error('[Supabase] loadMedicalInfoFromSupabase error:', e); }
 }
 
 async function loadPlannedInterventionsFromSupabase(): Promise<void> {
@@ -9139,6 +9278,112 @@ app.delete('/api/addresses/:addressId/people/:personId', requireAuth, async (req
   const { error } = await supabaseAdmin.from('known_people').delete().eq('id', (req.params.personId as string));
   if (error) console.error('[Supabase] Failed to persist known person deletion:', error.message);
   res.json({ success: true });
+});
+
+// ─── Authorized pickup list (per child, not per address) ────────────────
+app.get('/api/family/pickup-list', requireAuth, (req, res) => {
+  const childUserId = req.query.childUserId as string;
+  if (!childUserId) return res.status(400).json({ error: 'childUserId required' });
+  if (!canAccessFamilyMemberData(childUserId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
+  res.json(authorizedPickupPeople.get(childUserId) || []);
+});
+
+app.post('/api/family/pickup-list', requireAuth, async (req, res) => {
+  const { childUserId, name, relationship, phone, photoUrl, notes } = req.body;
+  if (!childUserId || !name) return res.status(400).json({ error: 'childUserId and name are required' });
+  const caller = req.supabaseUser!;
+  if (!canAccessFamilyMemberData(childUserId, caller)) return res.status(403).json({ error: 'Not authorized' });
+  const now = Date.now();
+  const person: AuthorizedPickupPerson = {
+    id: uuidv4(), childUserId, name,
+    relationship: relationship || undefined, phone: phone || undefined,
+    photoUrl: photoUrl || undefined, notes: notes || undefined,
+    addedBy: caller.id, createdAt: now, updatedAt: now,
+  };
+  if (!authorizedPickupPeople.has(childUserId)) authorizedPickupPeople.set(childUserId, []);
+  authorizedPickupPeople.get(childUserId)!.push(person);
+  const { error } = await supabaseAdmin.from('authorized_pickup_people').insert({
+    id: person.id, child_user_id: childUserId, name: person.name,
+    relationship: person.relationship || null, phone: person.phone || null,
+    photo_url: person.photoUrl || null, notes: person.notes || null,
+    added_by: person.addedBy, created_at: now, updated_at: now,
+  });
+  if (error) console.error('[Supabase] Failed to persist pickup person:', error.message);
+  res.status(201).json(person);
+});
+
+app.put('/api/family/pickup-list/:id', requireAuth, async (req, res) => {
+  const caller = req.supabaseUser!;
+  let found: AuthorizedPickupPerson | undefined;
+  let list: AuthorizedPickupPerson[] | undefined;
+  for (const people of authorizedPickupPeople.values()) {
+    const p = people.find(x => x.id === (req.params.id as string));
+    if (p) { found = p; list = people; break; }
+  }
+  if (!found || !list) return res.status(404).json({ error: 'Person not found' });
+  if (!canAccessFamilyMemberData(found.childUserId, caller)) return res.status(403).json({ error: 'Not authorized' });
+  const { name, relationship, phone, photoUrl, notes } = req.body;
+  found.name = name ?? found.name;
+  found.relationship = relationship !== undefined ? relationship : found.relationship;
+  found.phone = phone !== undefined ? phone : found.phone;
+  found.photoUrl = photoUrl !== undefined ? photoUrl : found.photoUrl;
+  found.notes = notes !== undefined ? notes : found.notes;
+  found.updatedAt = Date.now();
+  const { error } = await supabaseAdmin.from('authorized_pickup_people').update({
+    name: found.name, relationship: found.relationship || null, phone: found.phone || null,
+    photo_url: found.photoUrl || null, notes: found.notes || null, updated_at: found.updatedAt,
+  }).eq('id', found.id);
+  if (error) console.error('[Supabase] Failed to persist pickup person update:', error.message);
+  res.json(found);
+});
+
+app.delete('/api/family/pickup-list/:id', requireAuth, async (req, res) => {
+  const caller = req.supabaseUser!;
+  let ownerList: AuthorizedPickupPerson[] | undefined;
+  let idx = -1;
+  for (const people of authorizedPickupPeople.values()) {
+    const i = people.findIndex(x => x.id === (req.params.id as string));
+    if (i !== -1) { ownerList = people; idx = i; break; }
+  }
+  if (!ownerList || idx === -1) return res.status(404).json({ error: 'Person not found' });
+  if (!canAccessFamilyMemberData(ownerList[idx].childUserId, caller)) return res.status(403).json({ error: 'Not authorized' });
+  ownerList.splice(idx, 1);
+  const { error } = await supabaseAdmin.from('authorized_pickup_people').delete().eq('id', (req.params.id as string));
+  if (error) console.error('[Supabase] Failed to persist pickup person deletion:', error.message);
+  res.json({ success: true });
+});
+
+// ─── Emergency medical info card (one per person) ────────────────────────
+app.get('/api/family/medical-info', requireAuth, (req, res) => {
+  const userId = req.query.userId as string;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  if (!canAccessFamilyMemberData(userId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
+  res.json(medicalInfoByUser.get(userId) || null);
+});
+
+app.put('/api/family/medical-info', requireAuth, async (req, res) => {
+  const { userId, bloodType, allergies, conditions, medications, physicianName, physicianPhone, emergencyContactName, emergencyContactPhone, notes } = req.body;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  const caller = req.supabaseUser!;
+  if (!canAccessFamilyMemberData(userId, caller)) return res.status(403).json({ error: 'Not authorized' });
+  const now = Date.now();
+  const record: MedicalInfo = {
+    userId, bloodType: bloodType || undefined, allergies: allergies || undefined,
+    conditions: conditions || undefined, medications: medications || undefined,
+    physicianName: physicianName || undefined, physicianPhone: physicianPhone || undefined,
+    emergencyContactName: emergencyContactName || undefined, emergencyContactPhone: emergencyContactPhone || undefined,
+    notes: notes || undefined, updatedBy: caller.id, updatedAt: now,
+  };
+  medicalInfoByUser.set(userId, record);
+  const { error } = await supabaseAdmin.from('medical_info').upsert({
+    user_id: userId, blood_type: record.bloodType || null, allergies: record.allergies || null,
+    conditions: record.conditions || null, medications: record.medications || null,
+    physician_name: record.physicianName || null, physician_phone: record.physicianPhone || null,
+    emergency_contact_name: record.emergencyContactName || null, emergency_contact_phone: record.emergencyContactPhone || null,
+    notes: record.notes || null, updated_by: record.updatedBy, updated_at: now,
+  });
+  if (error) console.error('[Supabase] Failed to persist medical info:', error.message);
+  res.json(record);
 });
 
 // GET /api/addresses/:addressId/guests

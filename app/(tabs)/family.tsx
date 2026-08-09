@@ -148,6 +148,34 @@ interface PlannedIntervention {
   notes?: string;
 }
 
+interface AuthorizedPickupPerson {
+  id: string;
+  childUserId: string;
+  name: string;
+  relationship?: string;
+  phone?: string;
+  photoUrl?: string;
+  notes?: string;
+  addedBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface MedicalInfo {
+  userId: string;
+  bloodType?: string;
+  allergies?: string;
+  conditions?: string;
+  medications?: string;
+  physicianName?: string;
+  physicianPhone?: string;
+  emergencyContactName?: string;
+  emergencyContactPhone?: string;
+  notes?: string;
+  updatedBy: string;
+  updatedAt: number;
+}
+
 const PROVIDER_CATEGORIES: { key: string; label: string; icon: string }[] = [
   { key: 'jardinier', label: 'Jardinier', icon: '🌳' },
   { key: 'piscine', label: 'Piscine', icon: '🏊' },
@@ -345,6 +373,36 @@ export default function FamilyScreen() {
   const [interventionRecurringWeekly, setInterventionRecurringWeekly] = useState(false);
   const [interventionNotes, setInterventionNotes] = useState('');
   const [interventionSaving, setInterventionSaving] = useState(false);
+
+  // Pickup list — people authorized to retrieve a child, per child.
+  const [showPickupModal, setShowPickupModal] = useState(false);
+  const [pickupTarget, setPickupTarget] = useState<FamilyMember | null>(null);
+  const [pickupList, setPickupList] = useState<AuthorizedPickupPerson[]>([]);
+  const [pickupLoading, setPickupLoading] = useState(false);
+  const [showAddPickupForm, setShowAddPickupForm] = useState(false);
+  const [pickupName, setPickupName] = useState('');
+  const [pickupRelationship, setPickupRelationship] = useState('');
+  const [pickupPhone, setPickupPhone] = useState('');
+  const [pickupNotes, setPickupNotes] = useState('');
+  const [pickupSaving, setPickupSaving] = useState(false);
+
+  // Emergency medical info card — one per person.
+  const [showMedicalModal, setShowMedicalModal] = useState(false);
+  const [medicalTarget, setMedicalTarget] = useState<FamilyMember | null>(null);
+  const [medicalLoading, setMedicalLoading] = useState(false);
+  const [medicalSaving, setMedicalSaving] = useState(false);
+  const [medicalBloodType, setMedicalBloodType] = useState('');
+  const [medicalAllergies, setMedicalAllergies] = useState('');
+  const [medicalConditions, setMedicalConditions] = useState('');
+  const [medicalMedications, setMedicalMedications] = useState('');
+  const [medicalPhysicianName, setMedicalPhysicianName] = useState('');
+  const [medicalPhysicianPhone, setMedicalPhysicianPhone] = useState('');
+  const [medicalEmergencyContactName, setMedicalEmergencyContactName] = useState('');
+  const [medicalEmergencyContactPhone, setMedicalEmergencyContactPhone] = useState('');
+  const [medicalNotes, setMedicalNotes] = useState('');
+
+  // Quick alerts (malaise / colis suspect) — mirrors POST /api/family/quick-alert.
+  const [quickAlertSending, setQuickAlertSending] = useState<'malaise' | 'colis_suspect' | null>(null);
 
   // Address autocomplete
   const [addressSuggestions, setAddressSuggestions] = useState<Array<{ display_name: string; lat: string; lon: string }>>([]);
@@ -1281,6 +1339,174 @@ export default function FamilyScreen() {
     ]);
   }, [BASE, fetchItineraries]);
 
+  // ─── Pickup List CRUD ────────────────────────────────────────────────────
+
+  const resetPickupForm = () => {
+    setPickupName(''); setPickupRelationship(''); setPickupPhone(''); setPickupNotes(''); setShowAddPickupForm(false);
+  };
+
+  const openPickupModal = useCallback(async (member: FamilyMember) => {
+    setPickupTarget(member);
+    setShowPickupModal(true);
+    resetPickupForm();
+    setPickupList([]);
+    setPickupLoading(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family/pickup-list?childUserId=${member.userId}`, { timeout: 10000, headers: await authHeader() });
+      const data = await res.json();
+      setPickupList(Array.isArray(data) ? data : []);
+    } catch (e) {
+      console.error('[Family] Error fetching pickup list:', e);
+    }
+    setPickupLoading(false);
+  }, [BASE]);
+
+  const handleAddPickupPerson = useCallback(async () => {
+    if (!pickupTarget || !pickupName.trim()) return;
+    setPickupSaving(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family/pickup-list`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({
+          childUserId: pickupTarget.userId,
+          name: pickupName.trim(),
+          relationship: pickupRelationship.trim() || undefined,
+          phone: pickupPhone.trim() || undefined,
+          notes: pickupNotes.trim() || undefined,
+        }),
+        timeout: 10000,
+      });
+      if (res.ok) {
+        const person = await res.json();
+        setPickupList(prev => [...prev, person]);
+        resetPickupForm();
+      } else {
+        Alert.alert('Erreur', 'Impossible d\'ajouter cette personne');
+      }
+    } catch (e) {
+      Alert.alert('Erreur', 'Erreur réseau');
+    }
+    setPickupSaving(false);
+  }, [BASE, pickupTarget, pickupName, pickupRelationship, pickupPhone, pickupNotes]);
+
+  const handleDeletePickupPerson = useCallback((person: AuthorizedPickupPerson) => {
+    Alert.alert('Supprimer', `Retirer ${person.name} de la liste des personnes autorisées ?`, [
+      { text: 'Annuler', style: 'cancel' },
+      {
+        text: 'Supprimer', style: 'destructive', onPress: async () => {
+          try {
+            await fetchWithTimeout(`${BASE}/api/family/pickup-list/${person.id}`, { method: 'DELETE', headers: await authHeader(), timeout: 10000 });
+            setPickupList(prev => prev.filter(p => p.id !== person.id));
+          } catch (e) {
+            console.error('[Family] Error deleting pickup person:', e);
+          }
+        },
+      },
+    ]);
+  }, [BASE]);
+
+  // ─── Medical Info Card ───────────────────────────────────────────────────
+
+  const resetMedicalForm = () => {
+    setMedicalBloodType(''); setMedicalAllergies(''); setMedicalConditions(''); setMedicalMedications('');
+    setMedicalPhysicianName(''); setMedicalPhysicianPhone('');
+    setMedicalEmergencyContactName(''); setMedicalEmergencyContactPhone(''); setMedicalNotes('');
+  };
+
+  const openMedicalModal = useCallback(async (member: FamilyMember) => {
+    setMedicalTarget(member);
+    setShowMedicalModal(true);
+    resetMedicalForm();
+    setMedicalLoading(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family/medical-info?userId=${member.userId}`, { timeout: 10000, headers: await authHeader() });
+      const data: MedicalInfo | null = await res.json();
+      if (data) {
+        setMedicalBloodType(data.bloodType || '');
+        setMedicalAllergies(data.allergies || '');
+        setMedicalConditions(data.conditions || '');
+        setMedicalMedications(data.medications || '');
+        setMedicalPhysicianName(data.physicianName || '');
+        setMedicalPhysicianPhone(data.physicianPhone || '');
+        setMedicalEmergencyContactName(data.emergencyContactName || '');
+        setMedicalEmergencyContactPhone(data.emergencyContactPhone || '');
+        setMedicalNotes(data.notes || '');
+      }
+    } catch (e) {
+      console.error('[Family] Error fetching medical info:', e);
+    }
+    setMedicalLoading(false);
+  }, [BASE]);
+
+  const handleSaveMedicalInfo = useCallback(async () => {
+    if (!medicalTarget) return;
+    setMedicalSaving(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family/medical-info`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({
+          userId: medicalTarget.userId,
+          bloodType: medicalBloodType.trim() || undefined,
+          allergies: medicalAllergies.trim() || undefined,
+          conditions: medicalConditions.trim() || undefined,
+          medications: medicalMedications.trim() || undefined,
+          physicianName: medicalPhysicianName.trim() || undefined,
+          physicianPhone: medicalPhysicianPhone.trim() || undefined,
+          emergencyContactName: medicalEmergencyContactName.trim() || undefined,
+          emergencyContactPhone: medicalEmergencyContactPhone.trim() || undefined,
+          notes: medicalNotes.trim() || undefined,
+        }),
+        timeout: 10000,
+      });
+      if (res.ok) {
+        Alert.alert('Enregistré', 'Fiche médicale mise à jour.');
+        setShowMedicalModal(false);
+      } else {
+        Alert.alert('Erreur', 'Impossible d\'enregistrer la fiche médicale');
+      }
+    } catch (e) {
+      Alert.alert('Erreur', 'Erreur réseau');
+    }
+    setMedicalSaving(false);
+  }, [BASE, medicalTarget, medicalBloodType, medicalAllergies, medicalConditions, medicalMedications, medicalPhysicianName, medicalPhysicianPhone, medicalEmergencyContactName, medicalEmergencyContactPhone, medicalNotes]);
+
+  // ─── Quick Alerts (malaise / colis suspect) ─────────────────────────────
+
+  const sendQuickAlert = useCallback((type: 'malaise' | 'colis_suspect') => {
+    const label = type === 'malaise' ? 'signaler que vous ne vous sentez pas bien' : 'signaler un colis suspect';
+    Alert.alert(
+      type === 'malaise' ? 'Signaler un malaise' : 'Signaler un colis suspect',
+      `Confirmer : ${label} ? Votre équipe sécurité${type === 'malaise' ? ' et vos proches' : ''} seront alertés immédiatement.`,
+      [
+        { text: 'Annuler', style: 'cancel' },
+        {
+          text: 'Confirmer', style: 'destructive', onPress: async () => {
+            setQuickAlertSending(type);
+            try {
+              const res = await fetchWithTimeout(`${BASE}/api/family/quick-alert`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+                body: JSON.stringify({ type }),
+                timeout: 10000,
+              });
+              if (res.ok) {
+                if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                Alert.alert('Envoyé', 'Votre signalement a été transmis.');
+              } else {
+                Alert.alert('Erreur', 'Impossible d\'envoyer le signalement');
+              }
+            } catch (e) {
+              Alert.alert('Erreur', 'Erreur réseau');
+            }
+            setQuickAlertSending(null);
+          },
+        },
+      ]
+    );
+  }, [BASE]);
+
   // ─── Acknowledge Alert ──────────────────────────────────────────────────
 
   const acknowledgeAlert = useCallback(async (alertId: string) => {
@@ -1339,6 +1565,10 @@ export default function FamilyScreen() {
           >
             <IconSymbol name="airplane" size={18} color="#1e3a5f" />
             <Text style={styles.actionBtnText}>Voyage</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.actionBtn} onPress={() => openMedicalModal(selfMember)}>
+            <IconSymbol name="cross.case.fill" size={18} color="#1e3a5f" />
+            <Text style={styles.actionBtnText}>Fiche médicale</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -1506,6 +1736,20 @@ export default function FamilyScreen() {
         >
           <IconSymbol name="checkmark.seal.fill" size={18} color="#1e3a5f" />
           <Text style={styles.actionBtnText}>Check-in</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.actionBtn}
+          onPress={() => openPickupModal(item)}
+        >
+          <IconSymbol name="person.badge.key.fill" size={18} color="#1e3a5f" />
+          <Text style={styles.actionBtnText}>Personnes autorisées</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.actionBtn}
+          onPress={() => openMedicalModal(item)}
+        >
+          <IconSymbol name="cross.case.fill" size={18} color="#1e3a5f" />
+          <Text style={styles.actionBtnText}>Fiche médicale</Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -1857,6 +2101,25 @@ export default function FamilyScreen() {
           ) : (
             <Switch value={autoTrackingEnabled} onValueChange={toggleAutoTracking} />
           )}
+        </View>
+      )}
+
+      {!isStaff && (
+        <View style={styles.quickAlertRow}>
+          <TouchableOpacity
+            style={styles.quickAlertBtn}
+            onPress={() => sendQuickAlert('colis_suspect')}
+            disabled={quickAlertSending !== null}
+          >
+            {quickAlertSending === 'colis_suspect' ? (
+              <ActivityIndicator size="small" color="#B45309" />
+            ) : (
+              <>
+                <Text style={styles.quickAlertBtnIcon}>📦</Text>
+                <Text style={styles.quickAlertBtnText}>Colis suspect</Text>
+              </>
+            )}
+          </TouchableOpacity>
         </View>
       )}
 
@@ -2691,6 +2954,110 @@ export default function FamilyScreen() {
           </ScrollView>
         </View>
       </Modal>
+
+      <Modal visible={showPickupModal} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowPickupModal(false)}>
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Personnes autorisées — {pickupTarget?.name}</Text>
+            <TouchableOpacity onPress={() => { setShowPickupModal(false); setPickupTarget(null); }}>
+              <IconSymbol name="xmark.circle.fill" size={28} color="#6B7280" />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView style={{ padding: 16 }}>
+            <Text style={styles.emptySubtitle}>
+              Personnes autorisées à récupérer {pickupTarget?.name} (école, activités, etc.).
+            </Text>
+
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, marginBottom: 8 }}>
+              <Text style={styles.formLabel}>Liste</Text>
+              <TouchableOpacity onPress={() => setShowAddPickupForm(v => !v)}>
+                <Text style={styles.providerAddLink}>{showAddPickupForm ? 'Annuler' : '+ Ajouter'}</Text>
+              </TouchableOpacity>
+            </View>
+
+            {showAddPickupForm && (
+              <View style={styles.providerFormCard}>
+                <TextInput style={styles.textInput} value={pickupName} onChangeText={setPickupName} placeholder="Nom" placeholderTextColor="#9CA3AF" />
+                <TextInput style={styles.textInput} value={pickupRelationship} onChangeText={setPickupRelationship} placeholder="Lien (ex: grand-mère, nounou)" placeholderTextColor="#9CA3AF" />
+                <TextInput style={styles.textInput} value={pickupPhone} onChangeText={setPickupPhone} placeholder="Téléphone (optionnel)" placeholderTextColor="#9CA3AF" keyboardType="phone-pad" />
+                <TextInput style={styles.textInput} value={pickupNotes} onChangeText={setPickupNotes} placeholder="Notes (optionnel)" placeholderTextColor="#9CA3AF" />
+                <TouchableOpacity style={[styles.createBtn, pickupSaving && { opacity: 0.6 }]} onPress={handleAddPickupPerson} disabled={pickupSaving || !pickupName.trim()}>
+                  {pickupSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.createBtnText}>Enregistrer</Text>}
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {pickupLoading ? (
+              <ActivityIndicator color="#1e3a5f" style={{ marginTop: 20 }} />
+            ) : pickupList.length === 0 ? (
+              <Text style={styles.emptySubtitle}>Aucune personne autorisée enregistrée.</Text>
+            ) : (
+              pickupList.map(p => (
+                <View key={p.id} style={styles.providerRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.providerName}>🧑 {p.name}</Text>
+                    {!!p.relationship && <Text style={styles.providerDetail}>{p.relationship}</Text>}
+                    {!!p.phone && <Text style={styles.providerDetail}>{p.phone}</Text>}
+                    {!!p.notes && <Text style={styles.providerDetail}>{p.notes}</Text>}
+                  </View>
+                  <TouchableOpacity onPress={() => handleDeletePickupPerson(p)}>
+                    <IconSymbol name="trash.fill" size={18} color="#EF4444" />
+                  </TouchableOpacity>
+                </View>
+              ))
+            )}
+          </ScrollView>
+        </View>
+      </Modal>
+
+      <Modal visible={showMedicalModal} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowMedicalModal(false)}>
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Fiche médicale — {medicalTarget?.name}</Text>
+            <TouchableOpacity onPress={() => { setShowMedicalModal(false); setMedicalTarget(null); }}>
+              <IconSymbol name="xmark.circle.fill" size={28} color="#6B7280" />
+            </TouchableOpacity>
+          </View>
+
+          {medicalLoading ? (
+            <ActivityIndicator color="#1e3a5f" style={{ marginTop: 20 }} />
+          ) : (
+            <ScrollView style={{ padding: 16 }}>
+              <Text style={styles.emptySubtitle}>
+                Visible par vous, votre famille et votre équipe sécurité en cas d&apos;urgence.
+              </Text>
+
+              <Text style={[styles.formLabel, { marginTop: 12 }]}>Groupe sanguin</Text>
+              <TextInput style={styles.textInput} value={medicalBloodType} onChangeText={setMedicalBloodType} placeholder="ex: O+" placeholderTextColor="#9CA3AF" />
+
+              <Text style={styles.formLabel}>Allergies</Text>
+              <TextInput style={styles.textInput} value={medicalAllergies} onChangeText={setMedicalAllergies} placeholder="ex: pénicilline, arachides" placeholderTextColor="#9CA3AF" />
+
+              <Text style={styles.formLabel}>Conditions médicales</Text>
+              <TextInput style={styles.textInput} value={medicalConditions} onChangeText={setMedicalConditions} placeholder="ex: asthme, diabète" placeholderTextColor="#9CA3AF" />
+
+              <Text style={styles.formLabel}>Médicaments</Text>
+              <TextInput style={styles.textInput} value={medicalMedications} onChangeText={setMedicalMedications} placeholder="Traitements en cours" placeholderTextColor="#9CA3AF" />
+
+              <Text style={styles.formLabel}>Médecin traitant</Text>
+              <TextInput style={styles.textInput} value={medicalPhysicianName} onChangeText={setMedicalPhysicianName} placeholder="Nom" placeholderTextColor="#9CA3AF" />
+              <TextInput style={styles.textInput} value={medicalPhysicianPhone} onChangeText={setMedicalPhysicianPhone} placeholder="Téléphone" placeholderTextColor="#9CA3AF" keyboardType="phone-pad" />
+
+              <Text style={styles.formLabel}>Contact d&apos;urgence</Text>
+              <TextInput style={styles.textInput} value={medicalEmergencyContactName} onChangeText={setMedicalEmergencyContactName} placeholder="Nom" placeholderTextColor="#9CA3AF" />
+              <TextInput style={styles.textInput} value={medicalEmergencyContactPhone} onChangeText={setMedicalEmergencyContactPhone} placeholder="Téléphone" placeholderTextColor="#9CA3AF" keyboardType="phone-pad" />
+
+              <Text style={styles.formLabel}>Notes</Text>
+              <TextInput style={styles.textInput} value={medicalNotes} onChangeText={setMedicalNotes} placeholder="Notes additionnelles (optionnel)" placeholderTextColor="#9CA3AF" />
+
+              <TouchableOpacity style={[styles.createBtn, medicalSaving && { opacity: 0.6 }, { marginTop: 16, marginBottom: 32 }]} onPress={handleSaveMedicalInfo} disabled={medicalSaving}>
+                {medicalSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.createBtnText}>Enregistrer</Text>}
+              </TouchableOpacity>
+            </ScrollView>
+          )}
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -2762,6 +3129,29 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#9CA3AF',
     marginTop: 2,
+  },
+  quickAlertRow: {
+    marginHorizontal: 16,
+    marginBottom: 12,
+  },
+  quickAlertBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: 10,
+    backgroundColor: '#FEF3C7',
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+  },
+  quickAlertBtnIcon: {
+    fontSize: 16,
+  },
+  quickAlertBtnText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#B45309',
   },
   myPresenceBtn: {
     paddingVertical: 8,

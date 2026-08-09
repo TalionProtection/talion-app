@@ -144,6 +144,7 @@ export default function HomeScreen() {
   const [userStatus, setUserStatus] = useState<UserStatus>('available');
   const [showAlertModal, setShowAlertModal] = useState(false);
   const [kidSosMode, setKidSosMode] = useState(false); // family accounts can switch the SOS button to the simplified kid variant before handing the phone over
+  const [malaiseSending, setMalaiseSending] = useState(false);
   const [incidentFilter, setIncidentFilter] = useState<'all' | 'assigned'>('all');
   const { sendLocation, isConnected: wsConnected } = useWebSocketProvider();
   const sharingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -260,6 +261,39 @@ export default function HomeScreen() {
     // Refresh alerts after SOS to show the new alert immediately
     setTimeout(() => refreshAlerts(), 2000);
     Alert.alert('SOS Activated', 'Emergency services have been notified of your location');
+  };
+
+  const handleMalaiseAlert = () => {
+    Alert.alert(
+      'Je ne me sens pas bien',
+      'Confirmer : signaler que vous ne vous sentez pas bien ? Votre équipe sécurité et vos proches seront alertés immédiatement.',
+      [
+        { text: 'Annuler', style: 'cancel' },
+        {
+          text: 'Confirmer', style: 'destructive', onPress: async () => {
+            setMalaiseSending(true);
+            try {
+              const apiBase = getApiBaseUrl();
+              const res = await fetchWithTimeout(`${apiBase}/api/family/quick-alert`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+                body: JSON.stringify({ type: 'malaise' }),
+                timeout: 10000,
+              });
+              if (res.ok) {
+                setTimeout(() => refreshAlerts(), 2000);
+                Alert.alert('Envoyé', 'Votre signalement a été transmis.');
+              } else {
+                Alert.alert('Erreur', 'Impossible d\'envoyer le signalement');
+              }
+            } catch (e) {
+              Alert.alert('Erreur', 'Erreur réseau');
+            }
+            setMalaiseSending(false);
+          },
+        },
+      ]
+    );
   };
 
   const handleRespondToIncident = (incident: Incident) => {
@@ -679,6 +713,15 @@ export default function HomeScreen() {
         {user?.role === 'user' && (
           <TouchableOpacity onPress={() => setKidSosMode(v => !v)} style={styles.kidSosToggle}>
             <Text style={styles.kidSosToggleText}>{kidSosMode ? '← Revenir au mode standard' : 'Mode enfant 🖐️'}</Text>
+          </TouchableOpacity>
+        )}
+        {user?.role === 'user' && !kidSosMode && (
+          <TouchableOpacity onPress={handleMalaiseAlert} style={styles.malaiseBtn} disabled={malaiseSending}>
+            {malaiseSending ? (
+              <ActivityIndicator size="small" color="#B45309" />
+            ) : (
+              <Text style={styles.malaiseBtnText}>⚕️ Je ne me sens pas bien</Text>
+            )}
           </TouchableOpacity>
         )}
       </View>
@@ -1112,5 +1155,19 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#6b7280',
     fontWeight: '600',
+  },
+  malaiseBtn: {
+    marginTop: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 10,
+    backgroundColor: '#FEF3C7',
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+  },
+  malaiseBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#B45309',
   },
 });
