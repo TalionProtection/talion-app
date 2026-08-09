@@ -38,7 +38,7 @@ interface DestinationLocation {
 const EMERGENCY_CONTACT: CallContact = { id: 'sos-112', name: 'Secours (112)', phone: '112', urgent: true };
 
 export default function ChildHomeScreen() {
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   const router = useRouter();
   const { location } = useLocation();
   const [malaiseSending, setMalaiseSending] = useState(false);
@@ -130,6 +130,13 @@ export default function ChildHomeScreen() {
     });
   };
 
+  const handleLogout = () => {
+    Alert.alert('Se déconnecter', 'Confirmer la déconnexion de ce compte ?', [
+      { text: 'Annuler', style: 'cancel' },
+      { text: 'Se déconnecter', style: 'destructive', onPress: () => { logout(); } },
+    ]);
+  };
+
   const mapPoints = [
     location?.latitude != null ? { key: 'me', label: 'Toi', color: '#3B82F6', coords: { latitude: location.latitude, longitude: location.longitude } } : null,
     homeAddress ? { key: 'home', label: 'Maison', color: '#22C55E', coords: homeAddress } : null,
@@ -191,6 +198,10 @@ export default function ChildHomeScreen() {
             <Text style={styles.callBtnText}>{c.urgent ? c.name : `Appeler ${c.name}`}</Text>
           </TouchableOpacity>
         ))}
+
+        <TouchableOpacity onPress={handleLogout} style={styles.logoutLink} hitSlop={8}>
+          <Text style={styles.logoutLinkText}>Se déconnecter</Text>
+        </TouchableOpacity>
       </ScrollView>
     </SafeAreaView>
   );
@@ -221,4 +232,6 @@ const styles = StyleSheet.create({
   callBtnUrgent: { backgroundColor: '#DC2626' },
   callBtnIcon: { fontSize: 22 },
   callBtnText: { fontSize: 18, fontWeight: '800', color: '#fff' },
+  logoutLink: { marginTop: 24, padding: 8 },
+  logoutLinkText: { fontSize: 12, color: '#9CA3AF', fontWeight: '600' },
 });
