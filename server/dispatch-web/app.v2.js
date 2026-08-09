@@ -2169,8 +2169,16 @@ function renderInterventions() {
         <div class="provider-row-name">${escapeHtml(iv.personName)}</div>
         <div class="provider-row-detail">${formatInterventionDate(iv.scheduledStart, iv.recurrence)}</div>
         ${iv.notes ? `<div class="provider-row-detail">${escapeHtml(iv.notes)}</div>` : ''}
+        ${iv.status === 'in_progress' && iv.arrivedAt
+          ? `<div class="provider-row-detail" style="color:#22c55e;">✅ Arrivée confirmée à ${new Date(iv.arrivedAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}</div>`
+          : ''}
       </div>
-      <button class="btn btn-danger btn-sm" onclick="deleteIntervention('${iv.id}')">🗑️</button>
+      <div style="display:flex;gap:6px;">
+        ${iv.status !== 'in_progress' && iv.status !== 'completed' && iv.status !== 'cancelled'
+          ? `<button class="btn btn-primary btn-sm" onclick="confirmInterventionArrival('${iv.id}')">🚗 Arrivée</button>`
+          : ''}
+        <button class="btn btn-danger btn-sm" onclick="deleteIntervention('${iv.id}')">🗑️</button>
+      </div>
     </div>`).join('');
 }
 
@@ -2289,6 +2297,17 @@ async function deleteIntervention(interventionId) {
     showToast('Intervention annulée', 'success');
     await loadProviders();
     loadUpcomingInterventions();
+  } catch (e) {
+    showToast('Erreur', 'error');
+  }
+}
+
+async function confirmInterventionArrival(interventionId) {
+  try {
+    const res = await fetch(`${API_BASE}/api/addresses/${providersAddressId}/interventions/${interventionId}/arrival`, { method: 'POST' });
+    if (!res.ok) throw new Error('failed');
+    showToast('Arrivée confirmée — famille notifiée', 'success');
+    await loadProviders();
   } catch (e) {
     showToast('Erreur', 'error');
   }

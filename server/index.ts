@@ -9085,7 +9085,8 @@ interface PlannedIntervention {
   scheduledStart: number;
   scheduledEnd?: number;
   recurrence?: { frequency: 'weekly'; daysOfWeek: number[] }; // simple weekly recurrence, 0=Sun..6=Sat
-  status: 'scheduled' | 'completed' | 'cancelled';
+  status: 'scheduled' | 'in_progress' | 'completed' | 'cancelled';
+  arrivedAt?: number; // set by POST .../arrival when staff confirms the provider is on-site
   notes?: string;
   createdBy: string;
   createdAt: number;
@@ -9246,7 +9247,7 @@ async function loadPlannedInterventionsFromSupabase(): Promise<void> {
           id: iv.id, addressId: iv.address_id, userId: iv.user_id, personId: iv.person_id || undefined,
           personName: iv.person_name, category: iv.category || undefined,
           scheduledStart: iv.scheduled_start, scheduledEnd: iv.scheduled_end || undefined,
-          recurrence: iv.recurrence || undefined, status: iv.status, notes: iv.notes || undefined,
+          recurrence: iv.recurrence || undefined, status: iv.status, arrivedAt: iv.arrived_at || undefined, notes: iv.notes || undefined,
           createdBy: iv.created_by, createdAt: iv.created_at, updatedAt: iv.updated_at,
         };
         if (!plannedInterventions.has(intervention.addressId)) plannedInterventions.set(intervention.addressId, []);
@@ -9521,6 +9522,61 @@ app.put('/api/family/medical-info', requireAuth, async (req, res) => {
   res.json(record);
 });
 
+// GET /api/family/weekly-summary?userId= - a "here's what your security team
+// did this week" transparency report, computed on-demand from existing data
+// (no new scheduler/persistence for MVP): for each of the target's registered
+// addresses, find nearby patrol sites (same match radius as the occupancy ->
+// patrol-response helper) and aggregate trailing-7-day patrol coverage,
+// nearby alerts by status, and completed provider interventions.
+app.get('/api/family/weekly-summary', requireAuth, (req, res) => {
+  const userId = req.query.userId as string;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  const caller = req.supabaseUser!;
+  if (!canAccessFamilyMemberData(userId, caller)) return res.status(403).json({ error: 'Not authorized' });
+
+  const since = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const addresses = (userAddresses.get(userId) || []).filter(a => a.latitude != null && a.longitude != null);
+  const orgId = adminUsers.get(userId)?.organizationId;
+
+  const residences = addresses.map(addr => {
+    const coords = { latitude: addr.latitude!, longitude: addr.longitude! };
+    const nearbySites = Array.from(patrolSites.values()).filter(site => {
+      if (site.organizationId !== orgId) return false;
+      const siteCoords = resolveSiteDestination(site.id);
+      return siteCoords ? haversineDistance(coords.latitude, coords.longitude, siteCoords.latitude, siteCoords.longitude) <= PATROL_SITE_FAMILY_MATCH_METERS : false;
+    });
+    const siteNames = new Set(nearbySites.map(s => s.name));
+    const weekReports = patrolReports.filter(r => siteNames.has(r.location) && r.createdAt >= since);
+    const patrolCount = weekReports.length;
+    let totalCheckpoints = 0, metCheckpoints = 0;
+    for (const r of weekReports) {
+      for (const cp of r.checkpoints || []) { totalCheckpoints++; if (cp.dwellMet) metCheckpoints++; }
+    }
+    const complianceRate = totalCheckpoints > 0 ? Math.round((metCheckpoints / totalCheckpoints) * 100) : null;
+
+    const nearbyAlerts = Array.from(alerts.values()).filter(a => {
+      if (a.createdAt < since || !a.location) return false;
+      return haversineDistance(coords.latitude, coords.longitude, a.location.latitude, a.location.longitude) <= RISK_SCORE_SITE_RADIUS_METERS;
+    });
+    const alertsByStatus: Record<string, number> = {};
+    for (const a of nearbyAlerts) alertsByStatus[a.status] = (alertsByStatus[a.status] || 0) + 1;
+
+    const interventions = (plannedInterventions.get(addr.id) || []).filter(iv => iv.status === 'completed' && iv.updatedAt >= since);
+
+    return {
+      addressId: addr.id,
+      label: addr.label,
+      patrolRoundsCount: patrolCount,
+      patrolComplianceRate: complianceRate,
+      alertsByStatus,
+      alertsCount: nearbyAlerts.length,
+      completedInterventionsCount: interventions.length,
+    };
+  });
+
+  res.json({ userId, since, until: Date.now(), residences });
+});
+
 // GET /api/addresses/:addressId/guests
 app.get('/api/addresses/:addressId/guests', requireAuth, (req, res) => {
   const ownerId = resolveAddressOwner((req.params.addressId as string));
@@ -9653,6 +9709,32 @@ app.put('/api/addresses/:addressId/interventions/:interventionId', requireAuth, 
   res.json(updated);
 });
 
+// POST /api/addresses/:addressId/interventions/:interventionId/arrival - staff
+// confirms a provider is on-site. Gated by canViewAddressAssets (includes
+// responder), deliberately not the wider canEditAddressAssets — this is a
+// one-way status confirmation a responder should be able to make, not full
+// edit rights over someone else's provider schedule.
+app.post('/api/addresses/:addressId/interventions/:interventionId/arrival', requireAuth, async (req, res) => {
+  const addressId = (req.params.addressId as string);
+  const ownerId = resolveAddressOwner(addressId);
+  if (!ownerId) return res.status(404).json({ error: 'Address not found' });
+  const caller = req.supabaseUser!;
+  if (!canViewAddressAssets(ownerId, caller)) return res.status(403).json({ error: 'Not authorized' });
+  const list = plannedInterventions.get(addressId) || [];
+  const idx = list.findIndex(iv => iv.id === (req.params.interventionId as string));
+  if (idx === -1) return res.status(404).json({ error: 'Intervention not found' });
+  const updated: PlannedIntervention = { ...list[idx], status: 'in_progress', arrivedAt: Date.now(), updatedAt: Date.now() };
+  list[idx] = updated;
+  const { error } = await supabaseAdmin.from('planned_interventions').update({
+    status: updated.status, arrived_at: updated.arrivedAt, updated_at: updated.updatedAt,
+  }).eq('id', updated.id);
+  if (error) console.error('[Supabase] Failed to persist intervention arrival:', error.message);
+  sendFamilyPush([ownerId, ...getFamilyMemberIds(ownerId)], '🚗 Arrivée confirmée',
+    `${updated.personName} est arrivé(e) sur place.`,
+    { type: 'intervention_arrival', interventionId: updated.id, addressId }).catch(() => {});
+  res.json(updated);
+});
+
 // DELETE /api/addresses/:addressId/interventions/:interventionId
 app.delete('/api/addresses/:addressId/interventions/:interventionId', requireAuth, async (req, res) => {
   const addressId = (req.params.addressId as string);
@@ -9744,6 +9826,12 @@ app.put('/api/family/itineraries/:id', requireAuth, async (req, res) => {
     updated_at: updated.updatedAt,
   }).eq('id', updated.id);
   if (error) console.error('[Supabase] Failed to persist travel itinerary update:', error.message);
+  const notifyIds = getFamilyMemberIds(found.userId).filter(id => id !== caller.id);
+  if (notifyIds.length > 0) {
+    sendFamilyPush(notifyIds, '✏️ Plan de voyage modifié',
+      `Le voyage de ${updated.userName} vers ${updated.destinationLabel} a été mis à jour.`,
+      { type: 'itinerary_updated', itineraryId: updated.id }).catch(() => {});
+  }
   res.json(updated);
 });
 
@@ -9777,6 +9865,46 @@ app.get('/api/itineraries/upcoming', requireAuth, (req, res) => {
   }
   results.sort((a, b) => a.departureAt - b.departureAt);
   res.json(results);
+});
+
+// ─── Travel risk (UK GOV.UK FCDO advisories) ─────────────────────────────
+// Public, unauthenticated, free, structured JSON:
+// https://www.gov.uk/api/content/foreign-travel-advice/:countrySlug
+// In-memory cache — no API key/quota to worry about, but no reason to hit it
+// on every screen open either.
+const travelAdvisoryCache = new Map<string, { data: any; cachedAt: number }>();
+const TRAVEL_ADVISORY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+
+app.get('/api/travel-advisory/:countrySlug', requireAuth, async (req, res) => {
+  const slug = (req.params.countrySlug as string).toLowerCase();
+  const cached = travelAdvisoryCache.get(slug);
+  if (cached && Date.now() - cached.cachedAt < TRAVEL_ADVISORY_CACHE_TTL_MS) {
+    return res.json(cached.data);
+  }
+  try {
+    const response = await fetch(`https://www.gov.uk/api/content/foreign-travel-advice/${encodeURIComponent(slug)}`);
+    if (!response.ok) {
+      return res.status(response.status === 404 ? 404 : 502).json({
+        error: response.status === 404 ? 'No advisory found for this destination' : 'Upstream error',
+      });
+    }
+    const json: any = await response.json();
+    const details = json.details || {};
+    const result = {
+      countrySlug: slug,
+      title: json.title || slug,
+      alertStatus: details.alert_status || [],
+      summary: details.summary || '',
+      changeHistory: (details.change_history || []).slice(0, 10),
+      updatedAt: json.updated_at || null,
+      sourceUrl: `https://www.gov.uk/foreign-travel-advice/${slug}`,
+    };
+    travelAdvisoryCache.set(slug, { data: result, cachedAt: Date.now() });
+    res.json(result);
+  } catch (e) {
+    console.error('[TravelAdvisory] fetch error:', e);
+    res.status(502).json({ error: 'Failed to fetch travel advisory' });
+  }
 });
 
 // GET /api/known-people/all — every known provider/visitor across every residence,

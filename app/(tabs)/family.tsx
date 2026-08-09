@@ -162,6 +162,23 @@ interface AuthorizedPickupPerson {
   updatedAt: number;
 }
 
+interface WeeklySummaryResidence {
+  addressId: string;
+  label: string;
+  patrolRoundsCount: number;
+  patrolComplianceRate: number | null;
+  alertsByStatus: Record<string, number>;
+  alertsCount: number;
+  completedInterventionsCount: number;
+}
+
+interface WeeklySummary {
+  userId: string;
+  since: number;
+  until: number;
+  residences: WeeklySummaryResidence[];
+}
+
 interface MedicalInfo {
   userId: string;
   bloodType?: string;
@@ -222,6 +239,10 @@ function formatDate(ts: number): string {
   const d = new Date(ts);
   return d.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 }
+
+const ALERT_STATUS_LABEL: Record<string, string> = {
+  active: 'en cours', acknowledged: 'pris en charge', resolved: 'résolu(s)', cancelled: 'annulé(s)',
+};
 
 function relationLabel(type: string): string {
   const labels: Record<string, string> = {
@@ -337,6 +358,7 @@ export default function FamilyScreen() {
   const [itineraryReturnDate, setItineraryReturnDate] = useState('');
   const [itineraryNotes, setItineraryNotes] = useState('');
   const [itinerarySaving, setItinerarySaving] = useState(false);
+  const [itineraryEditingId, setItineraryEditingId] = useState<string | null>(null);
 
   // Providers/visitors known at a residence (gardener, plumber, etc.) + their
   // planned visits — managed per-address, reachable from a member's card.
@@ -404,6 +426,12 @@ export default function FamilyScreen() {
 
   // Quick alerts (malaise / colis suspect) — mirrors POST /api/family/quick-alert.
   const [quickAlertSending, setQuickAlertSending] = useState<'malaise' | 'colis_suspect' | null>(null);
+
+  // Weekly transparency summary — "here's what your security team did this week".
+  const [showWeeklySummaryModal, setShowWeeklySummaryModal] = useState(false);
+  const [weeklySummaryTarget, setWeeklySummaryTarget] = useState<FamilyMember | null>(null);
+  const [weeklySummaryData, setWeeklySummaryData] = useState<WeeklySummary | null>(null);
+  const [weeklySummaryLoading, setWeeklySummaryLoading] = useState(false);
 
   // Address autocomplete
   const [addressSuggestions, setAddressSuggestions] = useState<Array<{ display_name: string; lat: string; lon: string }>>([]);
@@ -1312,39 +1340,54 @@ export default function FamilyScreen() {
   const resetItineraryForm = () => {
     setItineraryDestLabel(''); setItineraryDestAddress(''); setItineraryDepartureDate('');
     setItineraryReturnDate(''); setItineraryNotes(''); setShowAddItineraryForm(false);
+    setItineraryEditingId(null);
   };
 
-  const createItinerary = useCallback(async () => {
+  const openEditItinerary = useCallback((it: TravelItinerary) => {
+    setItineraryEditingId(it.id);
+    setItineraryDestLabel(it.destinationLabel);
+    setItineraryDestAddress(it.destinationAddress || '');
+    setItineraryDepartureDate(new Date(it.departureAt).toISOString().slice(0, 10));
+    setItineraryReturnDate(it.returnAt ? new Date(it.returnAt).toISOString().slice(0, 10) : '');
+    setItineraryNotes(it.notes || '');
+    setShowAddItineraryForm(true);
+  }, []);
+
+  const saveItinerary = useCallback(async () => {
     if (!itineraryTarget || !itineraryDestLabel.trim() || !itineraryDepartureDate) return;
     const departureAt = new Date(itineraryDepartureDate).getTime();
     if (isNaN(departureAt)) { Alert.alert('Erreur', 'Date de départ invalide'); return; }
     const returnAt = itineraryReturnDate ? new Date(itineraryReturnDate).getTime() : undefined;
     setItinerarySaving(true);
     try {
-      const res = await fetchWithTimeout(`${BASE}/api/family/itineraries`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
-        body: JSON.stringify({
-          userId: itineraryTarget.userId,
-          destinationLabel: itineraryDestLabel.trim(),
-          destinationAddress: itineraryDestAddress.trim() || undefined,
-          departureAt, returnAt,
-          notes: itineraryNotes.trim() || undefined,
-        }),
-        timeout: 10000,
-      });
+      const isEditing = itineraryEditingId !== null;
+      const res = await fetchWithTimeout(
+        isEditing ? `${BASE}/api/family/itineraries/${itineraryEditingId}` : `${BASE}/api/family/itineraries`,
+        {
+          method: isEditing ? 'PUT' : 'POST',
+          headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+          body: JSON.stringify({
+            userId: itineraryTarget.userId,
+            destinationLabel: itineraryDestLabel.trim(),
+            destinationAddress: itineraryDestAddress.trim() || undefined,
+            departureAt, returnAt,
+            notes: itineraryNotes.trim() || undefined,
+          }),
+          timeout: 10000,
+        }
+      );
       if (res.ok) {
         resetItineraryForm();
         fetchItineraries();
       } else {
         const err = await res.json();
-        Alert.alert('Erreur', err.error || 'Impossible de créer l\'itinéraire');
+        Alert.alert('Erreur', err.error || `Impossible d'${isEditing ? 'enregistrer les modifications' : 'créer l\'itinéraire'}`);
       }
     } catch (e) {
       Alert.alert('Erreur', 'Erreur réseau');
     }
     setItinerarySaving(false);
-  }, [BASE, itineraryTarget, itineraryDestLabel, itineraryDestAddress, itineraryDepartureDate, itineraryReturnDate, itineraryNotes, fetchItineraries]);
+  }, [BASE, itineraryTarget, itineraryEditingId, itineraryDestLabel, itineraryDestAddress, itineraryDepartureDate, itineraryReturnDate, itineraryNotes, fetchItineraries]);
 
   const deleteItinerary = useCallback((itinerary: TravelItinerary) => {
     Alert.alert('Supprimer', `Supprimer le voyage vers ${itinerary.destinationLabel} ?`, [
@@ -1530,6 +1573,23 @@ export default function FamilyScreen() {
     );
   }, [BASE]);
 
+  // ─── Weekly Transparency Summary ─────────────────────────────────────────
+
+  const openWeeklySummary = useCallback(async (member: FamilyMember) => {
+    setWeeklySummaryTarget(member);
+    setShowWeeklySummaryModal(true);
+    setWeeklySummaryData(null);
+    setWeeklySummaryLoading(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family/weekly-summary?userId=${member.userId}`, { timeout: 10000, headers: await authHeader() });
+      const data = await res.json();
+      setWeeklySummaryData(data);
+    } catch (e) {
+      console.error('[Family] Error fetching weekly summary:', e);
+    }
+    setWeeklySummaryLoading(false);
+  }, [BASE]);
+
   // ─── Acknowledge Alert ──────────────────────────────────────────────────
 
   const acknowledgeAlert = useCallback(async (alertId: string) => {
@@ -1592,6 +1652,10 @@ export default function FamilyScreen() {
           <TouchableOpacity style={styles.actionBtn} onPress={() => openMedicalModal(selfMember)}>
             <IconSymbol name="cross.case.fill" size={18} color="#1e3a5f" />
             <Text style={styles.actionBtnText}>Fiche médicale</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.actionBtn} onPress={() => openWeeklySummary(selfMember)}>
+            <IconSymbol name="chart.bar.fill" size={18} color="#1e3a5f" />
+            <Text style={styles.actionBtnText}>Résumé hebdo</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -1773,6 +1837,13 @@ export default function FamilyScreen() {
         >
           <IconSymbol name="cross.case.fill" size={18} color="#1e3a5f" />
           <Text style={styles.actionBtnText}>Fiche médicale</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.actionBtn}
+          onPress={() => openWeeklySummary(item)}
+        >
+          <IconSymbol name="chart.bar.fill" size={18} color="#1e3a5f" />
+          <Text style={styles.actionBtnText}>Résumé hebdo</Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -2947,9 +3018,14 @@ export default function FamilyScreen() {
           <ScrollView style={{ padding: 16 }}>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
               <Text style={styles.formLabel}>Voyages annoncés</Text>
-              <TouchableOpacity onPress={() => setShowAddItineraryForm(v => !v)}>
-                <Text style={styles.providerAddLink}>{showAddItineraryForm ? 'Annuler' : '+ Ajouter'}</Text>
-              </TouchableOpacity>
+              <View style={{ flexDirection: 'row', gap: 16 }}>
+                <TouchableOpacity onPress={() => router.push('/travel-risk')}>
+                  <Text style={styles.providerAddLink}>🌍 Zones à éviter</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setShowAddItineraryForm(v => !v)}>
+                  <Text style={styles.providerAddLink}>{showAddItineraryForm ? 'Annuler' : '+ Ajouter'}</Text>
+                </TouchableOpacity>
+              </View>
             </View>
 
             {showAddItineraryForm && (
@@ -2961,8 +3037,8 @@ export default function FamilyScreen() {
                 <Text style={styles.formLabel}>Date de retour (optionnel)</Text>
                 <TextInput style={styles.textInput} value={itineraryReturnDate} onChangeText={setItineraryReturnDate} placeholder="AAAA-MM-JJ" placeholderTextColor="#9CA3AF" />
                 <TextInput style={styles.textInput} value={itineraryNotes} onChangeText={setItineraryNotes} placeholder="Notes (optionnel)" placeholderTextColor="#9CA3AF" />
-                <TouchableOpacity style={[styles.createBtn, itinerarySaving && { opacity: 0.6 }]} onPress={createItinerary} disabled={itinerarySaving || !itineraryDestLabel.trim() || !itineraryDepartureDate}>
-                  {itinerarySaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.createBtnText}>Enregistrer</Text>}
+                <TouchableOpacity style={[styles.createBtn, itinerarySaving && { opacity: 0.6 }]} onPress={saveItinerary} disabled={itinerarySaving || !itineraryDestLabel.trim() || !itineraryDepartureDate}>
+                  {itinerarySaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.createBtnText}>{itineraryEditingId ? 'Enregistrer les modifications' : 'Enregistrer'}</Text>}
                 </TouchableOpacity>
               </View>
             )}
@@ -2980,6 +3056,15 @@ export default function FamilyScreen() {
                     </Text>
                     {!!it.notes && <Text style={styles.providerDetail}>{it.notes}</Text>}
                   </View>
+                  <TouchableOpacity
+                    onPress={() => router.push({ pathname: '/travel-risk', params: { label: it.destinationLabel } })}
+                    style={{ marginRight: 12 }}
+                  >
+                    <Text style={{ fontSize: 16 }}>🌍</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={() => openEditItinerary(it)} style={{ marginRight: 12 }}>
+                    <Text style={{ fontSize: 13, color: '#1e3a5f', fontWeight: '600' }}>✏️ Modifier</Text>
+                  </TouchableOpacity>
                   <TouchableOpacity onPress={() => deleteItinerary(it)}>
                     <IconSymbol name="trash.fill" size={18} color="#EF4444" />
                   </TouchableOpacity>
@@ -3089,6 +3174,50 @@ export default function FamilyScreen() {
               <TouchableOpacity style={[styles.createBtn, medicalSaving && { opacity: 0.6 }, { marginTop: 16, marginBottom: 32 }]} onPress={handleSaveMedicalInfo} disabled={medicalSaving}>
                 {medicalSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.createBtnText}>Enregistrer</Text>}
               </TouchableOpacity>
+            </ScrollView>
+          )}
+        </View>
+      </Modal>
+
+      <Modal visible={showWeeklySummaryModal} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowWeeklySummaryModal(false)}>
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Résumé hebdomadaire — {weeklySummaryTarget?.name}</Text>
+            <TouchableOpacity onPress={() => { setShowWeeklySummaryModal(false); setWeeklySummaryTarget(null); }}>
+              <IconSymbol name="xmark.circle.fill" size={28} color="#6B7280" />
+            </TouchableOpacity>
+          </View>
+
+          {weeklySummaryLoading ? (
+            <ActivityIndicator color="#1e3a5f" style={{ marginTop: 20 }} />
+          ) : (
+            <ScrollView style={{ padding: 16 }}>
+              <Text style={styles.emptySubtitle}>
+                Ce qu&apos;a fait votre équipe sécurité sur les 7 derniers jours.
+              </Text>
+
+              {!weeklySummaryData || weeklySummaryData.residences.length === 0 ? (
+                <Text style={[styles.emptySubtitle, { marginTop: 12 }]}>Aucune résidence enregistrée pour ce membre.</Text>
+              ) : (
+                weeklySummaryData.residences.map(r => (
+                  <View key={r.addressId} style={styles.providerFormCard}>
+                    <Text style={styles.providerName}>🏠 {r.label}</Text>
+                    <View style={{ marginTop: 8, gap: 4 }}>
+                      <Text style={styles.providerDetail}>
+                        🚶 {r.patrolRoundsCount} ronde{r.patrolRoundsCount !== 1 ? 's' : ''} de sécurité effectuée{r.patrolRoundsCount !== 1 ? 's' : ''}
+                        {r.patrolComplianceRate !== null ? ` (${r.patrolComplianceRate}% des points vérifiés)` : ''}
+                      </Text>
+                      <Text style={styles.providerDetail}>
+                        🔔 {r.alertsCount} signalement{r.alertsCount !== 1 ? 's' : ''} à proximité
+                        {r.alertsCount > 0 ? ` (${Object.entries(r.alertsByStatus).map(([status, count]) => `${count} ${ALERT_STATUS_LABEL[status] || status}`).join(', ')})` : ''}
+                      </Text>
+                      <Text style={styles.providerDetail}>
+                        🛠️ {r.completedInterventionsCount} intervention{r.completedInterventionsCount !== 1 ? 's' : ''} de prestataire terminée{r.completedInterventionsCount !== 1 ? 's' : ''}
+                      </Text>
+                    </View>
+                  </View>
+                ))
+              )}
             </ScrollView>
           )}
         </View>
