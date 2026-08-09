@@ -15,7 +15,18 @@
         "keywords": ["sécurité", "famille", "SOS", "urgence", "localisation", "protection", "résidence", "dispatch", "intervenant", "alerte"],
         "releaseNotes": "Version initiale.",
         "privacyPolicyUrl": "https://api.talion.ch/privacy",
-        "supportUrl": "https://api.talion.ch/support"
+        "supportUrl": "https://api.talion.ch/support",
+        "screenshots": {
+          "APP_IPHONE_67": [
+            "./store-assets/ios/6.9/01_home_1320x2868.jpg",
+            "./store-assets/ios/6.9/02_login_1320x2868.jpg",
+            "./store-assets/ios/6.9/03_ptt_1320x2868.jpg",
+            "./store-assets/ios/6.9/04_map_1320x2868.jpg",
+            "./store-assets/ios/6.9/05_messages_1320x2868.jpg",
+            "./store-assets/ios/6.9/06_family_1320x2868.jpg",
+            "./store-assets/ios/6.9/07_profile_1320x2868.jpg"
+          ]
+        }
       }
     },
     "review": {
