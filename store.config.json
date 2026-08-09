@@ -25,6 +25,15 @@
             "./store-assets/ios/6.9/05_messages_1320x2868.jpg",
             "./store-assets/ios/6.9/06_family_1320x2868.jpg",
             "./store-assets/ios/6.9/07_profile_1320x2868.jpg"
+          ],
+          "APP_IPAD_PRO_3GEN_129": [
+            "./store-assets/ios/13/01_home_2064x2752.jpg",
+            "./store-assets/ios/13/02_login_2064x2752.jpg",
+            "./store-assets/ios/13/03_ptt_2064x2752.jpg",
+            "./store-assets/ios/13/04_map_2064x2752.jpg",
+            "./store-assets/ios/13/05_messages_2064x2752.jpg",
+            "./store-assets/ios/13/06_family_2064x2752.jpg",
+            "./store-assets/ios/13/07_profile_2064x2752.jpg"
           ]
         }
       }
