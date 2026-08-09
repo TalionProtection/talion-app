@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, ReactNode } from
 import { createClient, SupabaseClient, Session } from '@supabase/supabase-js';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
+import { websocketService } from '@/services/websocket';
 
 // ─── Supabase client ────────────────────────────────────────────────────────
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL!;
@@ -49,6 +50,7 @@ export interface User {
   tags?: string[];
   ghostMode?: boolean;
   shareLocationWithFamily?: boolean;
+  uiProfile?: 'standard' | 'enfant' | 'ado';
 }
 
 export interface AuthContextType {
@@ -110,6 +112,7 @@ async function fetchUserProfile(userId: string): Promise<User | null> {
       avatar: adminUser.photo_url ?? undefined,
       ghostMode: adminUser.ghost_mode ?? false,
       shareLocationWithFamily: adminUser.share_location_with_family !== false,
+      uiProfile: adminUser.ui_profile ?? 'standard',
     };
   }
 
@@ -184,6 +187,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
 
     return () => subscription.unsubscribe();
+  }, []);
+
+  // Applies a parent's simplified-UI profile change to the child/teen's own
+  // device live, without requiring a re-login — see PUT /api/users/:id/ui-profile.
+  useEffect(() => {
+    const handleUiProfileUpdated = (data: any) => {
+      const payload = data?.data || data;
+      if (!payload?.userId) return;
+      setUser((prev) => (prev && prev.id === payload.userId ? { ...prev, uiProfile: payload.uiProfile } : prev));
+    };
+    websocketService.on('uiProfileUpdated', handleUiProfileUpdated);
+    return () => websocketService.off('uiProfileUpdated', handleUiProfileUpdated);
   }, []);
 
   const login = async (email: string, password: string) => {

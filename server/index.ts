@@ -514,6 +514,12 @@ interface AdminUser {
   // "share for the next 2h while I'm out"). Expires on its own; no explicit
   // "turn back off" action needed.
   shareLocationUntil?: number;
+  // Parent-set simplified-UI mode for a child/teen's own account. undefined
+  // (or 'standard') = the normal adult UI. Only a parent of this account (or
+  // staff) may change it — never the account holder themselves, so a child
+  // can't switch their own phone back to the full UI. See isParentOf and
+  // PUT /api/users/:id/ui-profile.
+  uiProfile?: 'standard' | 'enfant' | 'ado';
   // Duress code: an opt-in alternate SOS-deactivation PIN. Entering the normal
   // PIN cancels SOS exactly as before; entering the duress PIN shows the
   // identical "SOS Désactivé" confirmation but silently raises a real alert to
@@ -2577,6 +2583,15 @@ function sharesLocationWithFamily(adminUser?: { shareLocationWithFamily?: boolea
   return (adminUser.shareLocationUntil ?? 0) > Date.now();
 }
 
+// True iff callerId is recorded as a 'parent' on targetUserId's own
+// relationships (i.e. targetUserId considers callerId their parent) — the
+// gate for parent-only controls over a child/teen's account: simplified-UI
+// profile, and (for 'ado') their base location-sharing toggle.
+function isParentOf(callerId: string, targetUserId: string): boolean {
+  const target = adminUsers.get(targetUserId);
+  return !!target?.relationships?.some(r => r.userId === callerId && r.type === 'parent');
+}
+
 // POST /api/access/emergency-override — break-glass: temporarily lifts the
 // caller's own family-assignment restriction (never affects incidents/alerts,
 // which are already unrestricted for everyone). Every enable/disable is
@@ -4519,9 +4534,35 @@ app.get('/api/family/members', requireAuth, (req, res) => {
         presenceStatus: presence?.status || 'unknown',
         presenceLabel: presence?.matchedLabel,
         presenceSetAt: presence?.setAt,
+        uiProfile: relUser?.uiProfile || 'standard',
+        // Persisted consent toggle, as opposed to `isSharing` above (a
+        // runtime "is this device actively transmitting right now" flag) —
+        // this is what a parent's location-sharing switch on an 'ado'
+        // account should reflect and control.
+        shareLocationWithFamily: relUser?.shareLocationWithFamily !== false,
       };
     });
   res.json(members);
+});
+
+// GET /api/family/parent-contacts?userId= - phone numbers for the 'enfant'
+// simplified UI's "call a parent" screen. A narrow, purpose-built route
+// rather than adding phone numbers to GET /api/family/members generally,
+// which would leak them into every other view of the family list.
+app.get('/api/family/parent-contacts', requireAuth, (req, res) => {
+  const userId = req.query.userId as string;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  if (!canAccessFamilyMemberData(userId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
+  const parentIds = getFamilyParentIds(userId);
+  const contacts = parentIds
+    .map(id => {
+      const p = adminUsers.get(id);
+      const phone = p?.phoneMobile || p?.phoneLandline;
+      if (!p || !phone) return null;
+      return { userId: id, name: p.name, phone };
+    })
+    .filter((c): c is { userId: string; name: string; phone: string } => c !== null);
+  res.json(contacts);
 });
 
 // GET /api/family/presence/:userId - this is the "what is currently being
@@ -6364,14 +6405,17 @@ app.put('/api/users/:id/ghost-mode', requireAuth, (req, res) => {
   res.json({ success: true, ghostMode: user.ghostMode });
 });
 
-// PUT /api/users/:id/location-sharing - self only. Independent of Ghost mode
-// (which only ever affects dispatch's live map). This one controls whether the
-// user's live position/presence is shown to their own family in
-// GET /api/family/members.
+// PUT /api/users/:id/location-sharing - self, a parent of this account, or
+// staff. Independent of Ghost mode (which only ever affects dispatch's live
+// map). This one controls whether the user's live position/presence is shown
+// to their own family in GET /api/family/members. Parent access exists so a
+// parent can manage location sharing for a teen's ('ado' profile) account —
+// see isParentOf.
 app.put('/api/users/:id/location-sharing', requireAuth, (req, res) => {
   const targetId = req.params.id as string;
   const caller = req.supabaseUser!;
-  if (caller.id !== targetId) {
+  const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'superadmin';
+  if (caller.id !== targetId && !isParentOf(caller.id, targetId) && !(isStaff && canAccessOrg(caller, adminUsers.get(targetId)?.organizationId))) {
     return res.status(403).json({ error: 'Not authorized to change this user\'s location sharing' });
   }
   const user = adminUsers.get(targetId);
@@ -6380,6 +6424,36 @@ app.put('/api/users/:id/location-sharing', requireAuth, (req, res) => {
   adminUsers.set(user.id, user);
   saveAdminUserToSupabase(user).catch(e => console.error('[LocationSharing] Supabase save error:', e));
   res.json({ success: true, shareLocationWithFamily: user.shareLocationWithFamily });
+});
+
+// PUT /api/users/:id/ui-profile - parent-of-target or staff only, never the
+// account holder themselves (so a child/teen can't switch their own phone
+// back to the full UI). Switching TO 'ado' also turns on base location
+// sharing by default, per spec — the parent remains free to turn it back off
+// afterwards via the route above.
+app.put('/api/users/:id/ui-profile', requireAuth, (req, res) => {
+  const targetId = req.params.id as string;
+  const caller = req.supabaseUser!;
+  const target = adminUsers.get(targetId);
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'superadmin';
+  if (!isParentOf(caller.id, targetId) && !(isStaff && canAccessOrg(caller, target.organizationId))) {
+    return res.status(403).json({ error: 'Not authorized' });
+  }
+  const { uiProfile } = req.body;
+  if (uiProfile !== 'standard' && uiProfile !== 'enfant' && uiProfile !== 'ado') {
+    return res.status(400).json({ error: "uiProfile must be 'standard', 'enfant' or 'ado'" });
+  }
+  if (uiProfile === 'ado' && target.uiProfile !== 'ado') {
+    target.shareLocationWithFamily = true;
+  }
+  target.uiProfile = uiProfile;
+  adminUsers.set(target.id, target);
+  saveAdminUserToSupabase(target).catch(e => console.error('[UiProfile] Supabase save error:', e));
+  // So the change takes effect on the child/teen's own device without
+  // requiring them to log out and back in.
+  broadcastToUsers([target.id], { type: 'uiProfileUpdated', data: { userId: target.id, uiProfile: target.uiProfile } });
+  res.json({ success: true, uiProfile: target.uiProfile, shareLocationWithFamily: target.shareLocationWithFamily });
 });
 
 // POST /api/users/:id/share-location-temporary - self only. Lets someone who
@@ -8413,6 +8487,7 @@ async function loadAdminUsersFromSupabase(): Promise<void> {
           ghostMode: u.ghost_mode || false,
           shareLocationWithFamily: u.share_location_with_family !== false,
           shareLocationUntil: u.share_location_until || undefined,
+          uiProfile: u.ui_profile || undefined,
           duressCodeEnabled: u.duress_code_enabled || false,
           normalPinHash: u.normal_pin_hash || undefined,
           duressPinHash: u.duress_pin_hash || undefined,
@@ -8542,6 +8617,7 @@ async function saveAdminUserToSupabase(user: AdminUser): Promise<void> {
       ghost_mode: user.ghostMode || false,
       share_location_with_family: user.shareLocationWithFamily !== false,
       share_location_until: user.shareLocationUntil || null,
+      ui_profile: user.uiProfile || null,
       duress_code_enabled: user.duressCodeEnabled || false,
       normal_pin_hash: user.normalPinHash || null,
       duress_pin_hash: user.duressPinHash || null,
@@ -9669,6 +9745,12 @@ app.put('/api/family/medical-info', requireAuth, async (req, res) => {
   if (!userId) return res.status(400).json({ error: 'userId required' });
   const caller = req.supabaseUser!;
   if (!canAccessFamilyMemberData(userId, caller)) return res.status(403).json({ error: 'Not authorized' });
+  // An 'ado' profile can view their own medical info but not edit it — a
+  // parent has to be the one to set it up. Doesn't apply when someone else
+  // (a parent, staff) is doing the editing on the ado's behalf.
+  if (caller.id === userId && adminUsers.get(caller.id)?.uiProfile === 'ado') {
+    return res.status(403).json({ error: 'Not authorized to edit your own medical info' });
+  }
   const now = Date.now();
   const record: MedicalInfo = {
     userId, bloodType: bloodType || undefined, allergies: allergies || undefined,

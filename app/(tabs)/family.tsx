@@ -33,6 +33,8 @@ interface FamilyMember {
   presenceStatus?: 'inside' | 'outside' | 'unknown';
   presenceLabel?: string;
   presenceSetAt?: number;
+  uiProfile?: 'standard' | 'enfant' | 'ado';
+  shareLocationWithFamily?: boolean;
 }
 
 interface FamilyPerimeter {
@@ -440,6 +442,11 @@ export default function FamilyScreen() {
 
   // Quick alerts (malaise / colis suspect) — mirrors POST /api/family/quick-alert.
   const [quickAlertSending, setQuickAlertSending] = useState<'malaise' | 'colis_suspect' | null>(null);
+
+  // Parent-set simplified-UI profile for a child's account — see
+  // PUT /api/users/:id/ui-profile. uiProfileSaving holds the userId currently
+  // being updated (to disable that member's chips while the request is in flight).
+  const [uiProfileSaving, setUiProfileSaving] = useState<string | null>(null);
 
   // Weekly transparency summary — "here's what your security team did this week".
   const [showWeeklySummaryModal, setShowWeeklySummaryModal] = useState(false);
@@ -1604,6 +1611,48 @@ export default function FamilyScreen() {
     );
   }, [BASE]);
 
+  // ─── Simplified-UI Profile (parent-only, for a child's account) ─────────
+
+  const handleSetUiProfile = useCallback(async (member: FamilyMember, uiProfile: 'standard' | 'enfant' | 'ado') => {
+    if (member.uiProfile === uiProfile) return;
+    setUiProfileSaving(member.userId);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/users/${member.userId}/ui-profile`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({ uiProfile }),
+        timeout: 10000,
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setMembers(prev => prev.map(m => m.userId === member.userId ? { ...m, uiProfile: data.uiProfile, shareLocationWithFamily: data.shareLocationWithFamily } : m));
+      } else {
+        Alert.alert('Erreur', 'Impossible de changer le profil d\'interface');
+      }
+    } catch (e) {
+      Alert.alert('Erreur', 'Erreur réseau');
+    }
+    setUiProfileSaving(null);
+  }, [BASE]);
+
+  const handleToggleMemberLocationSharing = useCallback(async (member: FamilyMember) => {
+    const next = !(member.shareLocationWithFamily !== false);
+    setMembers(prev => prev.map(m => m.userId === member.userId ? { ...m, shareLocationWithFamily: next } : m));
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/users/${member.userId}/location-sharing`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({ shareLocationWithFamily: next }),
+        timeout: 10000,
+      });
+      if (!res.ok) throw new Error('request failed');
+    } catch (e) {
+      console.error('[Family] Error toggling member location sharing:', e);
+      setMembers(prev => prev.map(m => m.userId === member.userId ? { ...m, shareLocationWithFamily: !next } : m));
+      Alert.alert('Erreur', 'Impossible de mettre à jour le partage de position');
+    }
+  }, [BASE]);
+
   // ─── Weekly Transparency Summary ─────────────────────────────────────────
 
   const openWeeklySummary = useCallback(async (member: FamilyMember) => {
@@ -1845,6 +1894,13 @@ export default function FamilyScreen() {
   const renderMemberCard = ({ item }: { item: FamilyMember }) => {
     const staleness = stalenessLevel(item.lastSeen);
     const stalenessColor = STALENESS_COLOR[staleness];
+    // Parent-set simplified-UI profile (see PUT /api/users/:id/ui-profile):
+    // an 'ado' caller gets no control over another member's geofencing/alerts.
+    // item.relationship === 'child' means the CALLER's own relationships list
+    // this member as their child — exactly isParentOf's server-side semantics
+    // mirrored client-side, no extra field needed.
+    const isCallerAdo = user?.uiProfile === 'ado';
+    const isMyChild = item.relationship === 'child';
     return (
     <View style={styles.card}>
       <View style={styles.cardHeader}>
@@ -1913,47 +1969,53 @@ export default function FamilyScreen() {
           <IconSymbol name="airplane" size={18} color="#1e3a5f" />
           <Text style={styles.actionBtnText}>Voyage</Text>
         </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.actionBtn}
-          onPress={() => {
-            setPerimeterTarget(item);
-            setShowCreatePerimeter(true);
-          }}
-        >
-          <IconSymbol name="plus.circle.fill" size={18} color="#1e3a5f" />
-          <Text style={styles.actionBtnText}>Périmètre</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.actionBtn}
-          onPress={() => {
-            const existing = perimeters.find(p => p.targetUserId === item.userId && p.active);
-            setCurfewTarget(item);
-            setPerimeterAddress(existing?.center.address || '');
-            setPerimeterCenter(existing ? { latitude: existing.center.latitude, longitude: existing.center.longitude } : null);
-            setPerimeterRadius(existing ? String(existing.radiusMeters) : '500');
-            setCurfewHour('21');
-            setCurfewMinute('00');
-            setCurfewRecurrence('once');
-            setCurfewAlertWhen('exit');
-            setShowCreateCurfew(true);
-          }}
-        >
-          <IconSymbol name="bell.fill" size={18} color="#1e3a5f" />
-          <Text style={styles.actionBtnText}>Couvre-feu</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.actionBtn}
-          onPress={() => {
-            setCheckInTarget(item);
-            setCheckInHour('23');
-            setCheckInMinute('00');
-            setCheckInGraceMinutes('30');
-            setShowCreateCheckIn(true);
-          }}
-        >
-          <IconSymbol name="checkmark.seal.fill" size={18} color="#1e3a5f" />
-          <Text style={styles.actionBtnText}>Check-in</Text>
-        </TouchableOpacity>
+        {!isCallerAdo && (
+          <TouchableOpacity
+            style={styles.actionBtn}
+            onPress={() => {
+              setPerimeterTarget(item);
+              setShowCreatePerimeter(true);
+            }}
+          >
+            <IconSymbol name="plus.circle.fill" size={18} color="#1e3a5f" />
+            <Text style={styles.actionBtnText}>Périmètre</Text>
+          </TouchableOpacity>
+        )}
+        {!isCallerAdo && (
+          <TouchableOpacity
+            style={styles.actionBtn}
+            onPress={() => {
+              const existing = perimeters.find(p => p.targetUserId === item.userId && p.active);
+              setCurfewTarget(item);
+              setPerimeterAddress(existing?.center.address || '');
+              setPerimeterCenter(existing ? { latitude: existing.center.latitude, longitude: existing.center.longitude } : null);
+              setPerimeterRadius(existing ? String(existing.radiusMeters) : '500');
+              setCurfewHour('21');
+              setCurfewMinute('00');
+              setCurfewRecurrence('once');
+              setCurfewAlertWhen('exit');
+              setShowCreateCurfew(true);
+            }}
+          >
+            <IconSymbol name="bell.fill" size={18} color="#1e3a5f" />
+            <Text style={styles.actionBtnText}>Couvre-feu</Text>
+          </TouchableOpacity>
+        )}
+        {!isCallerAdo && (
+          <TouchableOpacity
+            style={styles.actionBtn}
+            onPress={() => {
+              setCheckInTarget(item);
+              setCheckInHour('23');
+              setCheckInMinute('00');
+              setCheckInGraceMinutes('30');
+              setShowCreateCheckIn(true);
+            }}
+          >
+            <IconSymbol name="checkmark.seal.fill" size={18} color="#1e3a5f" />
+            <Text style={styles.actionBtnText}>Check-in</Text>
+          </TouchableOpacity>
+        )}
         <TouchableOpacity
           style={styles.actionBtn}
           onPress={() => openPickupModal(item)}
@@ -1975,14 +2037,42 @@ export default function FamilyScreen() {
           <IconSymbol name="chart.bar.fill" size={18} color="#1e3a5f" />
           <Text style={styles.actionBtnText}>Résumé hebdo</Text>
         </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.actionBtn}
-          onPress={() => openSchoolRouteModal(item)}
-        >
-          <IconSymbol name="map.fill" size={18} color="#1e3a5f" />
-          <Text style={styles.actionBtnText}>Trajet école</Text>
-        </TouchableOpacity>
+        {!isCallerAdo && (
+          <TouchableOpacity
+            style={styles.actionBtn}
+            onPress={() => openSchoolRouteModal(item)}
+          >
+            <IconSymbol name="map.fill" size={18} color="#1e3a5f" />
+            <Text style={styles.actionBtnText}>Trajet école</Text>
+          </TouchableOpacity>
+        )}
       </View>
+
+      {isMyChild && (
+        <View style={styles.uiProfileSection}>
+          <Text style={styles.uiProfileLabel}>Profil d&apos;interface</Text>
+          <View style={styles.memberSelector}>
+            {(['standard', 'enfant', 'ado'] as const).map(profile => (
+              <TouchableOpacity
+                key={profile}
+                style={[styles.memberChip, (item.uiProfile || 'standard') === profile && styles.memberChipActive]}
+                onPress={() => handleSetUiProfile(item, profile)}
+                disabled={uiProfileSaving === item.userId}
+              >
+                <Text style={[styles.memberChipText, (item.uiProfile || 'standard') === profile && styles.memberChipTextActive]}>
+                  {profile === 'standard' ? 'Standard' : profile === 'enfant' ? 'Enfant' : 'Ado'}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          {item.uiProfile === 'ado' && (
+            <View style={styles.uiProfileShareRow}>
+              <Text style={styles.uiProfileShareLabel}>Partage de position</Text>
+              <Switch value={item.shareLocationWithFamily !== false} onValueChange={() => handleToggleMemberLocationSharing(item)} />
+            </View>
+          )}
+        </View>
+      )}
     </View>
     );
   };
@@ -3282,40 +3372,50 @@ export default function FamilyScreen() {
 
           {medicalLoading ? (
             <ActivityIndicator color="#1e3a5f" style={{ marginTop: 20 }} />
-          ) : (
+          ) : (() => {
+            // 'ado' profiles can view their own medical info but not edit it
+            // — a parent has to be the one to set it up (mirrors the server
+            // gate on PUT /api/family/medical-info).
+            const isMedicalReadOnly = user?.uiProfile === 'ado' && medicalTarget?.userId === userId;
+            return (
             <ScrollView style={{ padding: 16 }}>
               <Text style={styles.emptySubtitle}>
-                Visible par vous, votre famille et votre équipe sécurité en cas d&apos;urgence.
+                {isMedicalReadOnly
+                  ? 'Lecture seule — demande à un parent de mettre cette fiche à jour.'
+                  : 'Visible par vous, votre famille et votre équipe sécurité en cas d\'urgence.'}
               </Text>
 
               <Text style={[styles.formLabel, { marginTop: 12 }]}>Groupe sanguin</Text>
-              <TextInput style={styles.textInput} value={medicalBloodType} onChangeText={setMedicalBloodType} placeholder="ex: O+" placeholderTextColor="#9CA3AF" />
+              <TextInput style={styles.textInput} value={medicalBloodType} onChangeText={setMedicalBloodType} placeholder="ex: O+" placeholderTextColor="#9CA3AF" editable={!isMedicalReadOnly} />
 
               <Text style={styles.formLabel}>Allergies</Text>
-              <TextInput style={styles.textInput} value={medicalAllergies} onChangeText={setMedicalAllergies} placeholder="ex: pénicilline, arachides" placeholderTextColor="#9CA3AF" />
+              <TextInput style={styles.textInput} value={medicalAllergies} onChangeText={setMedicalAllergies} placeholder="ex: pénicilline, arachides" placeholderTextColor="#9CA3AF" editable={!isMedicalReadOnly} />
 
               <Text style={styles.formLabel}>Conditions médicales</Text>
-              <TextInput style={styles.textInput} value={medicalConditions} onChangeText={setMedicalConditions} placeholder="ex: asthme, diabète" placeholderTextColor="#9CA3AF" />
+              <TextInput style={styles.textInput} value={medicalConditions} onChangeText={setMedicalConditions} placeholder="ex: asthme, diabète" placeholderTextColor="#9CA3AF" editable={!isMedicalReadOnly} />
 
               <Text style={styles.formLabel}>Médicaments</Text>
-              <TextInput style={styles.textInput} value={medicalMedications} onChangeText={setMedicalMedications} placeholder="Traitements en cours" placeholderTextColor="#9CA3AF" />
+              <TextInput style={styles.textInput} value={medicalMedications} onChangeText={setMedicalMedications} placeholder="Traitements en cours" placeholderTextColor="#9CA3AF" editable={!isMedicalReadOnly} />
 
               <Text style={styles.formLabel}>Médecin traitant</Text>
-              <TextInput style={styles.textInput} value={medicalPhysicianName} onChangeText={setMedicalPhysicianName} placeholder="Nom" placeholderTextColor="#9CA3AF" />
-              <TextInput style={styles.textInput} value={medicalPhysicianPhone} onChangeText={setMedicalPhysicianPhone} placeholder="Téléphone" placeholderTextColor="#9CA3AF" keyboardType="phone-pad" />
+              <TextInput style={styles.textInput} value={medicalPhysicianName} onChangeText={setMedicalPhysicianName} placeholder="Nom" placeholderTextColor="#9CA3AF" editable={!isMedicalReadOnly} />
+              <TextInput style={styles.textInput} value={medicalPhysicianPhone} onChangeText={setMedicalPhysicianPhone} placeholder="Téléphone" placeholderTextColor="#9CA3AF" keyboardType="phone-pad" editable={!isMedicalReadOnly} />
 
               <Text style={styles.formLabel}>Contact d&apos;urgence</Text>
-              <TextInput style={styles.textInput} value={medicalEmergencyContactName} onChangeText={setMedicalEmergencyContactName} placeholder="Nom" placeholderTextColor="#9CA3AF" />
-              <TextInput style={styles.textInput} value={medicalEmergencyContactPhone} onChangeText={setMedicalEmergencyContactPhone} placeholder="Téléphone" placeholderTextColor="#9CA3AF" keyboardType="phone-pad" />
+              <TextInput style={styles.textInput} value={medicalEmergencyContactName} onChangeText={setMedicalEmergencyContactName} placeholder="Nom" placeholderTextColor="#9CA3AF" editable={!isMedicalReadOnly} />
+              <TextInput style={styles.textInput} value={medicalEmergencyContactPhone} onChangeText={setMedicalEmergencyContactPhone} placeholder="Téléphone" placeholderTextColor="#9CA3AF" keyboardType="phone-pad" editable={!isMedicalReadOnly} />
 
               <Text style={styles.formLabel}>Notes</Text>
-              <TextInput style={styles.textInput} value={medicalNotes} onChangeText={setMedicalNotes} placeholder="Notes additionnelles (optionnel)" placeholderTextColor="#9CA3AF" />
+              <TextInput style={styles.textInput} value={medicalNotes} onChangeText={setMedicalNotes} placeholder="Notes additionnelles (optionnel)" placeholderTextColor="#9CA3AF" editable={!isMedicalReadOnly} />
 
-              <TouchableOpacity style={[styles.createBtn, medicalSaving && { opacity: 0.6 }, { marginTop: 16, marginBottom: 32 }]} onPress={handleSaveMedicalInfo} disabled={medicalSaving}>
-                {medicalSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.createBtnText}>Enregistrer</Text>}
-              </TouchableOpacity>
+              {!isMedicalReadOnly && (
+                <TouchableOpacity style={[styles.createBtn, medicalSaving && { opacity: 0.6 }, { marginTop: 16, marginBottom: 32 }]} onPress={handleSaveMedicalInfo} disabled={medicalSaving}>
+                  {medicalSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.createBtnText}>Enregistrer</Text>}
+                </TouchableOpacity>
+              )}
             </ScrollView>
-          )}
+            );
+          })()}
         </View>
       </Modal>
 
@@ -3865,6 +3965,31 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 8,
     marginTop: 12,
+  },
+  uiProfileSection: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#F3F4F6',
+  },
+  uiProfileLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#9CA3AF',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 6,
+  },
+  uiProfileShareRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 10,
+  },
+  uiProfileShareLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#374151',
   },
   actionBtn: {
     flexBasis: '31%',

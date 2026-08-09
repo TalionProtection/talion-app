@@ -31,6 +31,9 @@ export default function TabLayout() {
   const canSeePatrol = isStaffRole(role);
   const canSeeDispatch = isDispatchRole(role);
   const canSeeAdmin = isAdminRole(role);
+  // Parent-set 'ado' simplified UI (see PUT /api/users/:id/ui-profile):
+  // Accueil, Messages, Famille, Profil only — no radio/map.
+  const isAdoProfile = user?.uiProfile === 'ado';
 
   return (
     <Tabs
@@ -67,6 +70,7 @@ export default function TabLayout() {
         name="ptt"
         options={{
           title: 'PTT',
+          href: isAdoProfile ? null : undefined,
           tabBarIcon: ({ color }) => <IconSymbol size={28} name="mic.fill" color={color} />,
         }}
       />
@@ -74,6 +78,7 @@ export default function TabLayout() {
         name="explore"
         options={{
           title: 'Map',
+          href: isAdoProfile ? null : undefined,
           tabBarIcon: ({ color }) => <IconSymbol size={28} name="map.fill" color={color} />,
         }}
       />

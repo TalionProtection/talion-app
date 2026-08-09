@@ -19,7 +19,7 @@ import React, { useEffect } from 'react';
 
 function RootLayoutContent() {
   const colorScheme = useColorScheme();
-  const { isSignedIn, isLoading } = useAuth();
+  const { isSignedIn, isLoading, user } = useAuth();
   const segments = useSegments();
   const router = useRouter();
 
@@ -34,15 +34,22 @@ function RootLayoutContent() {
     if (isLoading) return;
 
     const inAuthGroup = segments[0] === 'login';
+    const inChildHome = segments[0] === 'child-home';
+    // Parent-set simplified UI (see PUT /api/users/:id/ui-profile) — a child
+    // account is locked into a single dedicated screen, never the normal tabs.
+    const isChildProfile = user?.uiProfile === 'enfant';
 
     if (!isSignedIn && !inAuthGroup) {
       // Not signed in and not on login screen → redirect to login
       router.replace('/login');
-    } else if (isSignedIn && inAuthGroup) {
-      // Signed in but still on login screen → redirect to tabs
+    } else if (isSignedIn && isChildProfile && !inChildHome) {
+      router.replace('/child-home');
+    } else if (isSignedIn && !isChildProfile && (inAuthGroup || inChildHome)) {
+      // Signed in, normal/teen profile, but still on login or (a parent just
+      // switched this account off 'enfant') the child-only screen → tabs
       router.replace('/(tabs)');
     }
-  }, [isSignedIn, isLoading, segments]);
+  }, [isSignedIn, isLoading, segments, user?.uiProfile]);
 
   if (isLoading) {
     // Show loading screen instead of blank screen
@@ -68,6 +75,7 @@ function RootLayoutContent() {
         <Stack.Screen name="checkin-confirm" options={{ presentation: 'modal', title: 'Confirmation de sécurité' }} />
         <Stack.Screen name="alerts-archive" />
         <Stack.Screen name="travel-risk" />
+        <Stack.Screen name="child-home" options={{ gestureEnabled: false }} />
       </Stack>
       <StatusBar style="auto" />
     </ThemeProvider>
