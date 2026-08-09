@@ -8492,6 +8492,7 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
     loadTravelItinerariesFromSupabase(),
     loadPreauthorizedGuestsFromSupabase(),
     loadAuthorizedPickupPeopleFromSupabase(),
+    loadFamilyCallContactsFromSupabase(),
     loadMedicalInfoFromSupabase(),
     loadDailyRoutesFromSupabase(),
     loadMainCouranteNotesFromSupabase(),
@@ -9385,6 +9386,20 @@ interface PreAuthorizedGuest {
   createdAt: number;
 }
 
+// Extra numbers a parent wants their child able to call in one tap (nanny,
+// school, etc.) — on top of the actual parent accounts (getFamilyParentIds)
+// and the hardcoded 112 emergency entry, both of which the client adds
+// without needing a server record. Parent-managed only (isParentOf), not
+// self-editable by the child, same reasoning as the child's medical info.
+interface FamilyCallContact {
+  id: string;
+  targetUserId: string;
+  name: string;
+  phone: string;
+  addedBy: string;
+  createdAt: number;
+}
+
 // Authorization belongs to the CHILD, not a residence — a pickup list
 // shouldn't need to be duplicated per address the way guests/interventions are.
 interface AuthorizedPickupPerson {
@@ -9463,6 +9478,7 @@ const travelItineraries = new Map<string, TravelItinerary[]>(); // userId -> iti
 const preauthorizedGuests = new Map<string, PreAuthorizedGuest[]>(); // addressId -> guests
 const authorizedPickupPeople = new Map<string, AuthorizedPickupPerson[]>(); // childUserId -> people
 const medicalInfoByUser = new Map<string, MedicalInfo>(); // userId -> record
+const familyCallContacts = new Map<string, FamilyCallContact[]>(); // targetUserId -> contacts
 const dailyRoutes = new Map<string, DailyRoute[]>(); // targetUserId -> routes
 
 // Live per-commute tracking. windowKey identifies which specific commute
@@ -9500,6 +9516,25 @@ async function loadKnownPeopleFromSupabase(): Promise<void> {
       console.log(`[Supabase] Loaded ${data.length} known people`);
     }
   } catch (e) { console.error('[Supabase] loadKnownPeopleFromSupabase error:', e); }
+}
+
+async function loadFamilyCallContactsFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('family_call_contacts').select('*');
+    if (error) { console.error('[Supabase] Failed to load family_call_contacts:', error.message); return; }
+    if (data && data.length > 0) {
+      familyCallContacts.clear();
+      data.forEach((c: any) => {
+        const contact: FamilyCallContact = {
+          id: c.id, targetUserId: c.target_user_id, name: c.name, phone: c.phone,
+          addedBy: c.added_by, createdAt: c.created_at,
+        };
+        if (!familyCallContacts.has(contact.targetUserId)) familyCallContacts.set(contact.targetUserId, []);
+        familyCallContacts.get(contact.targetUserId)!.push(contact);
+      });
+      console.log(`[Supabase] Loaded ${data.length} family call contacts`);
+    }
+  } catch (e) { console.error('[Supabase] loadFamilyCallContactsFromSupabase error:', e); }
 }
 
 async function loadAuthorizedPickupPeopleFromSupabase(): Promise<void> {
@@ -9831,6 +9866,58 @@ app.delete('/api/family/pickup-list/:id', requireAuth, async (req, res) => {
   const { error } = await supabaseAdmin.from('authorized_pickup_people').delete().eq('id', (req.params.id as string));
   if (error) console.error('[Supabase] Failed to persist pickup person deletion:', error.message);
   res.json({ success: true });
+});
+
+// ─── Extra one-tap call contacts (nanny, school...) ──────────────────────
+// The 112 emergency entry and the actual parent accounts are added
+// client-side (see child-home.tsx) — this list is only the custom extras.
+app.get('/api/family/call-contacts', requireAuth, (req, res) => {
+  const targetUserId = req.query.targetUserId as string;
+  if (!targetUserId) return res.status(400).json({ error: 'targetUserId required' });
+  if (!canAccessFamilyMemberData(targetUserId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
+  res.json(familyCallContacts.get(targetUserId) || []);
+});
+
+app.post('/api/family/call-contacts', requireAuth, async (req, res) => {
+  const { targetUserId, name, phone } = req.body;
+  if (!targetUserId || !name?.trim() || !phone?.trim()) {
+    return res.status(400).json({ error: 'targetUserId, name and phone are required' });
+  }
+  const caller = req.supabaseUser!;
+  const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'superadmin';
+  if (!isParentOf(caller.id, targetUserId) && !(isStaff && canAccessOrg(caller, adminUsers.get(targetUserId)?.organizationId))) {
+    return res.status(403).json({ error: 'Only a parent can manage this list' });
+  }
+  const contact: FamilyCallContact = {
+    id: uuidv4(), targetUserId, name: name.trim(), phone: phone.trim(),
+    addedBy: caller.id, createdAt: Date.now(),
+  };
+  if (!familyCallContacts.has(targetUserId)) familyCallContacts.set(targetUserId, []);
+  familyCallContacts.get(targetUserId)!.push(contact);
+  const { error } = await supabaseAdmin.from('family_call_contacts').insert({
+    id: contact.id, target_user_id: targetUserId, name: contact.name, phone: contact.phone,
+    added_by: contact.addedBy, created_at: contact.createdAt,
+  });
+  if (error) console.error('[Supabase] Failed to persist call contact:', error.message);
+  res.status(201).json(contact);
+});
+
+app.delete('/api/family/call-contacts/:id', requireAuth, async (req, res) => {
+  const caller = req.supabaseUser!;
+  const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'superadmin';
+  for (const [targetUserId, list] of familyCallContacts) {
+    const idx = list.findIndex(x => x.id === (req.params.id as string));
+    if (idx !== -1) {
+      if (!isParentOf(caller.id, targetUserId) && !(isStaff && canAccessOrg(caller, adminUsers.get(targetUserId)?.organizationId))) {
+        return res.status(403).json({ error: 'Only a parent can manage this list' });
+      }
+      list.splice(idx, 1);
+      const { error } = await supabaseAdmin.from('family_call_contacts').delete().eq('id', req.params.id as string);
+      if (error) console.error('[Supabase] Failed to persist call contact deletion:', error.message);
+      return res.json({ success: true });
+    }
+  }
+  res.status(404).json({ error: 'Contact not found' });
 });
 
 // ─── Emergency medical info card (one per person) ────────────────────────

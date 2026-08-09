@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, TouchableOpacity, ScrollView, ActivityIndicator, StyleSheet, Alert, Linking } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
 import { SOSButton } from '@/components/sos-button';
 import { useAuth } from '@/hooks/useAuth';
 import { useLocation } from '@/lib/location-context';
@@ -10,15 +11,17 @@ import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
 import { authHeader } from '@/lib/auth-fetch';
 
 // The entire screen for a parent-activated 'enfant' UI profile — see
-// PUT /api/users/:id/ui-profile. No tabs, no settings, three actions only:
-// call for help, say "I don't feel well", or call a parent. app/_layout.tsx
-// locks the child into this screen and blocks swipe-back navigation away
-// from it (gestureEnabled: false on its Stack.Screen).
+// PUT /api/users/:id/ui-profile. No tabs, no settings: call for help, say
+// "I don't feel well", call someone (112, a parent, or a parent-added extra
+// like a nanny/school), or view a read-only medical info card.
+// app/_layout.tsx locks the child into this screen and blocks swipe-back
+// navigation away from it (gestureEnabled: false on its Stack.Screen).
 
-interface ParentContact {
-  userId: string;
+interface CallContact {
+  id: string;
   name: string;
   phone: string;
+  urgent?: boolean; // 112 — styled distinctly, always first, never removable
 }
 
 interface HomeAddress {
@@ -32,11 +35,14 @@ interface DestinationLocation {
   label: string;
 }
 
+const EMERGENCY_CONTACT: CallContact = { id: 'sos-112', name: 'Secours (112)', phone: '112', urgent: true };
+
 export default function ChildHomeScreen() {
   const { user } = useAuth();
+  const router = useRouter();
   const { location } = useLocation();
   const [malaiseSending, setMalaiseSending] = useState(false);
-  const [parentContacts, setParentContacts] = useState<ParentContact[]>([]);
+  const [callContacts, setCallContacts] = useState<CallContact[]>([EMERGENCY_CONTACT]);
   const [homeAddress, setHomeAddress] = useState<HomeAddress | null>(null);
   const [destination, setDestination] = useState<DestinationLocation | null>(null);
 
@@ -46,11 +52,19 @@ export default function ChildHomeScreen() {
     if (!user?.id) return;
     (async () => {
       try {
-        const res = await fetchWithTimeout(`${BASE}/api/family/parent-contacts?userId=${user.id}`, { timeout: 10000, headers: await authHeader() });
-        const data = await res.json();
-        setParentContacts(Array.isArray(data) ? data : []);
+        const [parentsRes, extrasRes] = await Promise.all([
+          fetchWithTimeout(`${BASE}/api/family/parent-contacts?userId=${user.id}`, { timeout: 10000, headers: await authHeader() }),
+          fetchWithTimeout(`${BASE}/api/family/call-contacts?targetUserId=${user.id}`, { timeout: 10000, headers: await authHeader() }),
+        ]);
+        const parents = await parentsRes.json();
+        const extras = await extrasRes.json();
+        setCallContacts([
+          EMERGENCY_CONTACT,
+          ...(Array.isArray(parents) ? parents.map((p: any) => ({ id: p.userId, name: p.name, phone: p.phone })) : []),
+          ...(Array.isArray(extras) ? extras.map((c: any) => ({ id: c.id, name: c.name, phone: c.phone })) : []),
+        ]);
       } catch (e) {
-        console.warn('[ChildHome] Failed to fetch parent contacts:', e);
+        console.warn('[ChildHome] Failed to fetch call contacts:', e);
       }
     })();
     (async () => {
@@ -110,7 +124,7 @@ export default function ChildHomeScreen() {
     ]);
   };
 
-  const handleCallParent = (contact: ParentContact) => {
+  const handleCall = (contact: CallContact) => {
     Linking.openURL(`tel:${contact.phone}`).catch(() => {
       Alert.alert('Erreur', "Impossible de lancer l'appel");
     });
@@ -162,17 +176,21 @@ export default function ChildHomeScreen() {
           </View>
         )}
 
-        <Text style={styles.sectionTitle}>Parler à mes parents</Text>
-        {parentContacts.length === 0 ? (
-          <ActivityIndicator color="#1e3a5f" style={{ marginTop: 12 }} />
-        ) : (
-          parentContacts.map(c => (
-            <TouchableOpacity key={c.userId} onPress={() => handleCallParent(c)} style={styles.callBtn}>
-              <Text style={styles.callBtnIcon}>📞</Text>
-              <Text style={styles.callBtnText}>Appeler {c.name}</Text>
-            </TouchableOpacity>
-          ))
-        )}
+        <TouchableOpacity onPress={() => router.push('/child-medical-info')} style={styles.medicalBtn}>
+          <Text style={styles.medicalBtnText}>🩺 Fiche médicale</Text>
+        </TouchableOpacity>
+
+        <Text style={styles.sectionTitle}>Appeler</Text>
+        {callContacts.map(c => (
+          <TouchableOpacity
+            key={c.id}
+            onPress={() => handleCall(c)}
+            style={[styles.callBtn, c.urgent && styles.callBtnUrgent]}
+          >
+            <Text style={styles.callBtnIcon}>{c.urgent ? '🚑' : '📞'}</Text>
+            <Text style={styles.callBtnText}>{c.urgent ? c.name : `Appeler ${c.name}`}</Text>
+          </TouchableOpacity>
+        ))}
       </ScrollView>
     </SafeAreaView>
   );
@@ -190,11 +208,17 @@ const styles = StyleSheet.create({
   malaiseBtnText: { fontSize: 18, fontWeight: '800', color: '#B45309' },
   mapContainer: { width: '100%', height: 220, borderRadius: 16, overflow: 'hidden', marginBottom: 20 },
   map: { flex: 1 },
+  medicalBtn: {
+    width: '100%', paddingVertical: 16, borderRadius: 16, alignItems: 'center',
+    backgroundColor: '#fff', borderWidth: 2, borderColor: '#1e3a5f', marginBottom: 20,
+  },
+  medicalBtnText: { fontSize: 18, fontWeight: '800', color: '#1e3a5f' },
   sectionTitle: { fontSize: 18, fontWeight: '800', color: '#1e3a5f', alignSelf: 'flex-start', marginBottom: 10 },
   callBtn: {
     width: '100%', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
     paddingVertical: 16, borderRadius: 16, backgroundColor: '#1e3a5f', marginBottom: 12,
   },
+  callBtnUrgent: { backgroundColor: '#DC2626' },
   callBtnIcon: { fontSize: 22 },
   callBtnText: { fontSize: 18, fontWeight: '800', color: '#fff' },
 });

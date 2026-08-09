@@ -34,7 +34,9 @@ function RootLayoutContent() {
     if (isLoading) return;
 
     const inAuthGroup = segments[0] === 'login';
-    const inChildHome = segments[0] === 'child-home';
+    // child-medical-info is the one screen an 'enfant' profile may navigate
+    // to away from child-home itself (opened from a button there).
+    const inChildAllowedScreen = segments[0] === 'child-home' || segments[0] === 'child-medical-info';
     // Parent-set simplified UI (see PUT /api/users/:id/ui-profile) — a child
     // account is locked into a single dedicated screen, never the normal tabs.
     const isChildProfile = user?.uiProfile === 'enfant';
@@ -42,11 +44,11 @@ function RootLayoutContent() {
     if (!isSignedIn && !inAuthGroup) {
       // Not signed in and not on login screen → redirect to login
       router.replace('/login');
-    } else if (isSignedIn && isChildProfile && !inChildHome) {
+    } else if (isSignedIn && isChildProfile && !inChildAllowedScreen) {
       router.replace('/child-home');
-    } else if (isSignedIn && !isChildProfile && (inAuthGroup || inChildHome)) {
+    } else if (isSignedIn && !isChildProfile && (inAuthGroup || inChildAllowedScreen)) {
       // Signed in, normal/teen profile, but still on login or (a parent just
-      // switched this account off 'enfant') the child-only screen → tabs
+      // switched this account off 'enfant') a child-only screen → tabs
       router.replace('/(tabs)');
     }
   }, [isSignedIn, isLoading, segments, user?.uiProfile]);
@@ -77,6 +79,7 @@ function RootLayoutContent() {
         <Stack.Screen name="travel-risk" />
         <Stack.Screen name="daily-route-map" />
         <Stack.Screen name="child-home" options={{ gestureEnabled: false }} />
+        <Stack.Screen name="child-medical-info" />
       </Stack>
       <StatusBar style="auto" />
     </ThemeProvider>

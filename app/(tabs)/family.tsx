@@ -493,6 +493,17 @@ export default function FamilyScreen() {
   const [routeAlertDispatch, setRouteAlertDispatch] = useState(false);
   const [routeParentContacts, setRouteParentContacts] = useState<{ userId: string; name: string }[]>([]);
 
+  // Extra one-tap call contacts for a child's simplified UI (nanny, school...)
+  // — on top of the actual parent accounts and the hardcoded 112 entry.
+  const [showCallContactsModal, setShowCallContactsModal] = useState(false);
+  const [callContactsTarget, setCallContactsTarget] = useState<FamilyMember | null>(null);
+  const [callContactsList, setCallContactsList] = useState<{ id: string; name: string; phone: string }[]>([]);
+  const [callContactsLoading, setCallContactsLoading] = useState(false);
+  const [showAddCallContactForm, setShowAddCallContactForm] = useState(false);
+  const [callContactName, setCallContactName] = useState('');
+  const [callContactPhone, setCallContactPhone] = useState('');
+  const [callContactSaving, setCallContactSaving] = useState(false);
+
   // Address autocomplete
   const [addressSuggestions, setAddressSuggestions] = useState<Array<{ display_name: string; lat: string; lon: string }>>([]);
   const [addressSearching, setAddressSearching] = useState(false);
@@ -1532,6 +1543,68 @@ export default function FamilyScreen() {
     ]);
   }, [BASE]);
 
+  // ─── Extra Call Contacts (nanny, school...) ──────────────────────────────
+
+  const openCallContactsModal = useCallback(async (member: FamilyMember) => {
+    setCallContactsTarget(member);
+    setShowCallContactsModal(true);
+    setShowAddCallContactForm(false);
+    setCallContactName(''); setCallContactPhone('');
+    setCallContactsList([]);
+    setCallContactsLoading(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family/call-contacts?targetUserId=${member.userId}`, { timeout: 10000, headers: await authHeader() });
+      const data = await res.json();
+      setCallContactsList(Array.isArray(data) ? data : []);
+    } catch (e) {
+      console.error('[Family] Error fetching call contacts:', e);
+    }
+    setCallContactsLoading(false);
+  }, [BASE]);
+
+  const handleAddCallContact = useCallback(async () => {
+    if (!callContactsTarget || !callContactName.trim() || !callContactPhone.trim()) return;
+    setCallContactSaving(true);
+    try {
+      const res = await fetchWithTimeout(`${BASE}/api/family/call-contacts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({
+          targetUserId: callContactsTarget.userId,
+          name: callContactName.trim(), phone: callContactPhone.trim(),
+        }),
+        timeout: 10000,
+      });
+      if (res.ok) {
+        const contact = await res.json();
+        setCallContactsList(prev => [...prev, contact]);
+        setCallContactName(''); setCallContactPhone(''); setShowAddCallContactForm(false);
+      } else {
+        const err = await res.json();
+        Alert.alert('Erreur', err.error || "Impossible d'ajouter ce contact");
+      }
+    } catch (e) {
+      Alert.alert('Erreur', 'Erreur réseau');
+    }
+    setCallContactSaving(false);
+  }, [BASE, callContactsTarget, callContactName, callContactPhone]);
+
+  const handleDeleteCallContact = useCallback((contact: { id: string; name: string }) => {
+    Alert.alert('Supprimer', `Retirer ${contact.name} de la liste d'appel ?`, [
+      { text: 'Annuler', style: 'cancel' },
+      {
+        text: 'Supprimer', style: 'destructive', onPress: async () => {
+          try {
+            await fetchWithTimeout(`${BASE}/api/family/call-contacts/${contact.id}`, { method: 'DELETE', headers: await authHeader(), timeout: 10000 });
+            setCallContactsList(prev => prev.filter(c => c.id !== contact.id));
+          } catch (e) {
+            console.error('[Family] Error deleting call contact:', e);
+          }
+        },
+      },
+    ]);
+  }, [BASE]);
+
   // ─── Medical Info Card ───────────────────────────────────────────────────
 
   const resetMedicalForm = () => {
@@ -2108,6 +2181,15 @@ export default function FamilyScreen() {
           <IconSymbol name="person.badge.key.fill" size={18} color="#1e3a5f" />
           <Text style={styles.actionBtnText}>Personnes autorisées</Text>
         </TouchableOpacity>
+        {isMyChild && (
+          <TouchableOpacity
+            style={styles.actionBtn}
+            onPress={() => openCallContactsModal(item)}
+          >
+            <IconSymbol name="phone.fill" size={18} color="#1e3a5f" />
+            <Text style={styles.actionBtnText}>Contacts d&apos;appel</Text>
+          </TouchableOpacity>
+        )}
         <TouchableOpacity
           style={styles.actionBtn}
           onPress={() => openMedicalModal(item)}
@@ -3448,6 +3530,62 @@ export default function FamilyScreen() {
                     {!!p.notes && <Text style={styles.providerDetail}>{p.notes}</Text>}
                   </View>
                   <TouchableOpacity onPress={() => handleDeletePickupPerson(p)}>
+                    <IconSymbol name="trash.fill" size={18} color="#EF4444" />
+                  </TouchableOpacity>
+                </View>
+              ))
+            )}
+          </ScrollView>
+        </View>
+      </Modal>
+
+      <Modal visible={showCallContactsModal} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowCallContactsModal(false)}>
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Contacts d&apos;appel — {callContactsTarget?.name}</Text>
+            <TouchableOpacity onPress={() => { setShowCallContactsModal(false); setCallContactsTarget(null); }}>
+              <IconSymbol name="xmark.circle.fill" size={28} color="#6B7280" />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView style={{ padding: 16 }}>
+            <Text style={styles.emptySubtitle}>
+              Numéros joignables en un geste depuis l&apos;écran de {callContactsTarget?.name} (nounou, école, etc.). Les secours (112) et les parents sont toujours proposés en plus, automatiquement.
+            </Text>
+
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, marginBottom: 8 }}>
+              <Text style={styles.formLabel}>Liste</Text>
+              <TouchableOpacity onPress={() => setShowAddCallContactForm(v => !v)}>
+                <Text style={styles.providerAddLink}>{showAddCallContactForm ? 'Annuler' : '+ Ajouter'}</Text>
+              </TouchableOpacity>
+            </View>
+
+            {showAddCallContactForm && (
+              <View style={styles.providerFormCard}>
+                <TextInput style={styles.textInput} value={callContactName} onChangeText={setCallContactName} placeholder="Nom (ex: Nounou Maria, École)" placeholderTextColor="#9CA3AF" />
+                <TextInput style={styles.textInput} value={callContactPhone} onChangeText={setCallContactPhone} placeholder="Téléphone" placeholderTextColor="#9CA3AF" keyboardType="phone-pad" />
+                <TouchableOpacity
+                  style={[styles.createBtn, callContactSaving && { opacity: 0.6 }]}
+                  onPress={handleAddCallContact}
+                  disabled={callContactSaving || !callContactName.trim() || !callContactPhone.trim()}
+                >
+                  {callContactSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.createBtnText}>Enregistrer</Text>}
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {callContactsLoading ? (
+              <ActivityIndicator color="#1e3a5f" style={{ marginTop: 20 }} />
+            ) : callContactsList.length === 0 ? (
+              <Text style={styles.emptySubtitle}>Aucun contact supplémentaire.</Text>
+            ) : (
+              callContactsList.map(c => (
+                <View key={c.id} style={styles.providerRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.providerName}>📞 {c.name}</Text>
+                    <Text style={styles.providerDetail}>{c.phone}</Text>
+                  </View>
+                  <TouchableOpacity onPress={() => handleDeleteCallContact(c)}>
                     <IconSymbol name="trash.fill" size={18} color="#EF4444" />
                   </TouchableOpacity>
                 </View>

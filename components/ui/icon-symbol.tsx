@@ -47,6 +47,7 @@ const MAPPING = {
   'airplane': 'flight',
   'cross.case.fill': 'medical-services',
   'person.badge.key.fill': 'badge',
+  'phone.fill': 'phone',
 } as IconMapping;
 
 /**
