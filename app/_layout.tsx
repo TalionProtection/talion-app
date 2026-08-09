@@ -75,6 +75,7 @@ function RootLayoutContent() {
         <Stack.Screen name="checkin-confirm" options={{ presentation: 'modal', title: 'Confirmation de sécurité' }} />
         <Stack.Screen name="alerts-archive" />
         <Stack.Screen name="travel-risk" />
+        <Stack.Screen name="school-route-map" />
         <Stack.Screen name="child-home" options={{ gestureEnabled: false }} />
       </Stack>
       <StatusBar style="auto" />

@@ -3584,6 +3584,12 @@ export default function FamilyScreen() {
                         : ''}
                     </Text>
                   </View>
+                  <TouchableOpacity
+                    onPress={() => router.push({ pathname: '/school-route-map', params: { routeId: route.id, targetUserId: schoolRouteTarget?.userId || '' } })}
+                    style={{ marginRight: 12 }}
+                  >
+                    <Text style={{ fontSize: 18 }}>🗺️</Text>
+                  </TouchableOpacity>
                   <Switch value={route.active} onValueChange={() => toggleSchoolRouteActive(route)} />
                   <TouchableOpacity onPress={() => deleteSchoolRoute(route)} style={{ marginLeft: 12 }}>
                     <IconSymbol name="trash.fill" size={18} color="#EF4444" />
