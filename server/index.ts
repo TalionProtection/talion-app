@@ -4578,7 +4578,7 @@ app.get('/api/family/presence/:userId', requireAuth, (req, res) => {
   const caller = req.supabaseUser!;
   const isSelf = caller.id === targetUserId;
   const isFamilyMember = getFamilyMemberIds(targetUserId).includes(caller.id);
-  const isStaff = (caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder') && canAccessOrg(caller, adminUsers.get(targetUserId)?.organizationId);
+  const isStaff = (caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder' || caller.role === 'superadmin') && canAccessOrg(caller, adminUsers.get(targetUserId)?.organizationId);
   if (!isSelf && !isFamilyMember && !isStaff) return res.status(403).json({ error: 'Not authorized' });
   const presence = computeEffectivePresence(targetUserId, true);
   res.json(presence);
@@ -4599,7 +4599,7 @@ app.put('/api/family/presence/:targetUserId', requireAuth, (req, res) => {
   const caller = req.supabaseUser!;
   const isSelf = caller.id === targetUserId;
   const isFamilyOwner = getFamilyMemberIds(targetUserId).includes(caller.id);
-  const isStaff = (caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder') && canAccessOrg(caller, adminUsers.get(targetUserId)?.organizationId);
+  const isStaff = (caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder' || caller.role === 'superadmin') && canAccessOrg(caller, adminUsers.get(targetUserId)?.organizationId);
   if (!isSelf && !isFamilyOwner && !isStaff) {
     return res.status(403).json({ error: 'Not authorized to set this presence status' });
   }
@@ -4835,7 +4835,7 @@ app.post('/api/family/checkins', requireAuth, (req, res) => {
   if (!targetUserId || !dueAt) {
     return res.status(400).json({ error: 'targetUserId and dueAt required' });
   }
-  const isDispatchStaff = caller.role === 'dispatcher' || caller.role === 'admin';
+  const isDispatchStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'superadmin';
   const familyIds = getFamilyMemberIds(ownerId);
   if (!isDispatchStaff && !familyIds.includes(targetUserId)) {
     return res.status(403).json({ error: 'Target user is not a family member' });
@@ -6374,7 +6374,7 @@ app.put('/api/users/:id/ghost-mode', requireAuth, (req, res) => {
   const targetId = req.params.id as string;
   const caller = req.supabaseUser!;
   const isSelf = caller.id === targetId;
-  const isDispatchStaff = caller.role === 'dispatcher' || caller.role === 'admin';
+  const isDispatchStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'superadmin';
   if (!isSelf && !isDispatchStaff) {
     return res.status(403).json({ error: 'Not authorized to change this user\'s Ghost mode' });
   }
@@ -9559,12 +9559,12 @@ function resolveAddressOwner(addressId: string): string | undefined {
 function canViewAddressAssets(ownerId: string, caller: { id: string; role: string; organizationId?: string }): boolean {
   if (!canAccessOrg(caller, adminUsers.get(ownerId)?.organizationId)) return false;
   return caller.id === ownerId || getFamilyMemberIds(ownerId).includes(caller.id) ||
-    caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder';
+    caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder' || caller.role === 'superadmin';
 }
 function canEditAddressAssets(ownerId: string, caller: { id: string; role: string; organizationId?: string }): boolean {
   if (!canAccessOrg(caller, adminUsers.get(ownerId)?.organizationId)) return false;
   return caller.id === ownerId || getFamilyMemberIds(ownerId).includes(caller.id) ||
-    caller.role === 'dispatcher' || caller.role === 'admin';
+    caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'superadmin';
 }
 
 // GET /api/addresses/:addressId/people
@@ -10184,7 +10184,7 @@ app.delete('/api/family/itineraries/:id', requireAuth, async (req, res) => {
 // GET /api/itineraries/upcoming?from=&to= - staff-only, who's traveling in a window
 app.get('/api/itineraries/upcoming', requireAuth, (req, res) => {
   const caller = req.supabaseUser!;
-  const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder';
+  const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder' || caller.role === 'superadmin';
   if (!isStaff) return res.status(403).json({ error: 'Staff only' });
   const from = req.query.from ? Number(req.query.from) : Date.now();
   const to = req.query.to ? Number(req.query.to) : from + 7 * 24 * 60 * 60 * 1000;
@@ -10248,7 +10248,7 @@ app.get('/api/travel-advisory/:countrySlug', requireAuth, async (req, res) => {
 // not just today's calendar).
 app.get('/api/known-people/all', requireAuth, (req, res) => {
   const caller = req.supabaseUser!;
-  const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder';
+  const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder' || caller.role === 'superadmin';
   if (!isStaff) return res.status(403).json({ error: 'Staff only' });
   const callerAccess = { id: caller.id, role: caller.role, organizationId: caller.organizationId, assignedFamilyIds: adminUsers.get(caller.id)?.assignedFamilyIds };
   const result: any[] = [];
@@ -10277,7 +10277,7 @@ app.get('/api/known-people/all', requireAuth, (req, res) => {
 // ontology/entity-resolution discussion - the lightweight version.
 app.get('/api/entity-search', requireAuth, (req, res) => {
   const caller = req.supabaseUser!;
-  const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder';
+  const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder' || caller.role === 'superadmin';
   if (!isStaff) return res.status(403).json({ error: 'Staff only' });
   const query = ((req.query.q as string) || '').trim().toLowerCase();
   if (query.length < 2) return res.json([]);
@@ -10352,7 +10352,7 @@ app.get('/api/entity-search', requireAuth, (req, res) => {
 // concrete occurrences within [from, to]. Defaults to the next 7 days.
 app.get('/api/interventions/upcoming', requireAuth, (req, res) => {
   const caller = req.supabaseUser!;
-  const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder';
+  const isStaff = caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'responder' || caller.role === 'superadmin';
   if (!isStaff) return res.status(403).json({ error: 'Staff only' });
   const from = req.query.from ? Number(req.query.from) : Date.now();
   const to = req.query.to ? Number(req.query.to) : from + 7 * 24 * 60 * 60 * 1000;
@@ -11628,7 +11628,7 @@ app.patch('/api/family/residences/:id/label', requireAuth, async (req, res) => {
   const caller = req.supabaseUser!;
   const isSelf = caller.id === userId;
   const isFamilyMember = getFamilyMemberIds(userId).includes(caller.id);
-  const isDispatchStaff = (caller.role === 'dispatcher' || caller.role === 'admin') && canAccessOrg(caller, adminUsers.get(userId)?.organizationId);
+  const isDispatchStaff = (caller.role === 'dispatcher' || caller.role === 'admin' || caller.role === 'superadmin') && canAccessOrg(caller, adminUsers.get(userId)?.organizationId);
   if (!isSelf && !isFamilyMember && !isDispatchStaff) return res.status(403).json({ error: 'Not authorized' });
 
   const ownerIds = Array.from(new Set([userId, ...getFamilyMemberIds(userId)]));

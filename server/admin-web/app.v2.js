@@ -1812,7 +1812,8 @@ async function saveAddress() {
       closeAddAddressModal();
       await loadUserAddresses(editingUserId);
     } else {
-      showToast('❌ Erreur lors de l\'ajout', 'error');
+      const err = await res.json().catch(() => ({}));
+      showToast(`❌ Erreur: ${err.error || 'Échec de l\'ajout'}`, 'error');
     }
   } catch (e) {
     showToast('❌ Erreur de connexion', 'error');
