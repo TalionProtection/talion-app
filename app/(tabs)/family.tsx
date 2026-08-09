@@ -13,7 +13,7 @@ import { getApiBaseUrl } from '@/lib/server-url';
 import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
 import { authHeader } from '@/lib/auth-fetch';
 import { useLocation } from '@/lib/location-context';
-import NativeMapView, { Marker, Circle, isNativeMap } from '@/components/map-view';
+import NativeMapView, { Marker, Circle, Polyline, isNativeMap } from '@/components/map-view';
 import { websocketService } from '@/services/websocket';
 import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -1751,6 +1751,22 @@ export default function FamilyScreen() {
     setNewRouteWaypoints(prev => prev.filter((_, i) => i !== index));
   };
 
+  // Tapping the map is an alternative to the address search below it — both
+  // just populate the same perimeterCenter/perimeterAddress pair the
+  // "+ Ajouter ce point" button already reads from.
+  const handleMapPressForWaypoint = useCallback(async (e: { nativeEvent: { coordinate: { latitude: number; longitude: number } } }) => {
+    const { latitude, longitude } = e.nativeEvent.coordinate;
+    setPerimeterCenter({ latitude, longitude });
+    setAddressSuggestions([]);
+    setPerimeterAddress(`${latitude.toFixed(5)}, ${longitude.toFixed(5)}`);
+    try {
+      const addr = await locationCtx?.reverseGeocode(latitude, longitude);
+      if (addr) setPerimeterAddress(addr);
+    } catch {
+      // Keep the raw coordinates already set above.
+    }
+  }, [locationCtx]);
+
   const createDailyRoute = useCallback(async () => {
     if (!dailyRouteTarget || !routeLabel.trim()) {
       Alert.alert('Erreur', 'Indiquez le nom de la destination');
@@ -2405,6 +2421,17 @@ export default function FamilyScreen() {
   // ─── Unread alerts count ────────────────────────────────────────────────
 
   const unreadAlerts = proxAlerts.filter(a => a.eventType === 'exit' && !a.acknowledged).length;
+
+  // Where the interactive waypoint-picker map opens — the last point added
+  // so far, else the target's last known location, else a Geneva fallback
+  // (matches other defaults in this app). react-native-maps only reads
+  // initialRegion once at mount, so this only matters the moment the map
+  // (re)appears — e.g. each time the "+ Ajouter" form is freshly opened.
+  const waypointPickerRegion = useMemo(() => {
+    const lastWaypoint = newRouteWaypoints[newRouteWaypoints.length - 1];
+    const center = lastWaypoint || dailyRouteTarget?.location || { latitude: 46.1950, longitude: 6.1580 };
+    return { latitude: center.latitude, longitude: center.longitude, latitudeDelta: 0.02, longitudeDelta: 0.02 };
+  }, [newRouteWaypoints, dailyRouteTarget]);
 
   // ─── Main Render ────────────────────────────────────────────────────────
 
@@ -3576,6 +3603,35 @@ export default function FamilyScreen() {
 
                 <Text style={[styles.formLabel, { marginTop: 8 }]}>Ajouter un point</Text>
                 <TextInput style={styles.textInput} value={waypointLabel} onChangeText={setWaypointLabel} placeholder="Nom du point (optionnel, ex: Départ)" placeholderTextColor="#9CA3AF" />
+
+                {isNativeMap ? (
+                  <View style={styles.miniMapSection}>
+                    <Text style={styles.formHint}>Touchez la carte pour placer un point, ou recherchez une adresse ci-dessous.</Text>
+                    <View style={styles.miniMapContainer}>
+                      <NativeMapView
+                        initialRegion={waypointPickerRegion}
+                        showsUserLocation={false}
+                        showsMyLocationButton={false}
+                        showsCompass={false}
+                        onPress={handleMapPressForWaypoint}
+                        style={styles.miniMap}
+                      >
+                        {newRouteWaypoints.length > 1 && (
+                          <Polyline coordinates={newRouteWaypoints} strokeColor="#1e3a5f" strokeWidth={3} />
+                        )}
+                        {newRouteWaypoints.map((wp, idx) => (
+                          <Marker key={wp.id} coordinate={wp} title={wp.label || `Point ${idx + 1}`} pinColor="#22C55E" />
+                        ))}
+                        {perimeterCenter && (
+                          <Marker coordinate={perimeterCenter} title="Nouveau point (pas encore ajouté)" pinColor="#F59E0B" />
+                        )}
+                      </NativeMapView>
+                    </View>
+                  </View>
+                ) : (
+                  <Text style={[styles.formHint, { marginTop: 8 }]}>Carte interactive disponible uniquement sur l&apos;app mobile — utilisez la recherche d&apos;adresse ci-dessous.</Text>
+                )}
+
                 <View style={{ zIndex: 10 }}>
                   <View style={styles.addressInputRow}>
                     <TextInput
