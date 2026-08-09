@@ -26,9 +26,10 @@ interface HomeAddress {
   longitude: number;
 }
 
-interface SchoolLocation {
+interface DestinationLocation {
   latitude: number;
   longitude: number;
+  label: string;
 }
 
 export default function ChildHomeScreen() {
@@ -37,7 +38,7 @@ export default function ChildHomeScreen() {
   const [malaiseSending, setMalaiseSending] = useState(false);
   const [parentContacts, setParentContacts] = useState<ParentContact[]>([]);
   const [homeAddress, setHomeAddress] = useState<HomeAddress | null>(null);
-  const [schoolLocation, setSchoolLocation] = useState<SchoolLocation | null>(null);
+  const [destination, setDestination] = useState<DestinationLocation | null>(null);
 
   const BASE = getApiBaseUrl();
 
@@ -67,15 +68,17 @@ export default function ChildHomeScreen() {
     })();
     (async () => {
       try {
-        const res = await fetchWithTimeout(`${BASE}/api/family/school-routes?targetUserId=${user.id}`, { timeout: 10000, headers: await authHeader() });
+        const res = await fetchWithTimeout(`${BASE}/api/family/daily-routes?targetUserId=${user.id}`, { timeout: 10000, headers: await authHeader() });
         const data = await res.json();
         const routes = Array.isArray(data) ? data : [];
         const active = routes.find((r: any) => r.active) || routes[0];
-        if (active?.schoolLocation?.latitude != null && active?.schoolLocation?.longitude != null) {
-          setSchoolLocation({ latitude: active.schoolLocation.latitude, longitude: active.schoolLocation.longitude });
+        const waypoints = Array.isArray(active?.waypoints) ? active.waypoints.slice().sort((a: any, b: any) => a.order - b.order) : [];
+        const lastWaypoint = waypoints[waypoints.length - 1];
+        if (lastWaypoint?.latitude != null && lastWaypoint?.longitude != null) {
+          setDestination({ latitude: lastWaypoint.latitude, longitude: lastWaypoint.longitude, label: active.label || 'Destination' });
         }
       } catch (e) {
-        console.warn('[ChildHome] Failed to fetch school route:', e);
+        console.warn('[ChildHome] Failed to fetch daily route:', e);
       }
     })();
   }, [BASE, user?.id]);
@@ -116,7 +119,7 @@ export default function ChildHomeScreen() {
   const mapPoints = [
     location?.latitude != null ? { key: 'me', label: 'Toi', color: '#3B82F6', coords: { latitude: location.latitude, longitude: location.longitude } } : null,
     homeAddress ? { key: 'home', label: 'Maison', color: '#22C55E', coords: homeAddress } : null,
-    schoolLocation ? { key: 'school', label: 'École', color: '#F59E0B', coords: schoolLocation } : null,
+    destination ? { key: 'destination', label: destination.label, color: '#F59E0B', coords: { latitude: destination.latitude, longitude: destination.longitude } } : null,
   ].filter((p): p is { key: string; label: string; color: string; coords: { latitude: number; longitude: number } } => p !== null);
 
   const region = mapPoints.length > 0 ? (() => {

@@ -158,7 +158,7 @@ const INCIDENT_TYPE_LABELS: Record<string, string> = {
   animal_perdu: 'Animal perdu', evenement_climatique: 'Événement climatique',
   rodage: 'Rodage', vehicule_suspect: 'Véhicule suspect', fugue: 'Fugue',
   route_bloquee: 'Route bloquée', route_fermee: 'Route fermée',
-  malaise: 'Malaise', colis_suspect: 'Colis suspect',
+  malaise: 'Malaise', colis_suspect: 'Colis suspect', ecart_trajet: 'Écart de trajet',
 };
 
 function startAcceptanceTimer(alertId: string, responderId: string) {
@@ -619,7 +619,7 @@ interface StatusHistoryEntry {
 
 interface Alert {
   id: string;
-  type: 'sos' | 'medical' | 'fire' | 'accident' | 'other' | 'broadcast' | 'home_jacking' | 'cambriolage' | 'animal_perdu' | 'evenement_climatique' | 'rodage' | 'vehicule_suspect' | 'fugue' | 'route_bloquee' | 'route_fermee' | 'malaise' | 'colis_suspect';
+  type: 'sos' | 'medical' | 'fire' | 'accident' | 'other' | 'broadcast' | 'home_jacking' | 'cambriolage' | 'animal_perdu' | 'evenement_climatique' | 'rodage' | 'vehicule_suspect' | 'fugue' | 'route_bloquee' | 'route_fermee' | 'malaise' | 'colis_suspect' | 'ecart_trajet';
   severity: 'low' | 'medium' | 'high' | 'critical';
   location: { latitude: number; longitude: number; address: string };
   description: string;
@@ -953,7 +953,7 @@ interface ProximityAlert {
   targetUserId: string;
   targetUserName: string;
   ownerId: string;
-  eventType: 'exit' | 'entry' | 'curfew_violation' | 'route_deviation';
+  eventType: 'exit' | 'entry' | 'curfew_violation' | 'route_deviation' | 'missed_waypoint';
   /** Distance from center when alert triggered */
   distanceMeters: number;
   location: { latitude: number; longitude: number };
@@ -1895,10 +1895,13 @@ function distanceToPolylineMeters(point: { latitude: number; longitude: number }
   return minDist;
 }
 
-function isWithinCommuteWindow(windows: { hour: number; minute: number; durationMinutes: number; daysOfWeek: number[] }[], now: Date = new Date()): boolean {
+// Returns the index of the first commuteWindow currently active, or -1 if
+// none match — the index (combined with today's date) is used to key a live
+// route session, so a fresh commute always starts with all waypoints unvisited.
+function findActiveCommuteWindowIndex(windows: { hour: number; minute: number; durationMinutes: number; daysOfWeek: number[] }[], now: Date = new Date()): number {
   const day = now.getDay();
   const minutesNow = now.getHours() * 60 + now.getMinutes();
-  return windows.some(w => {
+  return windows.findIndex(w => {
     if (!w.daysOfWeek.includes(day)) return false;
     const start = w.hour * 60 + w.minute;
     return minutesNow >= start && minutesNow <= start + w.durationMinutes;
@@ -2825,58 +2828,123 @@ function checkFamilyPerimeters(userId: string, locationData: any) {
 // on_route/off_route state — requires 2 consecutive readings roughly this far
 // apart before a deviation fires, so a single noisy GPS ping never triggers a
 // security escalation on its own.
-const SCHOOL_ROUTE_CONFIRM_MS = 30 * 1000;
+const DAILY_ROUTE_CONFIRM_MS = 30 * 1000;
 
-function checkSchoolRouteDeviation(userId: string, locationData: any) {
+// Who to notify for a confirmed deviation/missed waypoint — fully explicit
+// per-route configuration (alertAllParents / alertParentIds), no implicit
+// "always notify whoever created it" fallback.
+function resolveDailyRouteAlertRecipients(route: DailyRoute): string[] {
+  if (route.alertAllParents) {
+    return getFamilyParentIds(route.targetUserId).filter(id => id !== route.targetUserId);
+  }
+  return route.alertParentIds;
+}
+
+function fireDailyRouteAlert(
+  route: DailyRoute, targetUserId: string, eventType: 'route_deviation' | 'missed_waypoint',
+  location: { latitude: number; longitude: number }, distanceMeters: number, pushBody: string
+) {
+  const alert: ProximityAlert = {
+    id: uuidv4(), perimeterId: route.id, targetUserId, targetUserName: route.targetUserName,
+    ownerId: route.ownerId, eventType, distanceMeters, location, timestamp: Date.now(), acknowledged: false,
+  };
+  proximityAlerts.unshift(alert);
+  if (proximityAlerts.length > 500) proximityAlerts.length = 500;
+  persistProximityAlerts();
+  broadcastToUsers([route.ownerId], { type: 'proximityAlert', data: alert });
+
+  const recipients = resolveDailyRouteAlertRecipients(route);
+  if (recipients.length > 0) {
+    const title = eventType === 'missed_waypoint' ? '🚸 Point de passage manqué' : '🚸 Écart de trajet détecté';
+    sendFamilyPush(recipients, title, pushBody, { type: eventType, routeId: route.id, alertId: alert.id }, { priority: 'high' }).catch(() => {});
+  }
+
+  if (route.alertDispatch) {
+    (async () => {
+      const orgId = adminUsers.get(targetUserId)?.organizationId;
+      const incident: Alert = {
+        id: await generateIncidentId('ecart_trajet', targetUserId, { address: route.label }),
+        type: 'ecart_trajet', severity: 'medium',
+        location: { latitude: location.latitude, longitude: location.longitude, address: route.label },
+        description: pushBody, createdBy: route.targetUserName, reporterId: targetUserId,
+        organizationId: orgId, origin: 'mobile', createdAt: Date.now(), status: 'active',
+        respondingUsers: [], photos: [],
+      };
+      alerts.set(incident.id, incident);
+      linkPossibleDuplicates(incident);
+      persistAlerts();
+      saveAlertToSupabase(incident).catch(() => {});
+      addAuditEntry('incident', 'Écart de trajet', route.targetUserName, pushBody, undefined, orgId);
+      broadcastToOrg(orgId, { type: 'newAlert', data: incident });
+      sendPushToDispatchersAndResponders(incident, route.targetUserName).catch(() => {});
+    })().catch(e => console.error('[DailyRoute] Failed to create dispatch alert:', e));
+  }
+
+  console.log(`[DailyRoute] ${route.targetUserName} — ${eventType} on route ${route.id}`);
+}
+
+function checkDailyRouteProgress(userId: string, locationData: any) {
   if (!locationData?.latitude || !locationData?.longitude) return;
-  const routes = schoolRoutes.get(userId) || [];
+  const routes = dailyRoutes.get(userId) || [];
   if (routes.length === 0) return;
   const now = new Date();
+  const point = { latitude: locationData.latitude, longitude: locationData.longitude };
 
   for (const route of routes) {
-    if (!route.active) continue;
-    if (!isWithinCommuteWindow(route.commuteWindows, now)) continue; // time-window gate
+    if (!route.active || route.waypoints.length === 0) continue;
+    const windowIndex = findActiveCommuteWindowIndex(route.commuteWindows, now);
+    if (windowIndex === -1) continue; // time-window gate
 
-    const dist = distanceToPolylineMeters({ latitude: locationData.latitude, longitude: locationData.longitude }, route.geometry);
-    const currentReading: 'on_route' | 'off_route' = dist > route.corridorMeters ? 'off_route' : 'on_route';
-    const prev = schoolRouteState.get(route.id);
-
-    if (!prev || prev.state !== currentReading) {
-      // Reading changed (or first ever reading for this route) — start a
-      // fresh, not-yet-confirmed streak.
-      schoolRouteState.set(route.id, { state: currentReading, since: Date.now(), confirmed: false });
-      continue;
+    // A fresh commute instance (new day, or a different configured window)
+    // always starts with every waypoint unvisited.
+    const windowKey = `${now.toISOString().slice(0, 10)}-${windowIndex}`;
+    let session = dailyRouteSessions.get(route.id);
+    if (!session || session.windowKey !== windowKey) {
+      session = { windowKey, waypointsVisited: {}, corridorState: null, missedAlerted: false };
+      dailyRouteSessions.set(route.id, session);
     }
-    if (prev.confirmed || Date.now() - prev.since < SCHOOL_ROUTE_CONFIRM_MS) continue;
 
-    prev.confirmed = true;
-    if (currentReading !== 'off_route') continue; // confirmed back on route — no alert needed, just update state above
+    const orderedWaypoints = route.waypoints.slice().sort((a, b) => a.order - b.order);
 
-    const alert: ProximityAlert = {
-      id: uuidv4(),
-      perimeterId: route.id,
-      targetUserId: userId,
-      targetUserName: route.targetUserName,
-      ownerId: route.ownerId,
-      eventType: 'route_deviation',
-      distanceMeters: Math.round(dist),
-      location: { latitude: locationData.latitude, longitude: locationData.longitude },
-      timestamp: Date.now(),
-      acknowledged: false,
-    };
-    proximityAlerts.unshift(alert);
-    if (proximityAlerts.length > 500) proximityAlerts.length = 500;
-    persistProximityAlerts();
+    // Waypoint visitation — unordered, like a patrol checkpoint: just needs
+    // to be physically visited at some point during the commute.
+    for (const wp of orderedWaypoints) {
+      if (session.waypointsVisited[wp.id]) continue;
+      if (haversineDistance(point.latitude, point.longitude, wp.latitude, wp.longitude) <= wp.radiusMeters) {
+        session.waypointsVisited[wp.id] = true;
+      }
+    }
 
-    broadcastToUsers([route.ownerId], { type: 'proximityAlert', data: alert });
+    // Corridor deviation — distance to the polyline connecting the ordered
+    // waypoints, with the same 2-reading hysteresis used everywhere else in
+    // this codebase for GPS-noise-prone transitions.
+    const geometry = orderedWaypoints.map(w => ({ latitude: w.latitude, longitude: w.longitude }));
+    const dist = distanceToPolylineMeters(point, geometry);
+    const currentReading: 'on_route' | 'off_route' = dist > route.corridorMeters ? 'off_route' : 'on_route';
+    const prevCorridor = session.corridorState;
+    if (!prevCorridor || prevCorridor.state !== currentReading) {
+      session.corridorState = { state: currentReading, since: Date.now(), confirmed: false };
+    } else if (!prevCorridor.confirmed && Date.now() - prevCorridor.since >= DAILY_ROUTE_CONFIRM_MS) {
+      prevCorridor.confirmed = true;
+      if (currentReading === 'off_route') {
+        fireDailyRouteAlert(route, userId, 'route_deviation', point, Math.round(dist),
+          `${route.targetUserName} s'est écarté(e) du trajet habituel vers ${route.label}.`);
+      }
+    }
 
-    const parentIds = getFamilyParentIds(userId).filter(id => id !== userId);
-    const notifyIds = Array.from(new Set([route.ownerId, ...parentIds]));
-    sendFamilyPush(notifyIds, '🚸 Écart de trajet détecté',
-      `${route.targetUserName} s'est écarté(e) du trajet habituel vers ${route.schoolLabel}.`,
-      { type: 'route_deviation', routeId: route.id, alertId: alert.id }, { priority: 'high' }).catch(() => {});
-
-    console.log(`[SchoolRoute] ${route.targetUserName} deviated from route ${route.id} (${Math.round(dist)}m from corridor, tolerance ${route.corridorMeters}m)`);
+    // Missed-waypoint check — evaluated once, on arrival at the final
+    // waypoint (mirrors how a patrol round is only summarized at the end,
+    // not point-by-point): were all the earlier ones actually visited?
+    const lastWp = orderedWaypoints[orderedWaypoints.length - 1];
+    if (!session.missedAlerted && session.waypointsVisited[lastWp.id]) {
+      const missed = orderedWaypoints.filter(w => w.id !== lastWp.id && !session!.waypointsVisited[w.id]);
+      if (missed.length > 0) {
+        session.missedAlerted = true;
+        const missedNames = missed.map(w => w.label || `point ${w.order + 1}`).join(', ');
+        fireDailyRouteAlert(route, userId, 'missed_waypoint', point, 0,
+          `${route.targetUserName} est arrivé(e) à ${route.label} sans passer par : ${missedNames}.`);
+      }
+    }
   }
 }
 
@@ -3169,7 +3237,7 @@ function handleLocationUpdate(ws: any, userId: string, userRole: string, locatio
 
   // Check family perimeters (proximity alerts)
   checkFamilyPerimeters(userId, locationData);
-  checkSchoolRouteDeviation(userId, locationData);
+  checkDailyRouteProgress(userId, locationData);
 
   // Broadcast to dispatchers - use appropriate event type based on role
   const userName = adminUsers.get(userId)?.name || userId;
@@ -5717,7 +5785,7 @@ app.put('/dispatch/incidents/:id/assign', (req, res) => {
     evenement_climatique: '\u00c9v\u00e9nement climatique', rodage: 'Rodage',
     vehicule_suspect: 'V\u00e9hicule suspect', fugue: 'Fugue',
     route_bloquee: 'Route bloqu\u00e9e', route_fermee: 'Route ferm\u00e9e', other: 'Autre',
-    malaise: 'Malaise', colis_suspect: 'Colis suspect',
+    malaise: 'Malaise', colis_suspect: 'Colis suspect', ecart_trajet: 'Écart de trajet',
   };
   const typeLabel = TYPE_LABELS[alert.type] || alert.type;
   const sevLabel = alert.severity === 'critical' ? 'CRITIQUE' : alert.severity === 'high' ? '\u00c9LEV\u00c9' : alert.severity === 'medium' ? 'MOYEN' : 'FAIBLE';
@@ -8425,7 +8493,7 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
     loadPreauthorizedGuestsFromSupabase(),
     loadAuthorizedPickupPeopleFromSupabase(),
     loadMedicalInfoFromSupabase(),
-    loadSchoolRoutesFromSupabase(),
+    loadDailyRoutesFromSupabase(),
     loadMainCouranteNotesFromSupabase(),
     loadThreatAnalysesFromSupabase(),
   ]);
@@ -9017,7 +9085,7 @@ async function generateIncidentId(type: string, createdBy: string, location: { a
       sos: 'SOS', medical: 'MÉDICAL', fire: 'INCENDIE', security: 'SÉCURITÉ',
       accident: 'ACCIDENT', broadcast: 'BROADCAST', home_jacking: 'HOME-JACKING',
       cambriolage: 'CAMBRIOLAGE', other: 'INCIDENT',
-      malaise: 'MALAISE', colis_suspect: 'COLIS SUSPECT',
+      malaise: 'MALAISE', colis_suspect: 'COLIS SUSPECT', ecart_trajet: 'ÉCART DE TRAJET',
     };
     const typeLabel = TYPE_LABELS[type] || type.toUpperCase();
 
@@ -9352,23 +9420,38 @@ interface MedicalInfo {
   updatedAt: number;
 }
 
-// A reference commute route (e.g. home -> school) with a deviation
-// "corridor" — the one genuinely new geometry primitive in the family
-// features work, everything else reuses point/radius perimeters. Time-window
-// gated (commuteWindows) so it's only ever evaluated during an actual
-// commute, and only alerts on a confirmed multi-reading transition (see
-// checkSchoolRouteDeviation) to keep false positives bounded.
-interface SchoolRoute {
+// A daily commute route (school, office, anywhere) defined by parent-placed
+// GPS waypoints (in order — the polyline connecting them IS the expected
+// route) rather than an auto-fetched Mapbox path. Each waypoint must be
+// physically visited (like a patrol checkpoint) during the commute window;
+// missing one, or straying more than corridorMeters from the waypoint-to-
+// waypoint path, triggers an alert — see checkDailyRouteProgress. Time-window
+// gated so it's only ever evaluated during an actual commute, and only
+// alerts on a confirmed multi-reading transition to keep false positives
+// bounded.
+interface RouteWaypoint {
+  id: string;
+  order: number;
+  label?: string;
+  latitude: number;
+  longitude: number;
+  radiusMeters: number;
+}
+
+interface DailyRoute {
   id: string;
   ownerId: string;
   targetUserId: string;
   targetUserName: string;
-  homeAddressId?: string;
-  schoolLabel: string;
-  schoolLocation: { latitude: number; longitude: number; address?: string };
-  geometry: { latitude: number; longitude: number }[];
+  label: string; // e.g. "École", "Bureau"
+  waypoints: RouteWaypoint[]; // ordered: first = origin, last = destination
   corridorMeters: number;
   commuteWindows: { hour: number; minute: number; durationMinutes: number; daysOfWeek: number[] }[];
+  // Who gets alerted on a confirmed deviation/missed waypoint — fully
+  // explicit, no implicit "always notify whoever created it" fallback.
+  alertAllParents: boolean;
+  alertParentIds: string[]; // used when alertAllParents is false
+  alertDispatch: boolean; // also raise a real (medium-severity) incident for dispatch
   active: boolean;
   createdAt: number;
   updatedAt: number;
@@ -9380,10 +9463,21 @@ const travelItineraries = new Map<string, TravelItinerary[]>(); // userId -> iti
 const preauthorizedGuests = new Map<string, PreAuthorizedGuest[]>(); // addressId -> guests
 const authorizedPickupPeople = new Map<string, AuthorizedPickupPerson[]>(); // childUserId -> people
 const medicalInfoByUser = new Map<string, MedicalInfo>(); // userId -> record
-const schoolRoutes = new Map<string, SchoolRoute[]>(); // targetUserId -> routes
-// route deviation hysteresis: only alert on a confirmed on_route -> off_route
-// transition across 2 consecutive readings, not a single noisy GPS ping.
-const schoolRouteState = new Map<string, { state: 'on_route' | 'off_route'; since: number; confirmed: boolean }>(); // routeId -> state
+const dailyRoutes = new Map<string, DailyRoute[]>(); // targetUserId -> routes
+
+// Live per-commute tracking. windowKey identifies which specific commute
+// instance this is (today's date + which configured window matched) so a
+// fresh trip always starts with every waypoint unvisited rather than
+// carrying over state from yesterday's commute. Deviation alerts only fire
+// on a confirmed on_route -> off_route transition across 2 consecutive
+// readings, not a single noisy GPS ping — same hysteresis as before.
+interface DailyRouteSession {
+  windowKey: string;
+  waypointsVisited: Record<string, boolean>;
+  corridorState: { state: 'on_route' | 'off_route'; since: number; confirmed: boolean } | null;
+  missedAlerted: boolean;
+}
+const dailyRouteSessions = new Map<string, DailyRouteSession>(); // routeId -> session
 
 async function loadKnownPeopleFromSupabase(): Promise<void> {
   try {
@@ -9449,41 +9543,41 @@ async function loadMedicalInfoFromSupabase(): Promise<void> {
   } catch (e) { console.error('[Supabase] loadMedicalInfoFromSupabase error:', e); }
 }
 
-async function loadSchoolRoutesFromSupabase(): Promise<void> {
+async function loadDailyRoutesFromSupabase(): Promise<void> {
   try {
-    const { data, error } = await supabaseAdmin.from('school_routes').select('*');
-    if (error) { console.error('[Supabase] Failed to load school_routes:', error.message); return; }
+    const { data, error } = await supabaseAdmin.from('daily_routes').select('*');
+    if (error) { console.error('[Supabase] Failed to load daily_routes:', error.message); return; }
     if (data && data.length > 0) {
-      schoolRoutes.clear();
+      dailyRoutes.clear();
       data.forEach((r: any) => {
-        const route: SchoolRoute = {
+        const route: DailyRoute = {
           id: r.id, ownerId: r.owner_id, targetUserId: r.target_user_id, targetUserName: r.target_user_name || '',
-          homeAddressId: r.home_address_id || undefined, schoolLabel: r.school_label || '',
-          schoolLocation: { latitude: r.school_lat, longitude: r.school_lon, address: r.school_address || undefined },
-          geometry: r.geometry || [], corridorMeters: r.corridor_meters || 275,
-          commuteWindows: r.commute_windows || [], active: r.active !== false,
+          label: r.label || '', waypoints: r.waypoints || [], corridorMeters: r.corridor_meters || 100,
+          commuteWindows: r.commute_windows || [],
+          alertAllParents: r.alert_all_parents !== false, alertParentIds: r.alert_parent_ids || [],
+          alertDispatch: r.alert_dispatch || false, active: r.active !== false,
           createdAt: r.created_at, updatedAt: r.updated_at,
         };
-        if (!schoolRoutes.has(route.targetUserId)) schoolRoutes.set(route.targetUserId, []);
-        schoolRoutes.get(route.targetUserId)!.push(route);
+        if (!dailyRoutes.has(route.targetUserId)) dailyRoutes.set(route.targetUserId, []);
+        dailyRoutes.get(route.targetUserId)!.push(route);
       });
-      console.log(`[Supabase] Loaded ${data.length} school routes`);
+      console.log(`[Supabase] Loaded ${data.length} daily routes`);
     }
-  } catch (e) { console.error('[Supabase] loadSchoolRoutesFromSupabase error:', e); }
+  } catch (e) { console.error('[Supabase] loadDailyRoutesFromSupabase error:', e); }
 }
 
-async function saveSchoolRouteToSupabase(route: SchoolRoute): Promise<void> {
+async function saveDailyRouteToSupabase(route: DailyRoute): Promise<void> {
   try {
-    const { error } = await supabaseAdmin.from('school_routes').upsert({
+    const { error } = await supabaseAdmin.from('daily_routes').upsert({
       id: route.id, owner_id: route.ownerId, target_user_id: route.targetUserId, target_user_name: route.targetUserName,
-      home_address_id: route.homeAddressId || null, school_label: route.schoolLabel,
-      school_lat: route.schoolLocation.latitude, school_lon: route.schoolLocation.longitude,
-      school_address: route.schoolLocation.address || null,
-      geometry: route.geometry, corridor_meters: route.corridorMeters, commute_windows: route.commuteWindows,
+      label: route.label, waypoints: route.waypoints, corridor_meters: route.corridorMeters,
+      commute_windows: route.commuteWindows,
+      alert_all_parents: route.alertAllParents, alert_parent_ids: route.alertParentIds,
+      alert_dispatch: route.alertDispatch,
       active: route.active, created_at: route.createdAt, updated_at: route.updatedAt,
     });
-    if (error) console.error('[Supabase] saveSchoolRoute error:', error.message);
-  } catch (e) { console.error('[Supabase] saveSchoolRoute error:', e); }
+    if (error) console.error('[Supabase] saveDailyRoute error:', error.message);
+  } catch (e) { console.error('[Supabase] saveDailyRoute error:', e); }
 }
 
 async function loadPlannedInterventionsFromSupabase(): Promise<void> {
@@ -9833,85 +9927,88 @@ app.get('/api/family/weekly-summary', requireAuth, (req, res) => {
   res.json({ userId, since, until: Date.now(), residences });
 });
 
-// ─── School commute route deviation alerts ───────────────────────────────
-app.get('/api/family/school-routes', requireAuth, (req, res) => {
+// ─── Daily route (commute) deviation alerts ──────────────────────────────
+app.get('/api/family/daily-routes', requireAuth, (req, res) => {
   const targetUserId = req.query.targetUserId as string;
   if (!targetUserId) return res.status(400).json({ error: 'targetUserId required' });
   if (!canEditAddressAssets(targetUserId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
-  res.json(schoolRoutes.get(targetUserId) || []);
+  res.json(dailyRoutes.get(targetUserId) || []);
 });
 
-// Fetches the route geometry once via fetchDirectionsAlternatives/Mapbox (the
-// same routing engine the patrol route-planning feature uses) and stores it
-// simplified — the corridor is checked against this stored geometry on every
-// location update, not recomputed live.
-app.post('/api/family/school-routes', requireAuth, async (req, res) => {
-  const { targetUserId, targetUserName, homeAddressId, schoolLabel, schoolLocation, corridorMeters, commuteWindows, mode } = req.body;
-  if (!targetUserId || !schoolLabel || schoolLocation?.latitude == null || schoolLocation?.longitude == null) {
-    return res.status(400).json({ error: 'targetUserId, schoolLabel and schoolLocation are required' });
+// Waypoints are placed by the parent (or the account holder themselves) —
+// no routing API involved. The polyline connecting them, in order, IS the
+// expected route; the corridor is checked against it on every location
+// update, and each waypoint must be individually visited (see
+// checkDailyRouteProgress).
+app.post('/api/family/daily-routes', requireAuth, async (req, res) => {
+  const { targetUserId, targetUserName, label, waypoints, corridorMeters, commuteWindows, alertAllParents, alertParentIds, alertDispatch } = req.body;
+  if (!targetUserId || !label || !Array.isArray(waypoints) || waypoints.length < 2) {
+    return res.status(400).json({ error: 'targetUserId, label and at least 2 waypoints are required' });
+  }
+  if (waypoints.some((w: any) => w?.latitude == null || w?.longitude == null)) {
+    return res.status(400).json({ error: 'Every waypoint needs latitude and longitude' });
   }
   const caller = req.supabaseUser!;
   if (!canEditAddressAssets(targetUserId, caller)) return res.status(403).json({ error: 'Not authorized' });
 
-  const targetAddresses = userAddresses.get(targetUserId) || [];
-  let origin: { latitude: number; longitude: number } | null = null;
-  if (homeAddressId) {
-    const addr = targetAddresses.find(a => a.id === homeAddressId);
-    if (addr?.latitude != null && addr?.longitude != null) origin = { latitude: addr.latitude, longitude: addr.longitude };
-  }
-  if (!origin) {
-    const primary = targetAddresses.find(a => a.isPrimary) || targetAddresses[0];
-    if (primary?.latitude != null && primary?.longitude != null) origin = { latitude: primary.latitude, longitude: primary.longitude };
-  }
-  if (!origin) return res.status(400).json({ error: 'No home address with coordinates found for this family member' });
-
-  let geometry: { latitude: number; longitude: number }[];
-  try {
-    const candidates = await fetchDirectionsAlternatives(origin, { latitude: schoolLocation.latitude, longitude: schoolLocation.longitude }, mode === 'walking' ? 'walking' : 'driving');
-    geometry = simplifyGeometry(candidates[0].geometry, 80);
-  } catch (e) {
-    console.error('[SchoolRoute] Failed to fetch route geometry:', e);
-    return res.status(502).json({ error: "Impossible de calculer l'itinéraire" });
-  }
-
   const now = Date.now();
-  const route: SchoolRoute = {
+  const route: DailyRoute = {
     id: uuidv4(), ownerId: caller.id, targetUserId,
     targetUserName: targetUserName || adminUsers.get(targetUserId)?.name || targetUserId,
-    homeAddressId: homeAddressId || undefined, schoolLabel, schoolLocation, geometry,
-    corridorMeters: corridorMeters ? Number(corridorMeters) : 275,
+    label,
+    waypoints: waypoints.map((w: any, i: number) => ({
+      id: uuidv4(), order: i, label: w.label || undefined,
+      latitude: Number(w.latitude), longitude: Number(w.longitude),
+      radiusMeters: w.radiusMeters ? Number(w.radiusMeters) : 100,
+    })),
+    corridorMeters: corridorMeters ? Number(corridorMeters) : 100,
     commuteWindows: Array.isArray(commuteWindows) ? commuteWindows : [],
+    alertAllParents: alertAllParents !== false,
+    alertParentIds: Array.isArray(alertParentIds) ? alertParentIds : [],
+    alertDispatch: Boolean(alertDispatch),
     active: true, createdAt: now, updatedAt: now,
   };
-  if (!schoolRoutes.has(targetUserId)) schoolRoutes.set(targetUserId, []);
-  schoolRoutes.get(targetUserId)!.push(route);
-  saveSchoolRouteToSupabase(route).catch(e => console.error('[Supabase] Failed to persist school route:', e));
+  if (!dailyRoutes.has(targetUserId)) dailyRoutes.set(targetUserId, []);
+  dailyRoutes.get(targetUserId)!.push(route);
+  saveDailyRouteToSupabase(route).catch(e => console.error('[Supabase] Failed to persist daily route:', e));
   res.status(201).json(route);
 });
 
-app.put('/api/family/school-routes/:id', requireAuth, async (req, res) => {
-  let found: SchoolRoute | undefined;
-  for (const list of schoolRoutes.values()) { const r = list.find(x => x.id === (req.params.id as string)); if (r) { found = r; break; } }
+app.put('/api/family/daily-routes/:id', requireAuth, async (req, res) => {
+  let found: DailyRoute | undefined;
+  for (const list of dailyRoutes.values()) { const r = list.find(x => x.id === (req.params.id as string)); if (r) { found = r; break; } }
   if (!found) return res.status(404).json({ error: 'Route not found' });
   if (!canEditAddressAssets(found.targetUserId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
-  const { active, corridorMeters, commuteWindows } = req.body;
+  const { active, label, waypoints, corridorMeters, commuteWindows, alertAllParents, alertParentIds, alertDispatch } = req.body;
   if (active !== undefined) found.active = Boolean(active);
+  if (label !== undefined) found.label = label;
+  if (Array.isArray(waypoints) && waypoints.length >= 2) {
+    found.waypoints = waypoints.map((w: any, i: number) => ({
+      id: w.id || uuidv4(), order: i, label: w.label || undefined,
+      latitude: Number(w.latitude), longitude: Number(w.longitude),
+      radiusMeters: w.radiusMeters ? Number(w.radiusMeters) : 100,
+    }));
+  }
   if (corridorMeters !== undefined) found.corridorMeters = Number(corridorMeters);
   if (Array.isArray(commuteWindows)) found.commuteWindows = commuteWindows;
+  if (alertAllParents !== undefined) found.alertAllParents = Boolean(alertAllParents);
+  if (Array.isArray(alertParentIds)) found.alertParentIds = alertParentIds;
+  if (alertDispatch !== undefined) found.alertDispatch = Boolean(alertDispatch);
   found.updatedAt = Date.now();
-  saveSchoolRouteToSupabase(found).catch(e => console.error('[Supabase] Failed to persist school route update:', e));
+  dailyRouteSessions.delete(found.id); // waypoints/corridor may have changed — start the next commute fresh
+  saveDailyRouteToSupabase(found).catch(e => console.error('[Supabase] Failed to persist daily route update:', e));
   res.json(found);
 });
 
-app.delete('/api/family/school-routes/:id', requireAuth, async (req, res) => {
-  for (const list of schoolRoutes.values()) {
+app.delete('/api/family/daily-routes/:id', requireAuth, async (req, res) => {
+  for (const list of dailyRoutes.values()) {
     const idx = list.findIndex(x => x.id === (req.params.id as string));
     if (idx !== -1) {
       if (!canEditAddressAssets(list[idx].targetUserId, req.supabaseUser!)) return res.status(403).json({ error: 'Not authorized' });
       list.splice(idx, 1);
-      schoolRouteState.delete(req.params.id as string);
-      const { error } = await supabaseAdmin.from('school_routes').delete().eq('id', req.params.id as string);
-      if (error) console.error('[Supabase] Failed to persist school route deletion:', error.message);
+      dailyRouteSessions.delete(req.params.id as string);
+      const { error } = await supabaseAdmin.from('daily_routes').delete().eq('id', req.params.id as string);
+      if (error) console.error('[Supabase] Failed to persist daily route deletion:', error.message);
       return res.json({ success: true });
     }
   }

@@ -181,15 +181,27 @@ interface WeeklySummary {
   residences: WeeklySummaryResidence[];
 }
 
-interface SchoolRoute {
+interface RouteWaypoint {
+  id: string;
+  order: number;
+  label?: string;
+  latitude: number;
+  longitude: number;
+  radiusMeters: number;
+}
+
+interface DailyRoute {
   id: string;
   ownerId: string;
   targetUserId: string;
   targetUserName: string;
-  schoolLabel: string;
-  schoolLocation: { latitude: number; longitude: number; address?: string };
+  label: string;
+  waypoints: RouteWaypoint[];
   corridorMeters: number;
   commuteWindows: { hour: number; minute: number; durationMinutes: number; daysOfWeek: number[] }[];
+  alertAllParents: boolean;
+  alertParentIds: string[];
+  alertDispatch: boolean;
   active: boolean;
   createdAt: number;
   updatedAt: number;
@@ -457,19 +469,29 @@ export default function FamilyScreen() {
   // School commute route deviation alerts — reuses perimeterAddress/perimeterCenter
   // for the school's own address search (never open at the same time as the
   // perimeter/curfew modals that also share that state).
-  const [showSchoolRouteModal, setShowSchoolRouteModal] = useState(false);
-  const [schoolRouteTarget, setSchoolRouteTarget] = useState<FamilyMember | null>(null);
-  const [schoolRoutesList, setSchoolRoutesList] = useState<SchoolRoute[]>([]);
-  const [schoolRoutesLoading, setSchoolRoutesLoading] = useState(false);
-  const [showAddSchoolRouteForm, setShowAddSchoolRouteForm] = useState(false);
-  const [schoolLabel, setSchoolLabel] = useState('');
-  const [schoolRouteCorridor, setSchoolRouteCorridor] = useState('275');
-  const [schoolRouteHour, setSchoolRouteHour] = useState('8');
-  const [schoolRouteMinute, setSchoolRouteMinute] = useState('00');
-  const [schoolRouteDuration, setSchoolRouteDuration] = useState('45');
-  const [schoolRouteDays, setSchoolRouteDays] = useState<number[]>([1, 2, 3, 4, 5]);
-  const [schoolRouteMode, setSchoolRouteMode] = useState<'driving' | 'walking'>('walking');
-  const [schoolRouteSaving, setSchoolRouteSaving] = useState(false);
+  const [showDailyRouteModal, setShowDailyRouteModal] = useState(false);
+  const [dailyRouteTarget, setDailyRouteTarget] = useState<FamilyMember | null>(null);
+  const [dailyRoutesList, setDailyRoutesList] = useState<DailyRoute[]>([]);
+  const [dailyRoutesLoading, setDailyRoutesLoading] = useState(false);
+  const [showAddDailyRouteForm, setShowAddDailyRouteForm] = useState(false);
+  const [routeLabel, setRouteLabel] = useState('');
+  const [routeCorridor, setRouteCorridor] = useState('100');
+  const [routeHour, setRouteHour] = useState('8');
+  const [routeMinute, setRouteMinute] = useState('00');
+  const [routeDuration, setRouteDuration] = useState('45');
+  const [routeDays, setRouteDays] = useState<number[]>([1, 2, 3, 4, 5]);
+  const [routeSaving, setRouteSaving] = useState(false);
+  // Waypoints being assembled for the route currently being created — each
+  // added via the shared address-search widget (perimeterAddress/perimeterCenter),
+  // one at a time, in the order they should be visited.
+  const [newRouteWaypoints, setNewRouteWaypoints] = useState<RouteWaypoint[]>([]);
+  const [waypointLabel, setWaypointLabel] = useState('');
+  const [waypointRadius, setWaypointRadius] = useState('100');
+  // Alert recipients — who gets notified on a confirmed deviation/missed waypoint.
+  const [routeAlertAllParents, setRouteAlertAllParents] = useState(true);
+  const [routeAlertParentIds, setRouteAlertParentIds] = useState<string[]>([]);
+  const [routeAlertDispatch, setRouteAlertDispatch] = useState(false);
+  const [routeParentContacts, setRouteParentContacts] = useState<{ userId: string; name: string }[]>([]);
 
   // Address autocomplete
   const [addressSuggestions, setAddressSuggestions] = useState<Array<{ display_name: string; lat: string; lon: string }>>([]);
@@ -1670,64 +1692,107 @@ export default function FamilyScreen() {
     setWeeklySummaryLoading(false);
   }, [BASE]);
 
-  // ─── School Commute Route CRUD ───────────────────────────────────────────
+  // ─── Daily Route (commute) CRUD ──────────────────────────────────────────
 
-  const openSchoolRouteModal = useCallback(async (member: FamilyMember) => {
-    setSchoolRouteTarget(member);
-    setShowSchoolRouteModal(true);
-    setShowAddSchoolRouteForm(false);
-    setSchoolLabel(''); setPerimeterAddress(''); setPerimeterCenter(null);
-    setSchoolRouteCorridor('275'); setSchoolRouteHour('8'); setSchoolRouteMinute('00');
-    setSchoolRouteDuration('45'); setSchoolRouteDays([1, 2, 3, 4, 5]); setSchoolRouteMode('walking');
-    setSchoolRoutesList([]);
-    setSchoolRoutesLoading(true);
-    try {
-      const res = await fetchWithTimeout(`${BASE}/api/family/school-routes?targetUserId=${member.userId}`, { timeout: 10000, headers: await authHeader() });
-      const data = await res.json();
-      setSchoolRoutesList(Array.isArray(data) ? data : []);
-    } catch (e) {
-      console.error('[Family] Error fetching school routes:', e);
-    }
-    setSchoolRoutesLoading(false);
-  }, [BASE]);
-
-  const toggleSchoolRouteDay = (day: number) => {
-    setSchoolRouteDays(prev => prev.includes(day) ? prev.filter(d => d !== day) : [...prev, day].sort());
+  const resetNewRouteForm = () => {
+    setRouteLabel(''); setRouteCorridor('100'); setRouteHour('8'); setRouteMinute('00');
+    setRouteDuration('45'); setRouteDays([1, 2, 3, 4, 5]);
+    setNewRouteWaypoints([]); setWaypointLabel(''); setWaypointRadius('100');
+    setPerimeterAddress(''); setPerimeterCenter(null);
+    setRouteAlertAllParents(true); setRouteAlertParentIds([]); setRouteAlertDispatch(false);
+    setShowAddDailyRouteForm(false);
   };
 
-  const createSchoolRoute = useCallback(async () => {
-    if (!schoolRouteTarget || !schoolLabel.trim() || !perimeterCenter) {
-      Alert.alert('Erreur', 'Indiquez le nom et l\'adresse de l\'école');
+  const openDailyRouteModal = useCallback(async (member: FamilyMember) => {
+    setDailyRouteTarget(member);
+    setShowDailyRouteModal(true);
+    resetNewRouteForm();
+    setDailyRoutesList([]);
+    setRouteParentContacts([]);
+    setDailyRoutesLoading(true);
+    try {
+      const [routesRes, contactsRes] = await Promise.all([
+        fetchWithTimeout(`${BASE}/api/family/daily-routes?targetUserId=${member.userId}`, { timeout: 10000, headers: await authHeader() }),
+        fetchWithTimeout(`${BASE}/api/family/parent-contacts?userId=${member.userId}`, { timeout: 10000, headers: await authHeader() }),
+      ]);
+      const routesData = await routesRes.json();
+      setDailyRoutesList(Array.isArray(routesData) ? routesData : []);
+      const contactsData = await contactsRes.json();
+      setRouteParentContacts(Array.isArray(contactsData) ? contactsData : []);
+    } catch (e) {
+      console.error('[Family] Error fetching daily routes:', e);
+    }
+    setDailyRoutesLoading(false);
+  }, [BASE]);
+
+  const toggleRouteDay = (day: number) => {
+    setRouteDays(prev => prev.includes(day) ? prev.filter(d => d !== day) : [...prev, day].sort());
+  };
+
+  const toggleAlertParentId = (userId: string) => {
+    setRouteAlertParentIds(prev => prev.includes(userId) ? prev.filter(id => id !== userId) : [...prev, userId]);
+  };
+
+  const addWaypointToNewRoute = () => {
+    if (!perimeterCenter) {
+      Alert.alert('Erreur', 'Recherchez et sélectionnez une adresse pour ce point');
       return;
     }
-    if (schoolRouteDays.length === 0) {
+    setNewRouteWaypoints(prev => [...prev, {
+      id: `draft-${prev.length}`, order: prev.length,
+      label: waypointLabel.trim() || undefined,
+      latitude: perimeterCenter.latitude, longitude: perimeterCenter.longitude,
+      radiusMeters: Number(waypointRadius) || 100,
+    }]);
+    setWaypointLabel(''); setWaypointRadius('100'); setPerimeterAddress(''); setPerimeterCenter(null);
+  };
+
+  const removeWaypointFromNewRoute = (index: number) => {
+    setNewRouteWaypoints(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const createDailyRoute = useCallback(async () => {
+    if (!dailyRouteTarget || !routeLabel.trim()) {
+      Alert.alert('Erreur', 'Indiquez le nom de la destination');
+      return;
+    }
+    if (newRouteWaypoints.length < 2) {
+      Alert.alert('Erreur', 'Ajoutez au moins 2 points (départ et arrivée)');
+      return;
+    }
+    if (routeDays.length === 0) {
       Alert.alert('Erreur', 'Sélectionnez au moins un jour');
       return;
     }
-    setSchoolRouteSaving(true);
+    if (!routeAlertAllParents && routeAlertParentIds.length === 0 && !routeAlertDispatch) {
+      Alert.alert('Erreur', 'Choisissez au moins un destinataire pour les alertes');
+      return;
+    }
+    setRouteSaving(true);
     try {
-      const res = await fetchWithTimeout(`${BASE}/api/family/school-routes`, {
+      const res = await fetchWithTimeout(`${BASE}/api/family/daily-routes`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
         body: JSON.stringify({
-          targetUserId: schoolRouteTarget.userId,
-          targetUserName: schoolRouteTarget.name,
-          schoolLabel: schoolLabel.trim(),
-          schoolLocation: { latitude: perimeterCenter.latitude, longitude: perimeterCenter.longitude, address: perimeterAddress },
-          corridorMeters: Number(schoolRouteCorridor) || 275,
+          targetUserId: dailyRouteTarget.userId,
+          targetUserName: dailyRouteTarget.name,
+          label: routeLabel.trim(),
+          waypoints: newRouteWaypoints,
+          corridorMeters: Number(routeCorridor) || 100,
           commuteWindows: [{
-            hour: Number(schoolRouteHour) || 0, minute: Number(schoolRouteMinute) || 0,
-            durationMinutes: Number(schoolRouteDuration) || 45, daysOfWeek: schoolRouteDays,
+            hour: Number(routeHour) || 0, minute: Number(routeMinute) || 0,
+            durationMinutes: Number(routeDuration) || 45, daysOfWeek: routeDays,
           }],
-          mode: schoolRouteMode,
+          alertAllParents: routeAlertAllParents,
+          alertParentIds: routeAlertParentIds,
+          alertDispatch: routeAlertDispatch,
         }),
         timeout: 15000,
       });
       if (res.ok) {
         const route = await res.json();
-        setSchoolRoutesList(prev => [...prev, route]);
-        setShowAddSchoolRouteForm(false);
-        setSchoolLabel(''); setPerimeterAddress(''); setPerimeterCenter(null);
+        setDailyRoutesList(prev => [...prev, route]);
+        resetNewRouteForm();
       } else {
         const err = await res.json();
         Alert.alert('Erreur', err.error || 'Impossible de créer le trajet');
@@ -1735,34 +1800,34 @@ export default function FamilyScreen() {
     } catch (e) {
       Alert.alert('Erreur', 'Erreur réseau');
     }
-    setSchoolRouteSaving(false);
-  }, [BASE, schoolRouteTarget, schoolLabel, perimeterCenter, perimeterAddress, schoolRouteCorridor, schoolRouteHour, schoolRouteMinute, schoolRouteDuration, schoolRouteDays, schoolRouteMode]);
+    setRouteSaving(false);
+  }, [BASE, dailyRouteTarget, routeLabel, newRouteWaypoints, routeCorridor, routeHour, routeMinute, routeDuration, routeDays, routeAlertAllParents, routeAlertParentIds, routeAlertDispatch]);
 
-  const toggleSchoolRouteActive = useCallback(async (route: SchoolRoute) => {
-    setSchoolRoutesList(prev => prev.map(r => r.id === route.id ? { ...r, active: !r.active } : r));
+  const toggleDailyRouteActive = useCallback(async (route: DailyRoute) => {
+    setDailyRoutesList(prev => prev.map(r => r.id === route.id ? { ...r, active: !r.active } : r));
     try {
-      await fetchWithTimeout(`${BASE}/api/family/school-routes/${route.id}`, {
+      await fetchWithTimeout(`${BASE}/api/family/daily-routes/${route.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
         body: JSON.stringify({ active: !route.active }),
         timeout: 10000,
       });
     } catch (e) {
-      console.error('[Family] Error toggling school route:', e);
-      setSchoolRoutesList(prev => prev.map(r => r.id === route.id ? { ...r, active: route.active } : r));
+      console.error('[Family] Error toggling daily route:', e);
+      setDailyRoutesList(prev => prev.map(r => r.id === route.id ? { ...r, active: route.active } : r));
     }
   }, [BASE]);
 
-  const deleteSchoolRoute = useCallback((route: SchoolRoute) => {
-    Alert.alert('Supprimer', `Supprimer le trajet vers ${route.schoolLabel} ?`, [
+  const deleteDailyRoute = useCallback((route: DailyRoute) => {
+    Alert.alert('Supprimer', `Supprimer le trajet vers ${route.label} ?`, [
       { text: 'Annuler', style: 'cancel' },
       {
         text: 'Supprimer', style: 'destructive', onPress: async () => {
           try {
-            await fetchWithTimeout(`${BASE}/api/family/school-routes/${route.id}`, { method: 'DELETE', headers: await authHeader(), timeout: 10000 });
-            setSchoolRoutesList(prev => prev.filter(r => r.id !== route.id));
+            await fetchWithTimeout(`${BASE}/api/family/daily-routes/${route.id}`, { method: 'DELETE', headers: await authHeader(), timeout: 10000 });
+            setDailyRoutesList(prev => prev.filter(r => r.id !== route.id));
           } catch (e) {
-            console.error('[Family] Error deleting school route:', e);
+            console.error('[Family] Error deleting daily route:', e);
           }
         },
       },
@@ -1835,6 +1900,10 @@ export default function FamilyScreen() {
           <TouchableOpacity style={styles.actionBtn} onPress={() => openWeeklySummary(selfMember)}>
             <IconSymbol name="chart.bar.fill" size={18} color="#1e3a5f" />
             <Text style={styles.actionBtnText}>Résumé hebdo</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.actionBtn} onPress={() => openDailyRouteModal(selfMember)}>
+            <IconSymbol name="map.fill" size={18} color="#1e3a5f" />
+            <Text style={styles.actionBtnText}>Trajet quotidien</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -2040,10 +2109,10 @@ export default function FamilyScreen() {
         {!isCallerAdo && (
           <TouchableOpacity
             style={styles.actionBtn}
-            onPress={() => openSchoolRouteModal(item)}
+            onPress={() => openDailyRouteModal(item)}
           >
             <IconSymbol name="map.fill" size={18} color="#1e3a5f" />
-            <Text style={styles.actionBtnText}>Trajet école</Text>
+            <Text style={styles.actionBtnText}>Trajet quotidien</Text>
           </TouchableOpacity>
         )}
       </View>
@@ -3463,32 +3532,50 @@ export default function FamilyScreen() {
         </View>
       </Modal>
 
-      <Modal visible={showSchoolRouteModal} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowSchoolRouteModal(false)}>
+      <Modal visible={showDailyRouteModal} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowDailyRouteModal(false)}>
         <View style={styles.modalContainer}>
           <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Trajet école — {schoolRouteTarget?.name}</Text>
-            <TouchableOpacity onPress={() => { setShowSchoolRouteModal(false); setSchoolRouteTarget(null); }}>
+            <Text style={styles.modalTitle}>Trajet quotidien — {dailyRouteTarget?.name}</Text>
+            <TouchableOpacity onPress={() => { setShowDailyRouteModal(false); setDailyRouteTarget(null); }}>
               <IconSymbol name="xmark.circle.fill" size={28} color="#6B7280" />
             </TouchableOpacity>
           </View>
 
           <ScrollView style={{ padding: 16 }}>
             <Text style={styles.emptySubtitle}>
-              Recevez une alerte si {schoolRouteTarget?.name} s&apos;écarte du trajet habituel pendant l&apos;heure de commute configurée.
+              Placez les points GPS qui définissent le trajet (départ, étapes, arrivée). Une alerte est envoyée si {dailyRouteTarget?.name} s&apos;écarte du trajet ou n&apos;est jamais passé(e) par un point, pendant l&apos;heure de commute configurée.
             </Text>
 
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, marginBottom: 8 }}>
               <Text style={styles.formLabel}>Trajets configurés</Text>
-              <TouchableOpacity onPress={() => setShowAddSchoolRouteForm(v => !v)}>
-                <Text style={styles.providerAddLink}>{showAddSchoolRouteForm ? 'Annuler' : '+ Ajouter'}</Text>
+              <TouchableOpacity onPress={() => (showAddDailyRouteForm ? resetNewRouteForm() : setShowAddDailyRouteForm(true))}>
+                <Text style={styles.providerAddLink}>{showAddDailyRouteForm ? 'Annuler' : '+ Ajouter'}</Text>
               </TouchableOpacity>
             </View>
 
-            {showAddSchoolRouteForm && (
+            {showAddDailyRouteForm && (
               <View style={styles.providerFormCard}>
-                <TextInput style={styles.textInput} value={schoolLabel} onChangeText={setSchoolLabel} placeholder="Nom de l'école" placeholderTextColor="#9CA3AF" />
+                <TextInput style={styles.textInput} value={routeLabel} onChangeText={setRouteLabel} placeholder="Nom de la destination (ex: École, Bureau)" placeholderTextColor="#9CA3AF" />
 
-                <Text style={styles.formLabel}>Adresse de l&apos;école</Text>
+                <Text style={styles.formLabel}>Points du trajet ({newRouteWaypoints.length})</Text>
+                {newRouteWaypoints.length === 0 ? (
+                  <Text style={styles.formHint}>Aucun point ajouté — commencez par le point de départ.</Text>
+                ) : (
+                  newRouteWaypoints.map((wp, idx) => (
+                    <View key={wp.id} style={styles.providerRow}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.providerName}>{idx + 1}. {wp.label || `Point ${idx + 1}`}</Text>
+                        <Text style={styles.providerDetail}>Rayon: {wp.radiusMeters}m</Text>
+                      </View>
+                      <TouchableOpacity onPress={() => removeWaypointFromNewRoute(idx)}>
+                        <IconSymbol name="trash.fill" size={16} color="#EF4444" />
+                      </TouchableOpacity>
+                    </View>
+                  ))
+                )}
+
+                <Text style={[styles.formLabel, { marginTop: 8 }]}>Ajouter un point</Text>
+                <TextInput style={styles.textInput} value={waypointLabel} onChangeText={setWaypointLabel} placeholder="Nom du point (optionnel, ex: Départ)" placeholderTextColor="#9CA3AF" />
                 <View style={{ zIndex: 10 }}>
                   <View style={styles.addressInputRow}>
                     <TextInput
@@ -3518,80 +3605,114 @@ export default function FamilyScreen() {
                     </View>
                   )}
                   {perimeterCenter && (
-                    <Text style={styles.formHint}>✅ École: {perimeterAddress}</Text>
+                    <Text style={styles.formHint}>✅ Point sélectionné: {perimeterAddress}</Text>
                   )}
                 </View>
-
-                <Text style={styles.formLabel}>Mode de transport</Text>
-                <View style={styles.memberSelector}>
-                  <TouchableOpacity style={[styles.memberChip, schoolRouteMode === 'walking' && styles.memberChipActive]} onPress={() => setSchoolRouteMode('walking')}>
-                    <Text style={[styles.memberChipText, schoolRouteMode === 'walking' && styles.memberChipTextActive]}>🚶 À pied</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={[styles.memberChip, schoolRouteMode === 'driving' && styles.memberChipActive]} onPress={() => setSchoolRouteMode('driving')}>
-                    <Text style={[styles.memberChipText, schoolRouteMode === 'driving' && styles.memberChipTextActive]}>🚗 En voiture</Text>
+                <View style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-end' }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.formLabel}>Rayon (mètres)</Text>
+                    <TextInput style={styles.textInput} value={waypointRadius} onChangeText={setWaypointRadius} placeholder="100" placeholderTextColor="#9CA3AF" keyboardType="numeric" />
+                  </View>
+                  <TouchableOpacity style={[styles.createBtn, { flex: 1, marginTop: 0 }]} onPress={addWaypointToNewRoute} disabled={!perimeterCenter}>
+                    <Text style={styles.createBtnText}>+ Ajouter ce point</Text>
                   </TouchableOpacity>
                 </View>
 
-                <Text style={styles.formLabel}>Tolérance d&apos;écart (mètres)</Text>
-                <TextInput style={styles.textInput} value={schoolRouteCorridor} onChangeText={setSchoolRouteCorridor} placeholder="275" placeholderTextColor="#9CA3AF" keyboardType="numeric" />
+                <Text style={[styles.formLabel, { marginTop: 12 }]}>Tolérance d&apos;écart entre les points (mètres)</Text>
+                <TextInput style={styles.textInput} value={routeCorridor} onChangeText={setRouteCorridor} placeholder="100" placeholderTextColor="#9CA3AF" keyboardType="numeric" />
 
                 <Text style={styles.formLabel}>Heure de départ habituelle</Text>
                 <View style={{ flexDirection: 'row', gap: 8 }}>
-                  <TextInput style={[styles.textInput, { flex: 1 }]} value={schoolRouteHour} onChangeText={setSchoolRouteHour} placeholder="Heure (0-23)" placeholderTextColor="#9CA3AF" keyboardType="numeric" />
-                  <TextInput style={[styles.textInput, { flex: 1 }]} value={schoolRouteMinute} onChangeText={setSchoolRouteMinute} placeholder="Minute" placeholderTextColor="#9CA3AF" keyboardType="numeric" />
+                  <TextInput style={[styles.textInput, { flex: 1 }]} value={routeHour} onChangeText={setRouteHour} placeholder="Heure (0-23)" placeholderTextColor="#9CA3AF" keyboardType="numeric" />
+                  <TextInput style={[styles.textInput, { flex: 1 }]} value={routeMinute} onChangeText={setRouteMinute} placeholder="Minute" placeholderTextColor="#9CA3AF" keyboardType="numeric" />
                 </View>
 
                 <Text style={styles.formLabel}>Durée de la fenêtre (minutes)</Text>
-                <TextInput style={styles.textInput} value={schoolRouteDuration} onChangeText={setSchoolRouteDuration} placeholder="45" placeholderTextColor="#9CA3AF" keyboardType="numeric" />
+                <TextInput style={styles.textInput} value={routeDuration} onChangeText={setRouteDuration} placeholder="45" placeholderTextColor="#9CA3AF" keyboardType="numeric" />
 
                 <Text style={styles.formLabel}>Jours</Text>
                 <View style={styles.memberSelector}>
                   {['Dim', 'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam'].map((label, day) => (
                     <TouchableOpacity
                       key={day}
-                      style={[styles.memberChip, schoolRouteDays.includes(day) && styles.memberChipActive]}
-                      onPress={() => toggleSchoolRouteDay(day)}
+                      style={[styles.memberChip, routeDays.includes(day) && styles.memberChipActive]}
+                      onPress={() => toggleRouteDay(day)}
                     >
-                      <Text style={[styles.memberChipText, schoolRouteDays.includes(day) && styles.memberChipTextActive]}>{label}</Text>
+                      <Text style={[styles.memberChipText, routeDays.includes(day) && styles.memberChipTextActive]}>{label}</Text>
                     </TouchableOpacity>
                   ))}
                 </View>
 
+                <Text style={[styles.formLabel, { marginTop: 12 }]}>Alerter les parents</Text>
+                <View style={styles.memberSelector}>
+                  <TouchableOpacity style={[styles.memberChip, routeAlertAllParents && styles.memberChipActive]} onPress={() => setRouteAlertAllParents(true)}>
+                    <Text style={[styles.memberChipText, routeAlertAllParents && styles.memberChipTextActive]}>Tous</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.memberChip, !routeAlertAllParents && styles.memberChipActive]} onPress={() => setRouteAlertAllParents(false)}>
+                    <Text style={[styles.memberChipText, !routeAlertAllParents && styles.memberChipTextActive]}>Choisir</Text>
+                  </TouchableOpacity>
+                </View>
+                {!routeAlertAllParents && (
+                  routeParentContacts.length === 0 ? (
+                    <Text style={styles.formHint}>Aucun parent enregistré pour ce membre.</Text>
+                  ) : (
+                    <View style={styles.memberSelector}>
+                      {routeParentContacts.map(p => (
+                        <TouchableOpacity
+                          key={p.userId}
+                          style={[styles.memberChip, routeAlertParentIds.includes(p.userId) && styles.memberChipActive]}
+                          onPress={() => toggleAlertParentId(p.userId)}
+                        >
+                          <Text style={[styles.memberChipText, routeAlertParentIds.includes(p.userId) && styles.memberChipTextActive]}>{p.name}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  )
+                )}
+
+                <View style={styles.uiProfileShareRow}>
+                  <Text style={styles.uiProfileShareLabel}>Alerter aussi le dispatch</Text>
+                  <Switch value={routeAlertDispatch} onValueChange={setRouteAlertDispatch} />
+                </View>
+
                 <TouchableOpacity
-                  style={[styles.createBtn, schoolRouteSaving && { opacity: 0.6 }]}
-                  onPress={createSchoolRoute}
-                  disabled={schoolRouteSaving || !schoolLabel.trim() || !perimeterCenter}
+                  style={[styles.createBtn, routeSaving && { opacity: 0.6 }, { marginTop: 12 }]}
+                  onPress={createDailyRoute}
+                  disabled={routeSaving || !routeLabel.trim() || newRouteWaypoints.length < 2}
                 >
-                  {schoolRouteSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.createBtnText}>Enregistrer</Text>}
+                  {routeSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.createBtnText}>Enregistrer le trajet</Text>}
                 </TouchableOpacity>
               </View>
             )}
 
-            {schoolRoutesLoading ? (
+            {dailyRoutesLoading ? (
               <ActivityIndicator color="#1e3a5f" style={{ marginTop: 20 }} />
-            ) : schoolRoutesList.length === 0 ? (
+            ) : dailyRoutesList.length === 0 ? (
               <Text style={styles.emptySubtitle}>Aucun trajet configuré.</Text>
             ) : (
-              schoolRoutesList.map(route => (
+              dailyRoutesList.map(route => (
                 <View key={route.id} style={styles.providerRow}>
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.providerName}>🏫 {route.schoolLabel}</Text>
-                    {!!route.schoolLocation.address && <Text style={styles.providerDetail}>{route.schoolLocation.address}</Text>}
+                    <Text style={styles.providerName}>📍 {route.label}</Text>
+                    <Text style={styles.providerDetail}>{route.waypoints.length} points</Text>
                     <Text style={styles.providerDetail}>
                       Tolérance: {route.corridorMeters}m
                       {route.commuteWindows.length > 0
                         ? ` • ${String(route.commuteWindows[0].hour).padStart(2, '0')}:${String(route.commuteWindows[0].minute).padStart(2, '0')} (${route.commuteWindows[0].durationMinutes}min)`
                         : ''}
                     </Text>
+                    <Text style={styles.providerDetail}>
+                      Alerte: {route.alertAllParents ? 'tous les parents' : `${route.alertParentIds.length} parent(s)`}{route.alertDispatch ? ' + dispatch' : ''}
+                    </Text>
                   </View>
                   <TouchableOpacity
-                    onPress={() => router.push({ pathname: '/school-route-map', params: { routeId: route.id, targetUserId: schoolRouteTarget?.userId || '' } })}
+                    onPress={() => router.push({ pathname: '/daily-route-map', params: { routeId: route.id, targetUserId: dailyRouteTarget?.userId || '' } })}
                     style={{ marginRight: 12 }}
                   >
                     <Text style={{ fontSize: 18 }}>🗺️</Text>
                   </TouchableOpacity>
-                  <Switch value={route.active} onValueChange={() => toggleSchoolRouteActive(route)} />
-                  <TouchableOpacity onPress={() => deleteSchoolRoute(route)} style={{ marginLeft: 12 }}>
+                  <Switch value={route.active} onValueChange={() => toggleDailyRouteActive(route)} />
+                  <TouchableOpacity onPress={() => deleteDailyRoute(route)} style={{ marginLeft: 12 }}>
                     <IconSymbol name="trash.fill" size={18} color="#EF4444" />
                   </TouchableOpacity>
                 </View>
