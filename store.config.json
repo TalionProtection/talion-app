@@ -1,0 +1,59 @@
+{
+  "configVersion": 0,
+  "apple": {
+    "version": "1.0",
+    "copyright": "© 2026 Talion Protection Solutions SARL",
+    "categories": ["BUSINESS"],
+    "release": {
+      "automaticRelease": true
+    },
+    "info": {
+      "fr-FR": {
+        "title": "Talion's Eye",
+        "subtitle": "Sécurité & sûreté familiale",
+        "description": "Talion's Eye est l'application officielle de Talion Protection Solutions, dédiée à la sécurité résidentielle et à la sûreté des familles que nous protégeons à Genève.\n\nRéservée aux clients de Talion et à leurs équipes de sécurité, l'application relie en temps réel les familles protégées, les intervenants sur le terrain et le centre de dispatch.\n\nPOUR LES FAMILLES\n• Bouton SOS avec géolocalisation immédiate\n• Partage de position en famille, configurable individuellement par chaque membre\n• Périmètres de sécurité et alertes d'écart de trajet quotidien\n• Fiche médicale d'urgence accessible en un geste\n• Contacts d'appel rapide (secours, parents, personnes de confiance)\n• Messagerie sécurisée avec l'équipe de sécurité\n• Un mode d'interface simplifié et sécurisé pour les enfants, entièrement configuré par les parents\n\nPOUR LES ÉQUIPES DE SÉCURITÉ\n• Rondes de sécurité géolocalisées avec points de contrôle\n• Registre des incidents et rapports en temps réel\n• Communication Push-to-Talk entre intervenants\n• Coordination avec le centre de dispatch\n\nTalion's Eye est un service sur invitation, associé à un contrat de sécurité auprès de Talion Protection Solutions SARL. L'accès n'est pas ouvert au grand public.",
+        "keywords": ["sécurité", "famille", "SOS", "urgence", "localisation", "protection", "résidence", "dispatch", "intervenant", "alerte"],
+        "releaseNotes": "Version initiale.",
+        "privacyPolicyUrl": "https://api.talion.ch/privacy",
+        "supportUrl": "https://api.talion.ch/support"
+      }
+    },
+    "review": {
+      "firstName": "Billy",
+      "lastName": "Spielmann",
+      "phone": "REPLACE_WITH_REAL_PHONE_NUMBER",
+      "email": "office@talion.ch",
+      "demoRequired": false,
+      "notes": "Talion's Eye is a private security service app used exclusively by Talion Protection Solutions' contracted clients (protected families) and their security personnel (responders, dispatchers). Access is granted individually per client relationship and there is no public sign-up — accounts are created by our administrators for onboarded clients and staff only. Background location access is used to coordinate emergency response (SOS button), security patrol rounds, and optional family location sharing configured by each family member. Medical information is entered voluntarily by users for emergency use only. Please contact us at the email/phone above if a reviewer needs a live demonstration or test credentials — we are happy to provide a walkthrough on request."
+    },
+    "advisory": {
+      "ageRatingOverride": "NONE",
+      "ageRatingOverrideV2": "NONE",
+      "alcoholTobaccoOrDrugUseOrReferences": "NONE",
+      "contests": "NONE",
+      "gambling": false,
+      "gamblingSimulated": "NONE",
+      "horrorOrFearThemes": "NONE",
+      "kidsAgeBand": null,
+      "koreaAgeRatingOverride": "NONE",
+      "lootBox": false,
+      "matureOrSuggestiveThemes": "NONE",
+      "medicalOrTreatmentInformation": "NONE",
+      "profanityOrCrudeHumor": "NONE",
+      "sexualContentGraphicAndNudity": "NONE",
+      "sexualContentOrNudity": "NONE",
+      "unrestrictedWebAccess": false,
+      "violenceCartoonOrFantasy": "NONE",
+      "violenceRealistic": "NONE",
+      "violenceRealisticProlongedGraphicOrSadistic": "NONE",
+      "advertising": false,
+      "ageAssurance": false,
+      "developerAgeRatingInfoUrl": null,
+      "gunsOrOtherWeapons": "NONE",
+      "healthOrWellnessTopics": true,
+      "messagingAndChat": true,
+      "parentalControls": true,
+      "userGeneratedContent": false
+    }
+  }
+}

@@ -3701,6 +3701,11 @@ app.get('/privacy', (req, res) => {
   res.sendFile(path.join(PROJECT_ROOT, 'server', 'privacy-policy.html'));
 });
 
+// Public, unauthenticated — the "Support URL" required by app store listings.
+app.get('/support', (req, res) => {
+  res.sendFile(path.join(PROJECT_ROOT, 'server', 'support.html'));
+});
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
