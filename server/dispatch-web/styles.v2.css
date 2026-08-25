@@ -71,7 +71,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .sidebar { width: 240px; background: var(--bg-sidebar); display: flex; flex-direction: column; border-right: 1px solid var(--border-main); position: fixed; top: 0; left: 0; bottom: 0; z-index: 10; transition: background 0.3s, border-color 0.3s; }
 .sidebar-brand { padding: 20px 16px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border-main); }
 .brand-icon { width: 36px; height: 36px; min-width: 36px; min-height: 36px; flex-shrink: 0; background: linear-gradient(135deg, #1e3a5f, #3b82f6); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 18px; color: #fff; overflow: hidden; }
-.brand-icon img { display: block; width: 100%; height: 100%; object-fit: cover; }
+/* Org logos can be any color/aspect ratio (e.g. a dark wordmark) — a white
+   backing + "contain" (not "cover") guarantees the whole logo stays visible
+   and legible instead of being cropped or blending into the dark gradient. */
+.brand-icon.has-logo { background: #ffffff; padding: 3px; box-sizing: border-box; }
+.brand-icon img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .brand-text { display: flex; flex-direction: column; min-width: 0; }
 .brand-name { font-weight: 800; font-size: 16px; letter-spacing: 1px; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .brand-sub { font-size: 11px; color: var(--text-faint); }

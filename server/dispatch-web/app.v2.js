@@ -798,6 +798,7 @@ async function applyOrganizationBranding() {
     const icon = document.getElementById('brandIcon');
     if (icon && branding.logoUrl) {
       icon.innerHTML = `<img src="${branding.logoUrl}" alt="${(branding.name || "Talion's Eye").replace(/"/g, '&quot;')}">`;
+      icon.classList.add('has-logo');
     }
     // "Admin Console" / "Dispatch Console" subtitle is never overridden — only
     // the "TALION'S EYE" name above it can be replaced per organization.

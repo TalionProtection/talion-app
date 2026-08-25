@@ -140,7 +140,11 @@ body {
   color: #fff;
   overflow: hidden;
 }
-.brand-icon img { display: block; width: 100%; height: 100%; object-fit: cover; }
+/* Org logos can be any color/aspect ratio (e.g. a dark wordmark) — a white
+   backing + "contain" (not "cover") guarantees the whole logo stays visible
+   and legible instead of being cropped or blending into the dark gradient. */
+.brand-icon.has-logo { background: #ffffff; padding: 3px; box-sizing: border-box; }
+.brand-icon img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .brand-text { min-width: 0; }
 .brand-name { font-weight: 800; font-size: 16px; letter-spacing: 2px; display: block; color: var(--bg-sidebar-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .brand-sub { font-size: 11px; color: var(--bg-sidebar-muted); display: block; }

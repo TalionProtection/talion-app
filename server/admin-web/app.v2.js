@@ -267,6 +267,7 @@ async function applyOrganizationBranding() {
     const icon = document.getElementById('brandIcon');
     if (icon && branding.logoUrl) {
       icon.innerHTML = `<img src="${branding.logoUrl}" alt="${(branding.name || "Talion's Eye").replace(/"/g, '&quot;')}">`;
+      icon.classList.add('has-logo');
     }
     // "Admin Console" / "Dispatch Console" subtitle is never overridden — only
     // the "TALION'S EYE" name above it can be replaced per organization.
@@ -373,7 +374,7 @@ function renderOrganizationsTable(orgs) {
   tbody.innerHTML = orgs.map(o => `
     <tr>
       <td>
-        ${o.logoUrl ? `<img src="${o.logoUrl}" alt="${o.name}" style="width:32px;height:32px;object-fit:cover;border-radius:6px;">` : '<span style="color:var(--text-faint,#9ca3af);">—</span>'}
+        ${o.logoUrl ? `<img src="${o.logoUrl}" alt="${o.name}" style="width:32px;height:32px;object-fit:contain;border-radius:6px;background:#ffffff;padding:2px;box-sizing:border-box;border:1px solid var(--border-main,#e5e7eb);">` : '<span style="color:var(--text-faint,#9ca3af);">—</span>'}
         <input type="file" accept="image/*" id="orgLogoInput-${o.id}" style="display:none;" onchange="uploadOrgLogo('${o.id}', this.files[0])">
         <button class="btn btn-secondary" style="margin-left:8px;padding:4px 8px;font-size:12px;" onclick="document.getElementById('orgLogoInput-${o.id}').click()">Changer</button>
       </td>
