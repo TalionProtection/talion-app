@@ -753,6 +753,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupNavigation();
   setupCheckpointAdminUI();
   checkEmergencyOverrideStatus();
+  applyOrganizationBranding();
   // Show audio unlock reminder
   setTimeout(() => {
     if (!browserNotificationsEnabled) {
@@ -782,6 +783,25 @@ function logout() {
   localStorage.removeItem('talion_role');
   localStorage.removeItem('talion_user');
   window.location.href = '/console/';
+}
+
+// Shows the caller's own organization logo in the sidebar instead of the
+// default Talion mark, when that organization has one configured (set via
+// admin-web Organizations > logo upload, superadmin-only). Falls back
+// silently to the default "T" mark for superadmin (no organizationId of its
+// own) or any org without a logo.
+async function applyOrganizationBranding() {
+  try {
+    const res = await fetch(`${API_BASE}/api/organization/branding`);
+    if (!res.ok) return;
+    const branding = await res.json();
+    const icon = document.getElementById('brandIcon');
+    if (icon && branding.logoUrl) {
+      icon.innerHTML = `<img src="${branding.logoUrl}" alt="${(branding.name || "Talion's Eye").replace(/"/g, '&quot;')}">`;
+    }
+  } catch (e) {
+    console.warn('Organization branding fetch failed:', e);
+  }
 }
 
 // ─── Navigation ──────────────────────────────────────────────

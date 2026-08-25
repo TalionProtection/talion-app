@@ -70,7 +70,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 /* ─── Sidebar ─────────────────────────────────────────────── */
 .sidebar { width: 240px; background: var(--bg-sidebar); display: flex; flex-direction: column; border-right: 1px solid var(--border-main); position: fixed; top: 0; left: 0; bottom: 0; z-index: 10; transition: background 0.3s, border-color 0.3s; }
 .sidebar-brand { padding: 20px 16px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border-main); }
-.brand-icon { width: 36px; height: 36px; background: linear-gradient(135deg, #1e3a5f, #3b82f6); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 18px; color: #fff; }
+.brand-icon { width: 36px; height: 36px; background: linear-gradient(135deg, #1e3a5f, #3b82f6); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 18px; color: #fff; overflow: hidden; }
+.brand-icon img { width: 100%; height: 100%; object-fit: cover; }
 .brand-text { display: flex; flex-direction: column; }
 .brand-name { font-weight: 800; font-size: 16px; letter-spacing: 1px; color: var(--text-primary); }
 .brand-sub { font-size: 11px; color: var(--text-faint); }

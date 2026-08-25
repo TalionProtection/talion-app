@@ -438,6 +438,7 @@ interface Organization {
   name: string;
   status: 'active' | 'suspended';
   createdAt: number;
+  logoUrl?: string; // shown in admin-web/dispatch-web in place of the default Talion mark
 }
 
 // Replaces the old hardcoded PATROL_SITES constant — each organization
@@ -5511,6 +5512,29 @@ app.put('/admin/organizations/:id', requireAuth, requireRole('superadmin'), (req
   res.json(org);
 });
 
+// White-label logo shown in admin-web/dispatch-web in place of the default
+// Talion mark for this org's users. Superadmin-only, same as the rest of
+// organization management above.
+app.post('/admin/organizations/:id/logo', requireAuth, requireRole('superadmin'), upload.single('logo'), async (req: any, res) => {
+  const org = organizations.get(req.params.id as string);
+  if (!org) return res.status(404).json({ error: 'Organization not found' });
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  org.logoUrl = await uploadFileToSupabaseStorage(req.file);
+  organizations.set(org.id, org);
+  saveOrganizationToSupabase(org).catch(e => console.error('[Organizations] Supabase save error:', e));
+  addAuditEntry('system', 'Organization Logo Updated', req.supabaseUser!.id, `Organization ${org.id} logo updated`, org.id, org.id);
+  res.json(org);
+});
+
+// Any authenticated console user (not just superadmin) — lets admin-web and
+// dispatch-web show the caller's own organization branding instead of the
+// default Talion mark. superadmin has no organizationId of its own (see
+// canAccessOrg above), so it always gets the default Talion branding.
+app.get('/api/organization/branding', requireAuth, (req, res) => {
+  const org = req.supabaseUser!.organizationId ? organizations.get(req.supabaseUser!.organizationId) : undefined;
+  res.json({ name: org?.name || "Talion's Eye", logoUrl: org?.logoUrl || null });
+});
+
 // Helper: get reciprocal relationship type
 function getReciprocalRelType(type: string): string {
   const map: Record<string, string> = {
@@ -8595,7 +8619,7 @@ async function loadOrganizationsFromSupabase(): Promise<void> {
     if (data && data.length > 0) {
       organizations.clear();
       data.forEach((o: any) => {
-        organizations.set(o.id, { id: o.id, name: o.name, status: o.status || 'active', createdAt: o.created_at || Date.now() });
+        organizations.set(o.id, { id: o.id, name: o.name, status: o.status || 'active', createdAt: o.created_at || Date.now(), logoUrl: o.logo_url || undefined });
       });
       console.log(`[Supabase] Loaded ${data.length} organizations`);
     }
@@ -8605,7 +8629,7 @@ async function loadOrganizationsFromSupabase(): Promise<void> {
 async function saveOrganizationToSupabase(org: Organization): Promise<void> {
   try {
     const { error } = await supabaseAdmin.from('organizations').upsert({
-      id: org.id, name: org.name, status: org.status, created_at: org.createdAt,
+      id: org.id, name: org.name, status: org.status, created_at: org.createdAt, logo_url: org.logoUrl || null,
     });
     if (error) console.error('[Supabase] saveOrganizationToSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] saveOrganizationToSupabase error:', e); }

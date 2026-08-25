@@ -248,10 +248,30 @@ setInterval(() => {
 document.addEventListener('DOMContentLoaded', () => {
   setupNavigation();
   applyRoleGating();
+  applyOrganizationBranding();
   connectWebSocket();
   refreshData();
   setInterval(refreshData, 30000);
 });
+
+// Shows the caller's own organization logo in the sidebar instead of the
+// default Talion mark, when that organization has one configured (set via
+// Organizations > logo upload, superadmin-only). Falls back silently to the
+// default "T" mark for superadmin (no organizationId of its own) or any org
+// without a logo.
+async function applyOrganizationBranding() {
+  try {
+    const res = await fetch(`${API_BASE}/api/organization/branding`);
+    if (!res.ok) return;
+    const branding = await res.json();
+    const icon = document.getElementById('brandIcon');
+    if (icon && branding.logoUrl) {
+      icon.innerHTML = `<img src="${branding.logoUrl}" alt="${(branding.name || "Talion's Eye").replace(/"/g, '&quot;')}">`;
+    }
+  } catch (e) {
+    console.warn('Organization branding fetch failed:', e);
+  }
+}
 
 // Only a superadmin (Talion staff, manages every organization) sees the
 // Organizations nav item — a regular admin is scoped to their own
@@ -345,6 +365,11 @@ function renderOrganizationsTable(orgs) {
   const tbody = document.getElementById('organizationsTableBody');
   tbody.innerHTML = orgs.map(o => `
     <tr>
+      <td>
+        ${o.logoUrl ? `<img src="${o.logoUrl}" alt="${o.name}" style="width:32px;height:32px;object-fit:cover;border-radius:6px;">` : '<span style="color:var(--text-faint,#9ca3af);">—</span>'}
+        <input type="file" accept="image/*" id="orgLogoInput-${o.id}" style="display:none;" onchange="uploadOrgLogo('${o.id}', this.files[0])">
+        <button class="btn btn-secondary" style="margin-left:8px;padding:4px 8px;font-size:12px;" onclick="document.getElementById('orgLogoInput-${o.id}').click()">Changer</button>
+      </td>
       <td>${o.name}</td>
       <td><span class="badge ${o.status === 'active' ? 'badge-success' : 'badge-error'}">${o.status === 'active' ? 'Active' : 'Suspendue'}</span></td>
       <td>${o.memberCount}</td>
@@ -352,6 +377,24 @@ function renderOrganizationsTable(orgs) {
       <td><button class="btn btn-secondary" onclick="toggleOrgStatus('${o.id}', '${o.status === 'active' ? 'suspended' : 'active'}')">${o.status === 'active' ? 'Suspendre' : 'Réactiver'}</button></td>
     </tr>
   `).join('');
+}
+
+async function uploadOrgLogo(orgId, file) {
+  if (!file) return;
+  const formData = new FormData();
+  formData.append('logo', file);
+  try {
+    const res = await fetch(`${API_BASE}/admin/organizations/${orgId}/logo`, { method: 'POST', body: formData });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors du téléversement du logo', 'error');
+      return;
+    }
+    loadOrganizations();
+    showToast('Logo mis à jour', 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
 }
 
 function openCreateOrgModal() {
