@@ -1,0 +1,32 @@
+TITRE (max 30 caractères)
+Talion's Eye
+
+DESCRIPTION COURTE (max 80 caractères)
+Sécurité résidentielle et sûreté familiale par Talion Protection Solutions
+
+DESCRIPTION COMPLÈTE (max 4000 caractères)
+Talion's Eye est l'application officielle de Talion Protection Solutions, dédiée à la sécurité résidentielle et à la sûreté des familles que nous protégeons à Genève.
+
+Réservée aux clients de Talion et à leurs équipes de sécurité, l'application relie en temps réel les familles protégées, les intervenants sur le terrain et le centre de dispatch.
+
+POUR LES FAMILLES
+• Bouton SOS avec géolocalisation immédiate
+• Partage de position en famille, configurable individuellement par chaque membre
+• Périmètres de sécurité et alertes d'écart de trajet quotidien
+• Fiche médicale d'urgence accessible en un geste
+• Contacts d'appel rapide (secours, parents, personnes de confiance)
+• Messagerie sécurisée avec l'équipe de sécurité
+• Un mode d'interface simplifié et sécurisé pour les enfants, entièrement configuré par les parents
+
+POUR LES ÉQUIPES DE SÉCURITÉ
+• Rondes de sécurité géolocalisées avec points de contrôle
+• Registre des incidents et rapports en temps réel
+• Communication Push-to-Talk entre intervenants
+• Coordination avec le centre de dispatch
+
+Talion's Eye est un service sur invitation, associé à un contrat de sécurité auprès de Talion Protection Solutions SARL. L'accès n'est pas ouvert au grand public.
+
+CATÉGORIE : Business (Entreprise)
+EMAIL DE CONTACT : office@talion.ch
+SITE WEB / SUPPORT : https://api.talion.ch/support
+POLITIQUE DE CONFIDENTIALITÉ : https://api.talion.ch/privacy
