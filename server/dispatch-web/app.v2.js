@@ -799,6 +799,13 @@ async function applyOrganizationBranding() {
     if (icon && branding.logoUrl) {
       icon.innerHTML = `<img src="${branding.logoUrl}" alt="${(branding.name || "Talion's Eye").replace(/"/g, '&quot;')}">`;
     }
+    // "Admin Console" / "Dispatch Console" subtitle is never overridden — only
+    // the "TALION'S EYE" name above it can be replaced per organization.
+    const nameEl = document.querySelector('.sidebar-brand .brand-name');
+    if (nameEl && branding.brandName) {
+      nameEl.textContent = branding.brandName;
+      nameEl.title = branding.brandName;
+    }
   } catch (e) {
     console.warn('Organization branding fetch failed:', e);
   }

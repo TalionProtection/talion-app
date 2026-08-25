@@ -439,6 +439,7 @@ interface Organization {
   status: 'active' | 'suspended';
   createdAt: number;
   logoUrl?: string; // shown in admin-web/dispatch-web in place of the default Talion mark
+  brandName?: string; // shown in place of "TALION'S EYE" in the sidebar; "Admin/Dispatch Console" subtitle is never overridden
 }
 
 // Replaces the old hardcoded PATROL_SITES constant — each organization
@@ -5500,15 +5501,16 @@ app.post('/admin/organizations', requireAuth, requireRole('superadmin'), (req, r
 app.put('/admin/organizations/:id', requireAuth, requireRole('superadmin'), (req, res) => {
   const org = organizations.get(req.params.id as string);
   if (!org) return res.status(404).json({ error: 'Organization not found' });
-  const { name, status } = req.body;
+  const { name, status, brandName } = req.body;
   if (status !== undefined && status !== 'active' && status !== 'suspended') {
     return res.status(400).json({ error: "status must be 'active' or 'suspended'" });
   }
   if (name !== undefined) org.name = name;
   if (status !== undefined) org.status = status;
+  if (brandName !== undefined) org.brandName = (brandName || '').trim() || undefined;
   organizations.set(org.id, org);
   saveOrganizationToSupabase(org).catch(e => console.error('[Organizations] Supabase save error:', e));
-  addAuditEntry('system', 'Organization Updated', req.supabaseUser!.id, `Organization ${org.id}: ${JSON.stringify({ name, status })}`, org.id, org.id);
+  addAuditEntry('system', 'Organization Updated', req.supabaseUser!.id, `Organization ${org.id}: ${JSON.stringify({ name, status, brandName })}`, org.id, org.id);
   res.json(org);
 });
 
@@ -5532,7 +5534,7 @@ app.post('/admin/organizations/:id/logo', requireAuth, requireRole('superadmin')
 // canAccessOrg above), so it always gets the default Talion branding.
 app.get('/api/organization/branding', requireAuth, (req, res) => {
   const org = req.supabaseUser!.organizationId ? organizations.get(req.supabaseUser!.organizationId) : undefined;
-  res.json({ name: org?.name || "Talion's Eye", logoUrl: org?.logoUrl || null });
+  res.json({ name: org?.name || "Talion's Eye", logoUrl: org?.logoUrl || null, brandName: org?.brandName || null });
 });
 
 // Helper: get reciprocal relationship type
@@ -8619,7 +8621,7 @@ async function loadOrganizationsFromSupabase(): Promise<void> {
     if (data && data.length > 0) {
       organizations.clear();
       data.forEach((o: any) => {
-        organizations.set(o.id, { id: o.id, name: o.name, status: o.status || 'active', createdAt: o.created_at || Date.now(), logoUrl: o.logo_url || undefined });
+        organizations.set(o.id, { id: o.id, name: o.name, status: o.status || 'active', createdAt: o.created_at || Date.now(), logoUrl: o.logo_url || undefined, brandName: o.brand_name || undefined });
       });
       console.log(`[Supabase] Loaded ${data.length} organizations`);
     }
@@ -8629,7 +8631,7 @@ async function loadOrganizationsFromSupabase(): Promise<void> {
 async function saveOrganizationToSupabase(org: Organization): Promise<void> {
   try {
     const { error } = await supabaseAdmin.from('organizations').upsert({
-      id: org.id, name: org.name, status: org.status, created_at: org.createdAt, logo_url: org.logoUrl || null,
+      id: org.id, name: org.name, status: org.status, created_at: org.createdAt, logo_url: org.logoUrl || null, brand_name: org.brandName || null,
     });
     if (error) console.error('[Supabase] saveOrganizationToSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] saveOrganizationToSupabase error:', e); }

@@ -127,6 +127,9 @@ body {
 .brand-icon {
   width: 40px;
   height: 40px;
+  min-width: 40px;
+  min-height: 40px;
+  flex-shrink: 0;
   background: linear-gradient(135deg, #1e3a5f, #3b82f6);
   border-radius: 10px;
   display: flex;
@@ -137,8 +140,9 @@ body {
   color: #fff;
   overflow: hidden;
 }
-.brand-icon img { width: 100%; height: 100%; object-fit: cover; }
-.brand-name { font-weight: 800; font-size: 16px; letter-spacing: 2px; display: block; color: var(--bg-sidebar-text); }
+.brand-icon img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.brand-text { min-width: 0; }
+.brand-name { font-weight: 800; font-size: 16px; letter-spacing: 2px; display: block; color: var(--bg-sidebar-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .brand-sub { font-size: 11px; color: var(--bg-sidebar-muted); display: block; }
 .sidebar-nav { flex: 1; padding: 12px 8px; display: flex; flex-direction: column; gap: 2px; }
 .nav-item {

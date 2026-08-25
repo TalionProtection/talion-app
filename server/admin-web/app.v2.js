@@ -268,6 +268,13 @@ async function applyOrganizationBranding() {
     if (icon && branding.logoUrl) {
       icon.innerHTML = `<img src="${branding.logoUrl}" alt="${(branding.name || "Talion's Eye").replace(/"/g, '&quot;')}">`;
     }
+    // "Admin Console" / "Dispatch Console" subtitle is never overridden — only
+    // the "TALION'S EYE" name above it can be replaced per organization.
+    const nameEl = document.querySelector('.sidebar-brand .brand-name');
+    if (nameEl && branding.brandName) {
+      nameEl.textContent = branding.brandName;
+      nameEl.title = branding.brandName;
+    }
   } catch (e) {
     console.warn('Organization branding fetch failed:', e);
   }
@@ -370,6 +377,12 @@ function renderOrganizationsTable(orgs) {
         <input type="file" accept="image/*" id="orgLogoInput-${o.id}" style="display:none;" onchange="uploadOrgLogo('${o.id}', this.files[0])">
         <button class="btn btn-secondary" style="margin-left:8px;padding:4px 8px;font-size:12px;" onclick="document.getElementById('orgLogoInput-${o.id}').click()">Changer</button>
       </td>
+      <td>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <input type="text" id="orgBrandNameInput-${o.id}" value="${(o.brandName || '').replace(/"/g, '&quot;')}" placeholder="TALION'S EYE" style="width:140px;padding:4px 8px;font-size:12px;border:1px solid var(--border-main,#d1d5db);border-radius:6px;">
+          <button class="btn btn-secondary" style="padding:4px 8px;font-size:12px;" onclick="saveOrgBrandName('${o.id}')">Enregistrer</button>
+        </div>
+      </td>
       <td>${o.name}</td>
       <td><span class="badge ${o.status === 'active' ? 'badge-success' : 'badge-error'}">${o.status === 'active' ? 'Active' : 'Suspendue'}</span></td>
       <td>${o.memberCount}</td>
@@ -377,6 +390,25 @@ function renderOrganizationsTable(orgs) {
       <td><button class="btn btn-secondary" onclick="toggleOrgStatus('${o.id}', '${o.status === 'active' ? 'suspended' : 'active'}')">${o.status === 'active' ? 'Suspendre' : 'Réactiver'}</button></td>
     </tr>
   `).join('');
+}
+
+async function saveOrgBrandName(orgId) {
+  const input = document.getElementById(`orgBrandNameInput-${orgId}`);
+  try {
+    const res = await fetch(`${API_BASE}/admin/organizations/${orgId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ brandName: input.value.trim() }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors de la mise à jour', 'error');
+      return;
+    }
+    showToast('Nom affiché mis à jour', 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
 }
 
 async function uploadOrgLogo(orgId, file) {
