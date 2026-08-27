@@ -224,6 +224,11 @@
         <input type="email" id="email" placeholder="your.email@talion.io" autocomplete="email">
       </div>
 
+      <div id="ssoOption" style="display:none;margin-bottom:16px;">
+        <button class="btn-login" id="ssoBtn" style="background:#0f1923;border:1px solid #3b82f6;" onclick="handleSsoLogin()"></button>
+        <div class="divider">OU</div>
+      </div>
+
       <div class="form-group">
         <label>Password</label>
         <input type="password" id="password" placeholder="Enter your password" autocomplete="current-password">
@@ -256,6 +261,38 @@
 
     document.getElementById('email').addEventListener('input', updateLoginBtn);
     document.getElementById('password').addEventListener('input', updateLoginBtn);
+
+    // Optional per-organization SSO: silently checked whenever the email
+    // field loses focus. If that account's organization has SSO enabled,
+    // an extra "Se connecter avec le SSO de <org>" button appears above the
+    // password field — password login still works too, this never replaces it.
+    let ssoCheckToken = 0;
+    document.getElementById('email').addEventListener('blur', async () => {
+      const email = document.getElementById('email').value.trim();
+      const myToken = ++ssoCheckToken;
+      const ssoOption = document.getElementById('ssoOption');
+      if (!email) { ssoOption.style.display = 'none'; return; }
+      try {
+        const res = await fetch(`/auth/sso/lookup?email=${encodeURIComponent(email)}`);
+        const data = await res.json();
+        if (myToken !== ssoCheckToken) return; // a newer check superseded this one
+        if (data.ssoEnabled) {
+          const btn = document.getElementById('ssoBtn');
+          btn.textContent = `Se connecter avec le SSO de ${data.orgName}`;
+          btn.dataset.orgId = data.orgId;
+          ssoOption.style.display = 'block';
+        } else {
+          ssoOption.style.display = 'none';
+        }
+      } catch (e) {
+        ssoOption.style.display = 'none';
+      }
+    });
+
+    function handleSsoLogin() {
+      const orgId = document.getElementById('ssoBtn').dataset.orgId;
+      if (orgId) window.location.href = `/auth/sso/${orgId}/start?platform=web`;
+    }
 
     async function handleLogin() {
       const email = document.getElementById('email').value.trim();

@@ -359,10 +359,13 @@ function switchTab(tab) {
 }
 
 // ─── Organizations (superadmin only) ──────────────────────────────────
+let organizationsCache = [];
+
 async function loadOrganizations() {
   try {
     const res = await fetch(`${API_BASE}/admin/organizations`);
     const orgs = await res.json();
+    organizationsCache = orgs;
     renderOrganizationsTable(orgs);
   } catch (e) {
     console.error('[Organizations] load error:', e);
@@ -388,9 +391,56 @@ function renderOrganizationsTable(orgs) {
       <td><span class="badge ${o.status === 'active' ? 'badge-success' : 'badge-error'}">${o.status === 'active' ? 'Active' : 'Suspendue'}</span></td>
       <td>${o.memberCount}</td>
       <td>${new Date(o.createdAt).toLocaleDateString('fr-FR')}</td>
-      <td><button class="btn btn-secondary" onclick="toggleOrgStatus('${o.id}', '${o.status === 'active' ? 'suspended' : 'active'}')">${o.status === 'active' ? 'Suspendre' : 'Réactiver'}</button></td>
+      <td>
+        <button class="btn btn-secondary" onclick="openOrgSsoModal('${o.id}')">${o.ssoEnabled ? 'SSO ✓' : 'SSO'}</button>
+        <button class="btn btn-secondary" onclick="toggleOrgStatus('${o.id}', '${o.status === 'active' ? 'suspended' : 'active'}')">${o.status === 'active' ? 'Suspendre' : 'Réactiver'}</button>
+      </td>
     </tr>
   `).join('');
+}
+
+function openOrgSsoModal(orgId) {
+  const org = organizationsCache.find(o => o.id === orgId);
+  if (!org) return;
+  document.getElementById('orgSsoModal').dataset.orgId = orgId;
+  document.getElementById('orgSsoOrgName').textContent = org.name;
+  document.getElementById('orgSsoEnabled').checked = !!org.ssoEnabled;
+  document.getElementById('orgSsoIssuer').value = org.ssoIssuer || '';
+  document.getElementById('orgSsoClientId').value = org.ssoClientId || '';
+  document.getElementById('orgSsoClientSecret').value = '';
+  document.getElementById('orgSsoSecretStatus').textContent = org.ssoConfigured ? 'Un secret est déjà enregistré.' : 'Aucun secret enregistré.';
+  document.getElementById('orgSsoModal').classList.add('visible');
+}
+
+function closeOrgSsoModal() {
+  document.getElementById('orgSsoModal').classList.remove('visible');
+}
+
+async function submitOrgSso() {
+  const orgId = document.getElementById('orgSsoModal').dataset.orgId;
+  const body = {
+    ssoEnabled: document.getElementById('orgSsoEnabled').checked,
+    ssoIssuer: document.getElementById('orgSsoIssuer').value.trim(),
+    ssoClientId: document.getElementById('orgSsoClientId').value.trim(),
+    ssoClientSecret: document.getElementById('orgSsoClientSecret').value.trim(),
+  };
+  try {
+    const res = await fetch(`${API_BASE}/admin/organizations/${orgId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors de la mise à jour du SSO', 'error');
+      return;
+    }
+    closeOrgSsoModal();
+    loadOrganizations();
+    showToast('Configuration SSO mise à jour', 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
 }
 
 async function saveOrgBrandName(orgId) {

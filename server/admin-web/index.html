@@ -358,6 +358,42 @@
     </div>
   </div>
 
+  <!-- Configure Organization SSO Modal -->
+  <div class="modal-overlay" id="orgSsoModal">
+    <div class="modal">
+      <h3 class="modal-title">SSO d'entreprise — <span id="orgSsoOrgName"></span></h3>
+      <p style="font-size:13px;color:var(--text-faint,#6b7280);margin-top:-8px;margin-bottom:16px;">
+        Optionnel, en plus du mot de passe habituel. Les comptes doivent déjà exister
+        (créés par un admin) — le SSO ne fait que confirmer l'identité, il n'en crée pas.
+      </p>
+      <div class="form-group">
+        <label class="form-label">Activer le SSO pour cette organisation</label>
+        <input type="checkbox" id="orgSsoEnabled" style="width:auto;">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Issuer OIDC (URL fournie par l'IdP du client)</label>
+        <input type="text" class="form-input" id="orgSsoIssuer" placeholder="https://login.microsoftonline.com/<tenant>/v2.0">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Client ID</label>
+        <input type="text" class="form-input" id="orgSsoClientId" placeholder="Client ID fourni par l'IdP">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Client Secret</label>
+        <input type="password" class="form-input" id="orgSsoClientSecret" placeholder="Laisser vide pour ne pas changer">
+        <span id="orgSsoSecretStatus" style="font-size:12px;color:var(--text-faint,#6b7280);"></span>
+      </div>
+      <div class="form-group">
+        <label class="form-label">URL de redirection à donner au client (à enregistrer dans leur IdP)</label>
+        <input type="text" class="form-input" readonly value="https://api.talion.ch/auth/sso/callback" onclick="this.select()">
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+        <button class="btn btn-secondary" onclick="closeOrgSsoModal()">Annuler</button>
+        <button class="btn btn-primary" onclick="submitOrgSso()">Enregistrer</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Create/Edit Patrol Site Modal -->
   <div class="modal-overlay" id="createSiteModal">
     <div class="modal">

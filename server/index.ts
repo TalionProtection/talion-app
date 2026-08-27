@@ -10,6 +10,7 @@ import fs from 'fs';
 import sharp from 'sharp';
 import { requireAuth, requireRole, optionalAuth } from './auth-middleware';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
+import { Issuer, generators } from 'openid-client';
 
 // ─── Internal health/error tracking (no external service) ────────────────
 // Lightweight in-memory ring buffer so staff can see recent server errors
@@ -440,6 +441,20 @@ interface Organization {
   createdAt: number;
   logoUrl?: string; // shown in admin-web/dispatch-web in place of the default Talion mark
   brandName?: string; // shown in place of "TALION'S EYE" in the sidebar; "Admin/Dispatch Console" subtitle is never overridden
+  ssoEnabled?: boolean; // enterprise OIDC login, optional alongside email/password — never replaces it
+  ssoIssuer?: string; // the client's IdP OIDC issuer URL (Okta/Azure AD/Google Workspace/etc.), used for discovery
+  ssoClientId?: string;
+  ssoClientSecret?: string; // write-only from the API's perspective — never echoed back in any GET response, see redactOrganization()
+}
+
+// Strips the OIDC client secret before an Organization is ever sent to a
+// client — PUT accepts it (superadmin-only, see /admin/organizations/:id)
+// but no read path should ever echo it back, even to the superadmin who set
+// it. Every route that returns an Organization (list, detail, logo/brand
+// update responses) must go through this.
+function redactOrganization(org: Organization): Omit<Organization, 'ssoClientSecret'> & { ssoConfigured: boolean } {
+  const { ssoClientSecret, ...rest } = org;
+  return { ...rest, ssoConfigured: !!ssoClientSecret };
 }
 
 // Replaces the old hardcoded PATROL_SITES constant — each organization
@@ -3469,6 +3484,183 @@ app.post('/auth/login', async (req, res) => {
   });
 });
 
+// ─── Enterprise SSO (OIDC) ─────────────────────────────────────────────
+// Optional, per-organization, alongside email/password — never required.
+// Accounts are still provisioned exclusively by Talion admins (no public
+// signup): SSO only confirms *which already-existing account* a user is,
+// scoped strictly to their own organization's IdP. It never creates a new
+// account and never lets a user authenticate into a different org's data.
+//
+// requireAuth validates a real Supabase Auth access token (see
+// auth-middleware.ts), so once we've verified the caller's identity via
+// their enterprise IdP, we mint one for them the same way /auth/login's
+// self-heal path already does: reset the account's Supabase Auth password
+// to a fresh random value server-side, then sign in with it. This avoids
+// needing Supabase's own (global, non-multi-tenant) OAuth provider config.
+const PUBLIC_BASE_URL = 'https://api.talion.ch';
+const SSO_REDIRECT_URI = `${PUBLIC_BASE_URL}/auth/sso/callback`;
+const SSO_STATE_TTL_MS = 10 * 60 * 1000;
+
+interface SsoStateEntry { orgId: string; codeVerifier: string; state: string; platform: 'web' | 'mobile'; createdAt: number; }
+const ssoStateStore = new Map<string, SsoStateEntry>();
+
+function cleanupExpiredSsoState() {
+  const cutoff = Date.now() - SSO_STATE_TTL_MS;
+  for (const [key, entry] of ssoStateStore) {
+    if (entry.createdAt < cutoff) ssoStateStore.delete(key);
+  }
+}
+
+const ssoIssuerCache = new Map<string, { issuer: Issuer; cachedAt: number }>();
+const SSO_ISSUER_CACHE_TTL_MS = 60 * 60 * 1000;
+
+async function getSsoIssuer(issuerUrl: string): Promise<Issuer> {
+  const cached = ssoIssuerCache.get(issuerUrl);
+  if (cached && Date.now() - cached.cachedAt < SSO_ISSUER_CACHE_TTL_MS) return cached.issuer;
+  const issuer = await Issuer.discover(issuerUrl);
+  ssoIssuerCache.set(issuerUrl, { issuer, cachedAt: Date.now() });
+  return issuer;
+}
+
+function ssoErrorPage(message: string) {
+  return `<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Connexion SSO — Talion's Eye</title>
+  <style>body{font-family:-apple-system,sans-serif;background:#0f1923;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;}
+  .card{background:#1a2736;border:1px solid #2d3d4f;border-radius:16px;padding:32px;max-width:440px;text-align:center;}
+  a{color:#3b82f6;}</style></head><body><div class="card"><h2>Connexion impossible</h2><p>${message}</p>
+  <p><a href="/console/">Retour à la page de connexion</a></p></div></body></html>`;
+}
+
+// Pre-login, public: given an email, tells the client whether that account's
+// organization has SSO enabled (and if so, which org) so the login screen
+// can offer "Se connecter avec le SSO de votre entreprise" instead of a
+// password field. Never reveals anything beyond that boolean+org name —
+// this exact minimal-disclosure pattern is standard (Slack, etc. do the same
+// "email → workspace SSO redirect" lookup).
+app.get('/auth/sso/lookup', (req, res) => {
+  const email = ((req.query.email as string) || '').toLowerCase().trim();
+  if (!email) return res.json({ ssoEnabled: false });
+  const user = Array.from(adminUsers.values()).find(u => u.email.toLowerCase() === email);
+  const org = user?.organizationId ? organizations.get(user.organizationId) : undefined;
+  if (org?.ssoEnabled && org.ssoIssuer && org.ssoClientId && org.ssoClientSecret) {
+    return res.json({ ssoEnabled: true, orgId: org.id, orgName: org.name });
+  }
+  res.json({ ssoEnabled: false });
+});
+
+// Starts the OIDC Authorization Code + PKCE flow against the organization's
+// own IdP. `platform` controls how /auth/sso/callback delivers the result:
+// 'web' (admin-web/dispatch-web) gets an HTML page that stores the session
+// like a normal login; 'mobile' gets redirected to the app's custom scheme.
+app.get('/auth/sso/:orgId/start', async (req, res) => {
+  cleanupExpiredSsoState();
+  const org = organizations.get(req.params.orgId as string);
+  if (!org?.ssoEnabled || !org.ssoIssuer || !org.ssoClientId || !org.ssoClientSecret) {
+    return res.status(404).send(ssoErrorPage("Le SSO n'est pas configuré pour cette organisation."));
+  }
+  const platform = req.query.platform === 'mobile' ? 'mobile' : 'web';
+  try {
+    const issuer = await getSsoIssuer(org.ssoIssuer);
+    const client = new issuer.Client({
+      client_id: org.ssoClientId,
+      client_secret: org.ssoClientSecret,
+      redirect_uris: [SSO_REDIRECT_URI],
+      response_types: ['code'],
+    });
+    const codeVerifier = generators.codeVerifier();
+    const state = generators.state();
+    ssoStateStore.set(state, { orgId: org.id, codeVerifier, state, platform, createdAt: Date.now() });
+    const authorizationUrl = client.authorizationUrl({
+      scope: 'openid email profile',
+      state,
+      code_challenge: generators.codeChallenge(codeVerifier),
+      code_challenge_method: 'S256',
+    });
+    res.redirect(authorizationUrl);
+  } catch (e) {
+    console.error('[SSO] Failed to start flow for org', org.id, e);
+    res.status(500).send(ssoErrorPage("Impossible de contacter le fournisseur d'identité de votre entreprise. Contactez votre administrateur."));
+  }
+});
+
+app.get('/auth/sso/callback', async (req, res) => {
+  cleanupExpiredSsoState();
+  const { code, state } = req.query as { code?: string; state?: string };
+  const ip = (req.headers['x-forwarded-for'] as string || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+  const userAgent = req.headers['user-agent'] || 'unknown';
+  if (!code || !state) return res.status(400).send(ssoErrorPage('Requête de connexion invalide.'));
+
+  const entry = ssoStateStore.get(state);
+  ssoStateStore.delete(state); // single-use regardless of outcome
+  if (!entry) return res.status(400).send(ssoErrorPage('Cette tentative de connexion a expiré. Merci de réessayer.'));
+
+  const org = organizations.get(entry.orgId);
+  if (!org?.ssoEnabled || !org.ssoIssuer || !org.ssoClientId || !org.ssoClientSecret) {
+    return res.status(404).send(ssoErrorPage("Le SSO n'est plus configuré pour cette organisation."));
+  }
+
+  try {
+    const issuer = await getSsoIssuer(org.ssoIssuer);
+    const client = new issuer.Client({
+      client_id: org.ssoClientId,
+      client_secret: org.ssoClientSecret,
+      redirect_uris: [SSO_REDIRECT_URI],
+      response_types: ['code'],
+    });
+    const tokenSet = await client.callback(SSO_REDIRECT_URI, { code, state }, { code_verifier: entry.codeVerifier, state: entry.state });
+    const claims = tokenSet.claims();
+    const email = (claims.email as string || '').toLowerCase();
+    if (!email) return res.status(400).send(ssoErrorPage("Votre fournisseur d'identité n'a pas communiqué d'adresse e-mail."));
+
+    // Scoped strictly to this org — an SSO login at Org A's IdP must never
+    // match an account belonging to Org B, even with the same email.
+    const user = Array.from(adminUsers.values()).find(u => u.organizationId === org.id && u.email.toLowerCase() === email);
+    if (!user) {
+      return res.status(403).send(ssoErrorPage(`Aucun compte Talion's Eye associé à ${email} dans votre organisation. Contactez votre administrateur.`));
+    }
+    if (user.status === 'deactivated' || user.status === 'suspended') {
+      addLoginHistory({ userId: user.id, userName: user.name, email, timestamp: Date.now(), ip, userAgent, status: user.status === 'deactivated' ? 'account_deactivated' : 'account_suspended' });
+      return res.status(403).send(ssoErrorPage('Ce compte est désactivé ou suspendu. Contactez votre administrateur.'));
+    }
+
+    // Mint a real Supabase Auth session for the matched user — same
+    // technique /auth/login's self-heal path already uses.
+    const tempPassword = generators.random(32);
+    const { error: pwError } = await supabaseAdmin.auth.admin.updateUserById(user.id, { password: tempPassword });
+    if (pwError) throw new Error(`updateUserById failed: ${pwError.message}`);
+    const { data: signInData, error: signInError } = await supabaseAuthOnly.auth.signInWithPassword({ email: user.email, password: tempPassword });
+    if (signInError || !signInData.session) throw new Error(`signInWithPassword failed: ${signInError?.message}`);
+    const accessToken = signInData.session.access_token;
+
+    addLoginHistory({ userId: user.id, userName: user.name, email, timestamp: Date.now(), ip, userAgent, status: 'success' });
+    user.lastLogin = Date.now();
+    adminUsers.set(user.id, user);
+    addAuditEntry('auth', 'User Login', user.name, `Login via SSO (${org.name}) from ${parseDevice(userAgent)} (${ip})`, undefined, user.organizationId);
+    const { passwordHash, ...safeUser } = user;
+
+    if (entry.platform === 'mobile') {
+      const payload = encodeURIComponent(JSON.stringify({ token: accessToken, user: safeUser }));
+      return res.redirect(`talioncrisiscomm://sso-callback?data=${payload}`);
+    }
+
+    // Web console: land on a tiny page that stores the session exactly like
+    // console-login/index.html's normal handleLogin() does, then continues
+    // into the right console for the user's role.
+    const destination = (safeUser.role === 'admin' || safeUser.role === 'superadmin') ? '/admin-console/'
+      : safeUser.role === 'dispatcher' ? '/dispatch-v2/' : null;
+    res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Connexion…</title></head><body>
+      <script>
+        localStorage.setItem('talion_token', ${JSON.stringify(accessToken)});
+        localStorage.setItem('talion_role', ${JSON.stringify(safeUser.role)});
+        localStorage.setItem('talion_user', ${JSON.stringify(JSON.stringify(safeUser))});
+        window.location.href = ${JSON.stringify(destination || '/console/')};
+      </script>
+      </body></html>`);
+  } catch (e) {
+    console.error('[SSO] Callback failed for org', entry.orgId, e);
+    res.status(500).send(ssoErrorPage('La connexion via votre fournisseur SSO a échoué. Merci de réessayer ou de contacter votre administrateur.'));
+  }
+});
+
 // Change password endpoint
 // Self-service only — previously took userId from the body with no auth at
 // all, and silently skipped the current-password check whenever the client
@@ -5477,7 +5669,7 @@ app.get('/admin/users/:id/relationships', requireAuth, requireRole('admin'), (re
 // via the level comparison in ROLE_HIERARCHY, no extra check needed.
 app.get('/admin/organizations', requireAuth, requireRole('superadmin'), (req, res) => {
   const result = Array.from(organizations.values()).map(o => ({
-    ...o,
+    ...redactOrganization(o),
     memberCount: Array.from(adminUsers.values()).filter(u => u.organizationId === o.id).length,
   }));
   res.json(result);
@@ -5495,23 +5687,30 @@ app.post('/admin/organizations', requireAuth, requireRole('superadmin'), (req, r
   organizations.set(org.id, org);
   saveOrganizationToSupabase(org).catch(e => console.error('[Organizations] Supabase save error:', e));
   addAuditEntry('system', 'Organization Created', req.supabaseUser!.id, `New organization: ${name}`, org.id, org.id);
-  res.status(201).json(org);
+  res.status(201).json(redactOrganization(org));
 });
 
 app.put('/admin/organizations/:id', requireAuth, requireRole('superadmin'), (req, res) => {
   const org = organizations.get(req.params.id as string);
   if (!org) return res.status(404).json({ error: 'Organization not found' });
-  const { name, status, brandName } = req.body;
+  const { name, status, brandName, ssoEnabled, ssoIssuer, ssoClientId, ssoClientSecret } = req.body;
   if (status !== undefined && status !== 'active' && status !== 'suspended') {
     return res.status(400).json({ error: "status must be 'active' or 'suspended'" });
   }
   if (name !== undefined) org.name = name;
   if (status !== undefined) org.status = status;
   if (brandName !== undefined) org.brandName = (brandName || '').trim() || undefined;
+  if (ssoEnabled !== undefined) org.ssoEnabled = !!ssoEnabled;
+  if (ssoIssuer !== undefined) org.ssoIssuer = (ssoIssuer || '').trim() || undefined;
+  if (ssoClientId !== undefined) org.ssoClientId = (ssoClientId || '').trim() || undefined;
+  // Empty string leaves the existing secret untouched (so the admin can edit
+  // the issuer/client ID without being forced to re-paste the secret) —
+  // only a non-empty value overwrites it.
+  if (ssoClientSecret) org.ssoClientSecret = ssoClientSecret;
   organizations.set(org.id, org);
   saveOrganizationToSupabase(org).catch(e => console.error('[Organizations] Supabase save error:', e));
-  addAuditEntry('system', 'Organization Updated', req.supabaseUser!.id, `Organization ${org.id}: ${JSON.stringify({ name, status, brandName })}`, org.id, org.id);
-  res.json(org);
+  addAuditEntry('system', 'Organization Updated', req.supabaseUser!.id, `Organization ${org.id}: ${JSON.stringify({ name, status, brandName, ssoEnabled, ssoIssuer, ssoClientId })}`, org.id, org.id);
+  res.json(redactOrganization(org));
 });
 
 // White-label logo shown in admin-web/dispatch-web in place of the default
@@ -5525,7 +5724,7 @@ app.post('/admin/organizations/:id/logo', requireAuth, requireRole('superadmin')
   organizations.set(org.id, org);
   saveOrganizationToSupabase(org).catch(e => console.error('[Organizations] Supabase save error:', e));
   addAuditEntry('system', 'Organization Logo Updated', req.supabaseUser!.id, `Organization ${org.id} logo updated`, org.id, org.id);
-  res.json(org);
+  res.json(redactOrganization(org));
 });
 
 // Any authenticated console user (not just superadmin) — lets admin-web and
@@ -8621,7 +8820,12 @@ async function loadOrganizationsFromSupabase(): Promise<void> {
     if (data && data.length > 0) {
       organizations.clear();
       data.forEach((o: any) => {
-        organizations.set(o.id, { id: o.id, name: o.name, status: o.status || 'active', createdAt: o.created_at || Date.now(), logoUrl: o.logo_url || undefined, brandName: o.brand_name || undefined });
+        organizations.set(o.id, {
+          id: o.id, name: o.name, status: o.status || 'active', createdAt: o.created_at || Date.now(),
+          logoUrl: o.logo_url || undefined, brandName: o.brand_name || undefined,
+          ssoEnabled: o.sso_enabled || false, ssoIssuer: o.sso_issuer || undefined,
+          ssoClientId: o.sso_client_id || undefined, ssoClientSecret: o.sso_client_secret || undefined,
+        });
       });
       console.log(`[Supabase] Loaded ${data.length} organizations`);
     }
@@ -8632,6 +8836,7 @@ async function saveOrganizationToSupabase(org: Organization): Promise<void> {
   try {
     const { error } = await supabaseAdmin.from('organizations').upsert({
       id: org.id, name: org.name, status: org.status, created_at: org.createdAt, logo_url: org.logoUrl || null, brand_name: org.brandName || null,
+      sso_enabled: org.ssoEnabled || false, sso_issuer: org.ssoIssuer || null, sso_client_id: org.ssoClientId || null, sso_client_secret: org.ssoClientSecret || null,
     });
     if (error) console.error('[Supabase] saveOrganizationToSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] saveOrganizationToSupabase error:', e); }
