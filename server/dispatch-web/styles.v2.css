@@ -1015,6 +1015,13 @@ tr.is-duress { background: rgba(185,28,28,0.12) !important; font-weight: 700; }
   cursor: crosshair !important;
 }
 
+/* OpenStreetMap only ships one tile style — dark mode is simulated by
+   inverting just the tile pane (markers/popups live in sibling panes and
+   are unaffected), see addThemedOsmTileLayer() in app.v2.js. */
+.leaflet-tile-pane.map-tile-dark-invert {
+  filter: invert(100%) hue-rotate(180deg) brightness(95%) contrast(90%);
+}
+
 /* Geofence zone circle animation */
 @keyframes zone-pulse {
   0%, 100% { stroke-opacity: 0.8; }

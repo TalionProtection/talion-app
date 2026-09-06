@@ -3863,6 +3863,21 @@ const SEVERITY_COLORS = { critical: '#dc2626', high: '#f59e0b', medium: '#3b82f6
 const TYPE_EMOJIS = { sos: '🆘', medical: '🏥', fire: '🔥', security: '🔒', hazard: '⚠️', accident: '💥', broadcast: '📢', other: '🚨' };
 const STATUS_COLORS_RESP= { on_duty: '#0ea5e9', available: '#22c55e', off_duty: '#6b7280', responding: '#f59e0b' };
 
+// CARTO's basemaps.cartocdn.com tiles (previously free/anonymous) started
+// requiring a paid API key — switched to OpenStreetMap's standard tile
+// server, which is genuinely free with no account/key. OSM only has one
+// style (no dark variant), so dark mode is simulated with a CSS filter on
+// the tile pane instead of swapping tile URLs.
+const OSM_TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+const OSM_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+
+function addThemedOsmTileLayer(map, isLight, extraOptions = {}) {
+  const layer = L.tileLayer(OSM_TILE_URL, { attribution: OSM_ATTRIBUTION, maxZoom: 19, ...extraOptions }).addTo(map);
+  const pane = map.getPane('tilePane');
+  if (pane) pane.classList.toggle('map-tile-dark-invert', !isLight);
+  return layer;
+}
+
 function initMap() {
   if (dispatchMap) return;
   const mapEl = document.getElementById('dispatchMap');
@@ -3877,13 +3892,7 @@ function initMap() {
 
   // Theme-aware tile layer
   const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-  const darkTiles = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
-  const lightTiles = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
-  window._mapTileLayer = L.tileLayer(isLight ? lightTiles : darkTiles, {
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>',
-    subdomains: 'abcd',
-    maxZoom: 19,
-  }).addTo(dispatchMap);
+  window._mapTileLayer = addThemedOsmTileLayer(dispatchMap, isLight);
 
   // ── Sectors (admin-managed organizational zones) ──
   loadSectors();
@@ -5418,14 +5427,7 @@ function updateMapTileLayer() {
     }
   });
   // Add appropriate tile layer
-  const tileUrl = isLight
-    ? 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
-    : 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
-  L.tileLayer(tileUrl, {
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
-    subdomains: 'abcd',
-    maxZoom: 19,
-  }).addTo(dispatchMap);
+  addThemedOsmTileLayer(dispatchMap, isLight);
 }
 
 // ─── Incident Detail Modal ──────────────────────────────────
@@ -5918,10 +5920,7 @@ function initDetailMiniMap(lat, lng, hasValidLocation, severity, radius) {
     scrollWheelZoom: true,
   });
   
-  const tileUrl = isLight
-    ? 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
-    : 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
-  L.tileLayer(tileUrl, { subdomains: 'abcd', maxZoom: 19 }).addTo(detailMiniMap);
+  addThemedOsmTileLayer(detailMiniMap, isLight);
   
   // Add marker
   const sevColors = { critical: '#dc2626', high: '#f59e0b', medium: '#3b82f6', low: '#6b7280' };
@@ -7048,25 +7047,18 @@ function closeCheckpointConfigModal() {
 let checkpointMapTileLayer = null;
 let checkpointMapIsSatellite = false;
 
-const CHECKPOINT_STREET_TILES_LIGHT = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
-const CHECKPOINT_STREET_TILES_DARK = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
 const CHECKPOINT_SATELLITE_TILES = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
 
 function toggleCheckpointSatellite() {
   checkpointMapIsSatellite = !checkpointMapIsSatellite;
   if (checkpointMapTileLayer) checkpointConfigMap.removeLayer(checkpointMapTileLayer);
   const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-  // Leaflet's TileLayer.getTileUrl() calls this.options.subdomains.length on
-  // every tile regardless of whether the URL template even contains {s} — so
-  // subdomains must never be set to undefined, only omitted (falls back to
-  // Leaflet's harmless default 'abc') or given a real string/array.
-  const tileOptions = checkpointMapIsSatellite
-    ? { maxZoom: 20, attribution: 'Tiles &copy; Esri' }
-    : { subdomains: 'abcd', maxZoom: 19 };
-  const tiles = checkpointMapIsSatellite
-    ? CHECKPOINT_SATELLITE_TILES
-    : (isLight ? CHECKPOINT_STREET_TILES_LIGHT : CHECKPOINT_STREET_TILES_DARK);
-  checkpointMapTileLayer = L.tileLayer(tiles, tileOptions).addTo(checkpointConfigMap);
+  if (checkpointMapIsSatellite) {
+    checkpointMapTileLayer = L.tileLayer(CHECKPOINT_SATELLITE_TILES, { maxZoom: 20, attribution: 'Tiles &copy; Esri' }).addTo(checkpointConfigMap);
+    checkpointConfigMap.getPane('tilePane')?.classList.remove('map-tile-dark-invert');
+  } else {
+    checkpointMapTileLayer = addThemedOsmTileLayer(checkpointConfigMap, isLight);
+  }
   const btn = document.getElementById('cpSatelliteToggle');
   if (btn) btn.innerHTML = checkpointMapIsSatellite ? '&#x1F5FA;&#xFE0F; Plan' : '&#x1F6F0;&#xFE0F; Satellite';
 }
@@ -7075,8 +7067,7 @@ function initCheckpointConfigMap() {
   if (checkpointConfigMap) { checkpointConfigMap.invalidateSize(); return; }
   checkpointConfigMap = L.map('checkpointConfigMap', { center: [46.2125, 6.1795], zoom: 15 });
   const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-  const tiles = isLight ? CHECKPOINT_STREET_TILES_LIGHT : CHECKPOINT_STREET_TILES_DARK;
-  checkpointMapTileLayer = L.tileLayer(tiles, { subdomains: 'abcd', maxZoom: 19 }).addTo(checkpointConfigMap);
+  checkpointMapTileLayer = addThemedOsmTileLayer(checkpointConfigMap, isLight);
   checkpointConfigMap.on('click', (e) => {
     if (!document.getElementById('cpSiteSelect').value) {
       showToast("Sélectionnez un site d'abord", 'error');
@@ -8102,10 +8093,7 @@ function showPatrolDetail(reportId) {
         zoom: 16,
       });
       const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-      const tiles = isLight
-        ? 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
-        : 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
-      L.tileLayer(tiles, { subdomains: 'abcd', maxZoom: 19 }).addTo(patrolDetailMap);
+      addThemedOsmTileLayer(patrolDetailMap, isLight);
 
       const trailLatLngs = report.trail.map(p => [p.latitude, p.longitude]);
       const trailLine = L.polyline(trailLatLngs, { color: '#1e3a5f', weight: 3 }).addTo(patrolDetailMap);
