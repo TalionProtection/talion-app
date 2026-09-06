@@ -3870,12 +3870,31 @@ const STATUS_COLORS_RESP= { on_duty: '#0ea5e9', available: '#22c55e', off_duty: 
 // the tile pane instead of swapping tile URLs.
 const OSM_TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 const OSM_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+const ESRI_SATELLITE_TILES = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
 
 function addThemedOsmTileLayer(map, isLight, extraOptions = {}) {
   const layer = L.tileLayer(OSM_TILE_URL, { attribution: OSM_ATTRIBUTION, maxZoom: 19, ...extraOptions }).addTo(map);
   const pane = map.getPane('tilePane');
   if (pane) pane.classList.toggle('map-tile-dark-invert', !isLight);
   return layer;
+}
+
+let dispatchMapIsSatellite = false;
+
+function toggleDispatchSatellite() {
+  if (!dispatchMap) return;
+  dispatchMapIsSatellite = !dispatchMapIsSatellite;
+  if (window._mapTileLayer) dispatchMap.removeLayer(window._mapTileLayer);
+  const pane = dispatchMap.getPane('tilePane');
+  if (dispatchMapIsSatellite) {
+    if (pane) pane.classList.remove('map-tile-dark-invert');
+    window._mapTileLayer = L.tileLayer(ESRI_SATELLITE_TILES, { maxZoom: 20, attribution: 'Tiles &copy; Esri' }).addTo(dispatchMap);
+  } else {
+    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+    window._mapTileLayer = addThemedOsmTileLayer(dispatchMap, isLight);
+  }
+  const btn = document.getElementById('btnSatelliteToggle');
+  if (btn) btn.innerHTML = dispatchMapIsSatellite ? '&#x1F5FA;&#xFE0F; Plan' : '&#x1F6F0;&#xFE0F; Satellite';
 }
 
 function initMap() {
@@ -5419,6 +5438,7 @@ function updateThemeButton() {
 // Swap map tile layer based on theme
 function updateMapTileLayer() {
   if (typeof dispatchMap === 'undefined' || !dispatchMap) return;
+  if (dispatchMapIsSatellite) return; // satellite imagery has no day/night variant — nothing to swap
   const isLight = document.documentElement.getAttribute('data-theme') === 'light';
   // Remove existing tile layers
   dispatchMap.eachLayer((layer) => {
@@ -5427,7 +5447,7 @@ function updateMapTileLayer() {
     }
   });
   // Add appropriate tile layer
-  addThemedOsmTileLayer(dispatchMap, isLight);
+  window._mapTileLayer = addThemedOsmTileLayer(dispatchMap, isLight);
 }
 
 // ─── Incident Detail Modal ──────────────────────────────────
