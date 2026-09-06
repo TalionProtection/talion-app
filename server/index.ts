@@ -3745,7 +3745,7 @@ app.post('/auth/request-password-reset', (req, res) => {
 });
 
 // Confirm password reset with code
-app.post('/auth/reset-password', (req, res) => {
+app.post('/auth/reset-password', async (req, res) => {
   const { code, newPassword } = req.body;
   if (!code || !newPassword) return res.status(400).json({ error: 'Code and new password are required' });
   if (newPassword.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
@@ -3763,6 +3763,15 @@ app.post('/auth/reset-password', (req, res) => {
     return res.status(404).json({ error: 'User not found' });
   }
 
+  // The mobile app signs in directly against Supabase Auth
+  // (supabase.auth.signInWithPassword), never through /auth/login, so that
+  // password — not just the local bcrypt hash below — has to change too.
+  try {
+    const { error: syncError } = await supabaseAdmin.auth.admin.updateUserById(user.id, { password: newPassword });
+    if (syncError) console.error('[ResetPassword] Supabase Auth password sync error:', syncError.message);
+  } catch (e) {
+    console.error('[ResetPassword] Supabase Auth password sync error:', e);
+  }
   user.passwordHash = bcrypt.hashSync(newPassword, 10);
   adminUsers.set(user.id, user);
   passwordResetCodes.delete(code);
@@ -5544,7 +5553,7 @@ app.post('/admin/users', requireAuth, requireRole('admin'), async (req, res) => 
 });
 
 // PUT update user
-app.put('/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => {
+app.put('/admin/users/:id', requireAuth, requireRole('admin'), async (req, res) => {
   const user = adminUsers.get(req.params.id as string);
   if (!user) return res.status(404).json({ error: 'User not found' });
   if (!canAccessOrg(req.supabaseUser!, user.organizationId)) return res.status(403).json({ error: 'Not authorized' });
@@ -5577,7 +5586,23 @@ app.put('/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => {
   if (comments !== undefined) { user.comments = comments; changes.push('comments'); }
   if (photoUrl !== undefined) { user.photoUrl = photoUrl; changes.push('photo'); }
   if (assignedFamilyIds !== undefined) { user.assignedFamilyIds = assignedFamilyIds; changes.push('assignedFamilyIds'); }
-  if (password) { user.passwordHash = bcrypt.hashSync(password, 10); changes.push('password'); }
+  if (password) {
+    user.passwordHash = bcrypt.hashSync(password, 10);
+    changes.push('password');
+    // Keep Supabase Auth's own password in sync immediately — the mobile
+    // app signs in directly against Supabase Auth (supabase.auth.signInWithPassword),
+    // never through /auth/login, so it never benefits from that route's
+    // lazy self-heal-on-next-login. Without this, an admin changing a
+    // user's password here left the mobile app permanently unable to log
+    // in with the new password until that user happened to log into a web
+    // console at least once.
+    try {
+      const { error: syncError } = await supabaseAdmin.auth.admin.updateUserById(user.id, { password });
+      if (syncError) console.error('[Users] Supabase Auth password sync error:', syncError.message);
+    } catch (e) {
+      console.error('[Users] Supabase Auth password sync error:', e);
+    }
+  }
   if (relationships !== undefined) {
     // Remove old reciprocal relationships
     (user.relationships || []).forEach(oldRel => {
