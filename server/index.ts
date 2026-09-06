@@ -5557,7 +5557,7 @@ app.put('/admin/users/:id', requireAuth, requireRole('admin'), async (req, res) 
   const user = adminUsers.get(req.params.id as string);
   if (!user) return res.status(404).json({ error: 'User not found' });
   if (!canAccessOrg(req.supabaseUser!, user.organizationId)) return res.status(403).json({ error: 'Not authorized' });
-  const { firstName, lastName, email, role, tags, address, addressComponents, phoneLandline, phoneMobile, comments, photoUrl, relationships, status, password, assignedFamilyIds } = req.body;
+  const { firstName, lastName, email, role, tags, address, addressComponents, phoneLandline, phoneMobile, comments, photoUrl, relationships, status, password, assignedFamilyIds, organizationId } = req.body;
   // Check email uniqueness if changed
   if (email && email !== user.email) {
     const existing = Array.from(adminUsers.values()).find(u => u.email === email && u.id !== user.id);
@@ -5569,6 +5569,16 @@ app.put('/admin/users/:id', requireAuth, requireRole('admin'), async (req, res) 
   if (role && !allowedRolesForUpdate.includes(role)) {
     return res.status(400).json({ error: 'Invalid role' });
   }
+  // Moving a user between organizations is superadmin-only — an org-scoped
+  // admin can't even see other organizations to move someone into.
+  if (organizationId !== undefined && organizationId !== user.organizationId) {
+    if (req.supabaseUser!.role !== 'superadmin') {
+      return res.status(403).json({ error: 'Only a superadmin can change a user\'s organization' });
+    }
+    if (!organizations.has(organizationId)) {
+      return res.status(400).json({ error: 'Invalid organizationId' });
+    }
+  }
   const changes: string[] = [];
   if (firstName !== undefined) { user.firstName = firstName; changes.push('firstName'); }
   if (lastName !== undefined) { user.lastName = lastName; changes.push('lastName'); }
@@ -5578,6 +5588,7 @@ app.put('/admin/users/:id', requireAuth, requireRole('admin'), async (req, res) 
   if (email !== undefined) { user.email = email; changes.push('email'); }
   if (role !== undefined && role !== user.role) { const old = user.role; user.role = role; changes.push(`role:${old}->${role}`); }
   if (status !== undefined && status !== user.status) { const old = user.status; user.status = status; changes.push(`status:${old}->${status}`); }
+  if (organizationId !== undefined && organizationId !== user.organizationId) { const old = user.organizationId; user.organizationId = organizationId; changes.push(`organizationId:${old}->${organizationId}`); }
   if (tags !== undefined) { user.tags = tags; changes.push('tags'); }
   if (address !== undefined) { user.address = address; changes.push('address'); }
   if (addressComponents !== undefined) { user.addressComponents = addressComponents; }

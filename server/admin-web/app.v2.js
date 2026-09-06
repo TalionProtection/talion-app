@@ -894,6 +894,12 @@ function openUserDrawer(userId) {
     document.getElementById('fieldRole').value = user.role || 'user';
     document.getElementById('fieldStatus').value = user.status || 'active';
     document.getElementById('fieldComments').value = user.comments || '';
+    // Pre-select the user's CURRENT organization — without this, saving
+    // (which now sends whatever this dropdown happens to show) would
+    // silently move the user to whichever org happened to be selected.
+    if (document.getElementById('fieldOrg').options.length > 0) {
+      document.getElementById('fieldOrg').value = user.organizationId || '';
+    }
     document.getElementById('fieldPassword').value = '';
     document.getElementById('fieldPassword').placeholder = user.hasPassword ? '••••••••  (laisser vide pour ne pas changer)' : 'Définir un mot de passe';
     document.getElementById('passwordIndicator').textContent = user.hasPassword ? '✅ Mot de passe défini' : '⚠️ Aucun mot de passe';
@@ -1240,9 +1246,12 @@ async function saveUser() {
   };
   // Only include password if user typed one
   if (password) payload.password = password;
-  // Only relevant on creation, by a superadmin (an org admin's new users are
-  // always forced server-side into their own org regardless of this field).
-  if (!editingUserId && currentUserRole() === 'superadmin') {
+  // Superadmin-only (an org admin's users are always forced server-side into
+  // their own org regardless of this field, and never even sees other orgs
+  // in this dropdown to move someone into). Sent on both creation AND edit —
+  // previously edit silently dropped this, so changing an existing user's
+  // organization in this dropdown appeared to work but was never saved.
+  if (currentUserRole() === 'superadmin') {
     payload.organizationId = document.getElementById('fieldOrg').value;
   }
 
