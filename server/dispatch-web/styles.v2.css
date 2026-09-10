@@ -433,7 +433,9 @@ tr.is-duress { background: rgba(185,28,28,0.12) !important; font-weight: 700; }
 [data-theme="light"] .radius-btn.active { color: #0369a1; }
 .broadcast-entry { padding: 12px; background: var(--bg-broadcast-entry); border-radius: 8px; border-left: 3px solid var(--bg-active); }
 .broadcast-entry .bc-msg { font-size: 13px; color: var(--text-secondary); margin-bottom: 4px; }
-.broadcast-entry .bc-meta { font-size: 11px; color: var(--text-faint); }
+.broadcast-entry .bc-meta { font-size: 11px; color: var(--text-faint); display: flex; align-items: center; gap: 8px; }
+.btn-bc-delete { margin-left: auto; background: none; border: none; cursor: pointer; font-size: 13px; padding: 2px 6px; border-radius: 4px; opacity: 0.6; }
+.btn-bc-delete:hover { opacity: 1; background: rgba(239, 68, 68, 0.12); }
 
 /* ─── Modal ───────────────────────────────────────────────── */
 .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: var(--overlay-bg); z-index: 100; align-items: center; justify-content: center; }

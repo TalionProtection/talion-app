@@ -49,7 +49,6 @@ if (!localStorage.getItem('talion_token')) {
 
 let incidents = [];
 let responders = [];
-let broadcastHistory = [];
 let currentFilter = 'all';
 let currentResponderFilter = 'all';
 let selectedBroadcastSeverity = 'medium';
@@ -601,12 +600,10 @@ function handleWsMessage(msg) {
 
     case 'zoneBroadcast': {
       const bc = msg.data;
-      broadcastHistory.unshift({
-        details: `[${(bc.severity || 'medium').toUpperCase()}] ${bc.message} (${bc.radiusKm || 5}km radius)`,
-        performedBy: bc.by || 'Unknown',
-        timestamp: bc.timestamp || now,
-      });
-      broadcastHistory = broadcastHistory.slice(0, 10);
+      // The 'incidents' array already picked this up via the 'newAlert'
+      // event the server sends right before this one (broadcasts are
+      // stored as Alert records with type:'broadcast') — renderBroadcastHistory()
+      // derives its list from there, so nothing to append here.
       showToast(`📢 Broadcast: ${bc.message}`, 'warning');
       sendBrowserNotification(
         `Zone Broadcast (${(bc.severity || 'medium').toUpperCase()})`,
@@ -719,6 +716,7 @@ function updateAll() {
   renderOverview();
   renderIncidents();
   renderArchives();
+  renderBroadcastHistory();
   document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString();
 }
 
@@ -1055,19 +1053,14 @@ async function loadKPIs() {
 // ─── Data Fetching ───────────────────────────────────────────
 async function refreshData() {
   try {
-    const [healthRes, incRes, respRes, auditRes] = await Promise.all([
+    const [healthRes, incRes, respRes] = await Promise.all([
       fetch(`${API_BASE}/admin/health`),
       fetch(`${API_BASE}/admin/incidents`),
       fetch(`${API_BASE}/dispatch/responders`),
-      fetch(`${API_BASE}/admin/audit`),
     ]);
     const health = await healthRes.json();
     incidents = await incRes.json();
     responders = await respRes.json();
-    const audit = await auditRes.json();
-
-    // Extract broadcast history from audit
-    broadcastHistory = audit.filter(a => a.category === 'broadcast').slice(0, 10);
 
     updateServerStatus(true, health.wsClients || 0);
     updateStats();
@@ -3429,16 +3422,40 @@ async function sendBroadcast() {
 
 function renderBroadcastHistory() {
   const container = document.getElementById('broadcastHistory');
-  if (broadcastHistory.length === 0) {
+  // Broadcasts are stored as Alert records (type: 'broadcast') — deriving
+  // from the same 'incidents' list every other tab already uses (rather
+  // than a separately-maintained array) means this list always has each
+  // broadcast's real alert id, which DELETE /alerts/:id needs.
+  const broadcasts = incidents.filter(i => i.type === 'broadcast').sort((a, b) => b.timestamp - a.timestamp).slice(0, 20);
+  if (broadcasts.length === 0) {
     container.innerHTML = '<div class="empty-state"><p>No recent broadcasts</p></div>';
     return;
   }
-  container.innerHTML = broadcastHistory.map(b => `
+  container.innerHTML = broadcasts.map(b => `
     <div class="broadcast-entry">
-      <div class="bc-msg">${b.details}</div>
-      <div class="bc-meta">${b.performedBy} · ${formatTimeAgo(b.timestamp)}</div>
+      <div class="bc-msg">[${(b.severity || 'medium').toUpperCase()}] ${b.description || ''}</div>
+      <div class="bc-meta">${b.reportedBy || 'Unknown'} · ${formatTimeAgo(b.timestamp)}
+        <button class="btn-bc-delete" onclick="deleteBroadcast('${b.id}')" title="Supprimer ce broadcast">🗑️</button>
+      </div>
     </div>
   `).join('');
+}
+
+async function deleteBroadcast(id) {
+  if (!confirm('Supprimer ce broadcast ? Cette action est irréversible.')) return;
+  try {
+    const res = await fetch(`${API_BASE}/alerts/${id}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors de la suppression', 'error');
+      return;
+    }
+    incidents = incidents.filter(i => i.id !== id);
+    renderBroadcastHistory();
+    showToast('Broadcast supprimé', 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
 }
 
 // ─── Address Autocomplete (Nominatim / OpenStreetMap) ────────────────────────────────────────
