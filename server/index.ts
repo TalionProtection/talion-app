@@ -4553,6 +4553,17 @@ async function sendResendEmail(opts: { to: string[]; subject: string; html: stri
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) { console.warn('[Resend] RESEND_API_KEY not set, skipping email send'); return false; }
   try {
+    // TEMPORARY rollout gate, applies to every email this function ever
+    // sends (Incident Reports, vehicle-handover anomaly alerts, and
+    // anything future that reuses this shared helper) — Billy wants all
+    // Resend traffic routed to office@talion.ch only until real-recipient
+    // distribution is ready to go live. Remove (or unset the env var) to
+    // restore real recipients — no other code change needed anywhere.
+    const overrideRecipient = process.env.RESEND_OVERRIDE_RECIPIENT || 'office@talion.ch';
+    const actualTo = overrideRecipient ? [overrideRecipient] : opts.to;
+    if (overrideRecipient && (opts.to.length !== 1 || opts.to[0] !== overrideRecipient)) {
+      console.log(`[Resend] Override active — redirecting email intended for [${opts.to.join(', ')}] to ${overrideRecipient}`);
+    }
     const body: Record<string, any> = {
       // Default matches the verified Resend sending domain (mail.talion.ch,
       // a dedicated subdomain — not the root talion.ch, which carries
@@ -4560,7 +4571,7 @@ async function sendResendEmail(opts: { to: string[]; subject: string; html: stri
       // separate from transactional sending). RESEND_FROM_EMAIL overrides
       // if set.
       from: process.env.RESEND_FROM_EMAIL || "Talion's Eye <dispatch@mail.talion.ch>",
-      to: opts.to,
+      to: actualTo,
       subject: opts.subject,
       html: opts.html,
     };
