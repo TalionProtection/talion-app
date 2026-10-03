@@ -4454,7 +4454,12 @@ async function sendResendEmail(opts: { to: string[]; subject: string; html: stri
   if (!apiKey) { console.warn('[Resend] RESEND_API_KEY not set, skipping email send'); return false; }
   try {
     const body: Record<string, any> = {
-      from: process.env.RESEND_FROM_EMAIL || "Talion's Eye <dispatch@talion.ch>",
+      // Default matches the verified Resend sending domain (mail.talion.ch,
+      // a dedicated subdomain — not the root talion.ch, which carries
+      // Billy's real office@talion.ch mailbox and was deliberately kept
+      // separate from transactional sending). RESEND_FROM_EMAIL overrides
+      // if set.
+      from: process.env.RESEND_FROM_EMAIL || "Talion's Eye <dispatch@mail.talion.ch>",
       to: opts.to,
       subject: opts.subject,
       html: opts.html,
