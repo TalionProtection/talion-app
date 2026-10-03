@@ -892,6 +892,7 @@
     <section class="tab-content" id="tab-repository">
       <div class="repo-subnav">
         <button class="repo-subnav-item active" data-subtab="repo-keys" onclick="switchRepoSubtab('repo-keys')">&#x1F511; Clés</button>
+        <button class="repo-subnav-item" data-subtab="repo-incidents" onclick="switchRepoSubtab('repo-incidents')">&#x1F4C4; Rapports d'incident</button>
       </div>
 
       <div class="repo-subtab-content active" id="repo-subtab-repo-keys">
@@ -918,7 +919,76 @@
           </table>
         </div>
       </div>
+
+      <div class="repo-subtab-content" id="repo-subtab-repo-incidents">
+        <div class="toolbar">
+          <div class="toolbar-stats">
+            <button class="repo-subnav-item active" data-ifilter="draft" onclick="setIncidentReportFilter('draft')">À compléter</button>
+            <button class="repo-subnav-item" data-ifilter="finalized" onclick="setIncidentReportFilter('finalized')">Finalisés</button>
+            <button class="repo-subnav-item" data-ifilter="all" onclick="setIncidentReportFilter('all')">Tous</button>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="openAddIncidentReportModal()">&#x2795; Nouveau rapport</button>
+        </div>
+        <div id="incidentReportsList" class="patrol-reports-grid"></div>
+      </div>
     </section>
+
+    <!-- Add/Edit Incident Report Modal -->
+    <div class="modal-overlay" id="addIncidentReportModal" style="display:none;">
+      <div class="modal" style="max-width:560px;">
+        <h3 class="modal-title" id="incidentReportModalTitle">Nouveau rapport d'incident</h3>
+        <div class="form-group">
+          <label>Date et heure des faits</label>
+          <input type="datetime-local" id="irOccurredAt" class="form-control">
+        </div>
+        <div class="form-group">
+          <label>Lieu</label>
+          <input type="text" id="irLocation" class="form-control" placeholder="Adresse">
+        </div>
+        <div class="form-group">
+          <label>Sévérité</label>
+          <select id="irSeverity" class="form-control">
+            <option value="low">Faible</option>
+            <option value="medium" selected>Moyenne</option>
+            <option value="high">Élevée</option>
+            <option value="critical">Critique</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Faits</label>
+          <textarea id="irNarrative" class="form-control" rows="5" placeholder="Décrire ce qui s'est passé..."></textarea>
+        </div>
+        <div class="form-group">
+          <label>Photos / vidéos</label>
+          <input type="file" id="irMediaInput" accept="image/*,video/*" multiple>
+          <div id="irMediaPreview" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;"></div>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+          <button class="btn btn-secondary" onclick="closeAddIncidentReportModal()">Annuler</button>
+          <button class="btn btn-secondary" id="irFinalizeBtn" style="display:none;" onclick="submitIncidentReport(true)">Finaliser</button>
+          <button class="btn btn-primary" onclick="submitIncidentReport(false)">Enregistrer</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Distribute Incident Report Modal -->
+    <div class="modal-overlay" id="distributeReportModal" style="display:none;">
+      <div class="modal" style="max-width:480px;">
+        <h3 class="modal-title">Distribuer le rapport</h3>
+        <div class="form-group">
+          <label>Destinataires</label>
+          <div id="irRecipientsList" style="max-height:220px;overflow-y:auto;border:1px solid var(--border-subtle);border-radius:8px;padding:8px;"></div>
+        </div>
+        <div class="form-group">
+          <label><input type="checkbox" id="irMethodEmail" checked style="width:auto;"> Envoyer le PDF par email</label><br>
+          <label><input type="checkbox" id="irMethodPush" checked style="width:auto;"> Pousser dans l'app</label>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+          <button class="btn btn-secondary" onclick="closeDistributeReportModal()">Annuler</button>
+          <button class="btn btn-primary" onclick="submitDistributeReport()">Envoyer</button>
+        </div>
+      </div>
+    </div>
 
     <!-- Add Key Modal -->
     <div class="modal-overlay" id="addKeyModal" style="display:none;">

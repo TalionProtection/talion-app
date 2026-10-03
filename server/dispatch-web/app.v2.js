@@ -305,6 +305,21 @@ function handleWsMessage(msg) {
       break;
     }
 
+    case 'incidentReportDraftCreated': {
+      incidentReportsCache.unshift(msg.data);
+      if (document.getElementById('tab-repository')?.classList.contains('active')) renderIncidentReports();
+      showToast(`📄 Nouveau rapport à compléter — ${msg.data.location?.address || ''}`, 'info');
+      break;
+    }
+
+    case 'incidentReportCreated':
+    case 'incidentReportUpdated': {
+      const irIdx = incidentReportsCache.findIndex(r => r.id === msg.data.id);
+      if (irIdx >= 0) incidentReportsCache[irIdx] = msg.data; else incidentReportsCache.unshift(msg.data);
+      if (document.getElementById('tab-repository')?.classList.contains('active')) renderIncidentReports();
+      break;
+    }
+
     case 'acceptanceTimeout': {
       const respName = msg.responderName || msg.responderId;
       showToast(`\u23F0 ${respName} n'a pas accept\u00e9 l'incident ${formatIncidentId(msg.alertId)} dans les 5 min`, 'warning');
@@ -1680,11 +1695,15 @@ async function submitMainCouranteNote() {
 let keysCache = [];
 
 function switchRepoSubtab(subtab) {
-  document.querySelectorAll('.repo-subnav-item').forEach(n => n.classList.remove('active'));
+  // Scoped to [data-subtab] specifically — .repo-subnav-item is reused by
+  // the Consignes (data-cfilter) and Incident Reports (data-ifilter) filter
+  // pills too, a bare class-wide toggle here would clobber their state.
+  document.querySelectorAll('.repo-subnav-item[data-subtab]').forEach(n => n.classList.remove('active'));
   document.querySelector(`.repo-subnav-item[data-subtab="${subtab}"]`)?.classList.add('active');
   document.querySelectorAll('.repo-subtab-content').forEach(t => t.classList.remove('active'));
   document.getElementById(`repo-subtab-${subtab}`)?.classList.add('active');
   if (subtab === 'repo-keys') loadKeys();
+  if (subtab === 'repo-incidents') loadIncidentReports();
 }
 
 async function loadKeys() {
@@ -2042,6 +2061,260 @@ async function deleteConsigne(id) {
     if (!res.ok) { showToast('Erreur lors de la suppression', 'error'); return; }
     loadConsignes();
     showToast('Consigne supprimée', 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
+}
+
+// ─── Repository: Incident reports ──────────────────────────────────────
+let incidentReportsCache = [];
+let incidentReportFilter = 'draft';
+let editingIncidentReportId = null;
+let irPendingMediaFiles = [];
+let irExistingMedia = [];
+let irRecipientsCache = [];
+
+function setIncidentReportFilter(filter) {
+  incidentReportFilter = filter;
+  document.querySelectorAll('#repo-subtab-repo-incidents .repo-subnav-item[data-ifilter]').forEach(n => n.classList.toggle('active', n.dataset.ifilter === filter));
+  loadIncidentReports();
+}
+
+async function loadIncidentReports() {
+  try {
+    const res = await fetch(`${API_BASE}/api/incident-reports?status=${incidentReportFilter}`);
+    incidentReportsCache = res.ok ? await res.json() : [];
+    renderIncidentReports();
+  } catch (e) {
+    console.error('[IncidentReports] load error:', e);
+  }
+}
+
+const IR_SEVERITY_COLOR = { low: '#6b7280', medium: '#3b82f6', high: '#f59e0b', critical: '#ef4444' };
+const IR_SEVERITY_LABEL = { low: 'Faible', medium: 'Moyenne', high: 'Élevée', critical: 'Critique' };
+
+function renderIncidentReports() {
+  const container = document.getElementById('incidentReportsList');
+  if (!container) return;
+  if (incidentReportsCache.length === 0) {
+    container.innerHTML = '<div class="empty-state">Aucun rapport</div>';
+    return;
+  }
+  container.innerHTML = incidentReportsCache.map(r => `
+    <div class="provider-row" style="border-left:4px solid ${IR_SEVERITY_COLOR[r.severity]};">
+      <div style="flex:1;">
+        <div class="provider-row-name">
+          <span class="badge" style="background:${IR_SEVERITY_COLOR[r.severity]};color:#fff;">${IR_SEVERITY_LABEL[r.severity]}</span>
+          <span class="badge ${r.status === 'draft' ? 'badge-error' : 'badge-success'}">${r.status === 'draft' ? 'À compléter' : 'Finalisé'}</span>
+          ${r.origin === 'mobile_agent' ? '📱 Depuis l\'app' : '🖥️ Dispatch'} — ${escapeHtml(r.location.address)}
+        </div>
+        <div class="provider-row-detail">${new Date(r.occurredAt).toLocaleString('fr-FR')} · ${escapeHtml(r.createdByName)}</div>
+        <div class="provider-row-detail">${escapeHtml((r.narrative || '').slice(0, 140))}${(r.narrative || '').length > 140 ? '…' : ''}</div>
+        ${r.distributions?.length > 0 ? `<div class="provider-row-detail" style="font-style:italic;">Distribué ${r.distributions.length} fois, dernière fois ${formatTimeAgo(r.distributions[r.distributions.length - 1].sentAt)}</div>` : ''}
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;">
+        <button class="btn btn-secondary btn-sm" onclick="openEditIncidentReportModal('${r.id}')">${r.status === 'draft' ? 'Compléter' : 'Modifier'}</button>
+        <button class="btn btn-secondary btn-sm" onclick="downloadIncidentReportPdf('${r.id}')">📄 PDF</button>
+        <button class="btn btn-primary btn-sm" onclick="openDistributeReportModal('${r.id}')">✉️ Distribuer</button>
+        <button class="btn btn-secondary btn-sm" onclick="deleteIncidentReport('${r.id}')" title="Supprimer">🗑️</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderIrMediaPreview() {
+  const container = document.getElementById('irMediaPreview');
+  const existing = irExistingMedia.map(url => `
+    <div style="font-size:11px;background:var(--bg-hover);padding:4px 8px;border-radius:6px;">
+      ${url.split('/').pop().slice(0, 20)} <button onclick="removeIrExistingMedia('${url}')" style="border:none;background:none;cursor:pointer;color:#ef4444;">×</button>
+    </div>`).join('');
+  const pending = irPendingMediaFiles.map((f, i) => `
+    <div style="font-size:11px;background:var(--bg-hover);padding:4px 8px;border-radius:6px;">
+      ${f.name.slice(0, 20)} (à envoyer) <button onclick="removeIrPendingMedia(${i})" style="border:none;background:none;cursor:pointer;color:#ef4444;">×</button>
+    </div>`).join('');
+  container.innerHTML = existing + pending;
+}
+
+async function removeIrExistingMedia(url) {
+  if (!editingIncidentReportId) return;
+  try {
+    await fetch(`${API_BASE}/api/incident-reports/${editingIncidentReportId}/media`, {
+      method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
+    });
+    irExistingMedia = irExistingMedia.filter(u => u !== url);
+    renderIrMediaPreview();
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
+}
+
+function removeIrPendingMedia(index) {
+  irPendingMediaFiles.splice(index, 1);
+  renderIrMediaPreview();
+}
+
+function openAddIncidentReportModal() {
+  editingIncidentReportId = null;
+  irPendingMediaFiles = [];
+  irExistingMedia = [];
+  document.getElementById('incidentReportModalTitle').textContent = "Nouveau rapport d'incident";
+  document.getElementById('irOccurredAt').value = toDatetimeLocal(Date.now());
+  document.getElementById('irLocation').value = '';
+  document.getElementById('irSeverity').value = 'medium';
+  document.getElementById('irNarrative').value = '';
+  document.getElementById('irMediaInput').value = '';
+  document.getElementById('irFinalizeBtn').style.display = 'none';
+  renderIrMediaPreview();
+  document.getElementById('addIncidentReportModal').style.display = 'flex';
+}
+
+function openEditIncidentReportModal(id) {
+  const r = incidentReportsCache.find(x => x.id === id);
+  if (!r) return;
+  editingIncidentReportId = id;
+  irPendingMediaFiles = [];
+  irExistingMedia = [...(r.media || [])];
+  document.getElementById('incidentReportModalTitle').textContent = r.status === 'draft' ? "Compléter le rapport d'incident" : "Modifier le rapport d'incident";
+  document.getElementById('irOccurredAt').value = toDatetimeLocal(r.occurredAt);
+  document.getElementById('irLocation').value = r.location.address;
+  document.getElementById('irSeverity').value = r.severity;
+  document.getElementById('irNarrative').value = r.narrative || '';
+  document.getElementById('irMediaInput').value = '';
+  document.getElementById('irFinalizeBtn').style.display = r.status === 'draft' ? 'inline-flex' : 'none';
+  renderIrMediaPreview();
+  document.getElementById('addIncidentReportModal').style.display = 'flex';
+}
+
+function closeAddIncidentReportModal() {
+  document.getElementById('addIncidentReportModal').style.display = 'none';
+  editingIncidentReportId = null;
+}
+
+document.addEventListener('change', (e) => {
+  if (e.target && e.target.id === 'irMediaInput') {
+    irPendingMediaFiles.push(...Array.from(e.target.files));
+    renderIrMediaPreview();
+  }
+});
+
+async function submitIncidentReport(finalize) {
+  const occurredAtRaw = document.getElementById('irOccurredAt').value;
+  const location = document.getElementById('irLocation').value.trim();
+  const severity = document.getElementById('irSeverity').value;
+  const narrative = document.getElementById('irNarrative').value.trim();
+  if (!occurredAtRaw || !location || !narrative) { showToast('Date, lieu et faits sont requis', 'error'); return; }
+  const body = { occurredAt: new Date(occurredAtRaw).getTime(), location: { address: location }, severity, narrative, finalize };
+  try {
+    const url = editingIncidentReportId ? `${API_BASE}/api/incident-reports/${editingIncidentReportId}` : `${API_BASE}/api/incident-reports`;
+    const res = await fetch(url, {
+      method: editingIncidentReportId ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors de l\'enregistrement', 'error');
+      return;
+    }
+    const saved = await res.json();
+    if (irPendingMediaFiles.length > 0) {
+      const formData = new FormData();
+      irPendingMediaFiles.forEach(f => formData.append('media', f));
+      await fetch(`${API_BASE}/api/incident-reports/${saved.id}/media`, { method: 'POST', body: formData });
+    }
+    closeAddIncidentReportModal();
+    loadIncidentReports();
+    showToast('Rapport enregistré', 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
+}
+
+async function downloadIncidentReportPdf(id) {
+  // window.open() wouldn't carry the Authorization header this (protected)
+  // route needs — fetch it as a blob through the authenticated fetch
+  // instead and trigger the download from there (same pattern as the
+  // Blackbook dossier PDF export).
+  try {
+    const res = await fetch(`${API_BASE}/api/incident-reports/${id}/pdf`);
+    if (!res.ok) throw new Error('failed');
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = `rapport-incident-${id}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+  } catch (e) {
+    showToast('Erreur export PDF', 'error');
+  }
+}
+
+let distributeReportTargetId = null;
+
+async function openDistributeReportModal(id) {
+  distributeReportTargetId = id;
+  document.getElementById('irMethodEmail').checked = true;
+  document.getElementById('irMethodPush').checked = true;
+  const listEl = document.getElementById('irRecipientsList');
+  listEl.innerHTML = '<div class="empty-state">Chargement...</div>';
+  document.getElementById('distributeReportModal').style.display = 'flex';
+  try {
+    if (irRecipientsCache.length === 0) {
+      const res = await fetch(`${API_BASE}/api/incident-reports/recipients`);
+      irRecipientsCache = res.ok ? await res.json() : [];
+    }
+    listEl.innerHTML = irRecipientsCache.map(u => `
+      <label style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+        <input type="checkbox" class="ir-recipient-cb" value="${u.id}" style="width:auto;">
+        ${escapeHtml(u.name)} <span style="color:var(--text-faint);font-size:11px;">(${u.role})</span>
+      </label>`).join('') || '<div class="empty-state">Aucun compte disponible</div>';
+  } catch (e) {
+    listEl.innerHTML = '<div class="empty-state">Erreur de chargement</div>';
+  }
+}
+
+function closeDistributeReportModal() {
+  document.getElementById('distributeReportModal').style.display = 'none';
+  distributeReportTargetId = null;
+}
+
+async function submitDistributeReport() {
+  const recipientIds = Array.from(document.querySelectorAll('.ir-recipient-cb:checked')).map(cb => cb.value);
+  const methods = [];
+  if (document.getElementById('irMethodEmail').checked) methods.push('email');
+  if (document.getElementById('irMethodPush').checked) methods.push('push');
+  if (recipientIds.length === 0) { showToast('Sélectionnez au moins un destinataire', 'error'); return; }
+  if (methods.length === 0) { showToast('Sélectionnez au moins un mode d\'envoi', 'error'); return; }
+  try {
+    const res = await fetch(`${API_BASE}/api/incident-reports/${distributeReportTargetId}/distribute`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recipientIds, methods }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors de l\'envoi', 'error');
+      return;
+    }
+    const result = await res.json();
+    closeDistributeReportModal();
+    loadIncidentReports();
+    showToast(`Envoyé (${result.emailsSent} email, ${result.pushesSent} push)`, 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
+}
+
+async function deleteIncidentReport(id) {
+  if (!confirm('Supprimer définitivement ce rapport ?')) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/incident-reports/${id}`, { method: 'DELETE' });
+    if (!res.ok) { showToast('Erreur lors de la suppression', 'error'); return; }
+    loadIncidentReports();
+    showToast('Rapport supprimé', 'success');
   } catch (e) {
     showToast('Erreur de connexion', 'error');
   }

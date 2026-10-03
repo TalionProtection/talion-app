@@ -528,6 +528,46 @@ interface ConsigneEntry {
 }
 const consignes = new Map<string, ConsigneEntry>();
 
+// ─── Incident reports (Repository, Phase 2) ───────────────────────────────
+// Two creation paths, both Dispatch-only (requireRole('dispatcher')):
+//   1. 'dispatch' origin: Dispatch writes the whole thing directly — created
+//      straight to status 'finalized', nothing to "complete" afterwards.
+//   2. 'mobile_agent' origin: auto-seeded (status 'draft') the moment a
+//      responder/dispatcher creates an Alert from the mobile app's
+//      "Create Alert" button (POST /api/sos) — see the hook inside that
+//      route. Dispatch opens it, adds the narrative/adjusts severity, then
+//      finalizes it. Distinguishing "Create Alert modal" from a staff
+//      member's own SOS press isn't possible server-side (both hit the same
+//      /api/sos endpoint with the same shape) — any staff-created mobile
+//      alert seeds a draft, which covers both and is arguably correct for
+//      both: a responder's own SOS is exactly the kind of thing Dispatch
+//      should formalize into a report too.
+interface IncidentReportDistribution {
+  recipientIds: string[];
+  methods: ('email' | 'push')[];
+  sentAt: number;
+  sentBy: string;
+}
+interface IncidentReport {
+  id: string;
+  organizationId?: string;
+  status: 'draft' | 'finalized';
+  origin: 'dispatch' | 'mobile_agent';
+  linkedAlertId?: string;
+  occurredAt: number;
+  location: { latitude?: number; longitude?: number; address: string };
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  narrative: string;
+  media: string[];
+  createdBy: string;
+  createdByName: string;
+  createdAt: number;
+  finalizedBy?: string;
+  finalizedAt?: number;
+  distributions: IncidentReportDistribution[];
+}
+const incidentReports = new Map<string, IncidentReport>();
+
 interface PatrolSite {
   id: string;
   organizationId: string;
@@ -4403,6 +4443,84 @@ app.delete('/api/push-token', requireAuth, (req, res) => {
  * Send push notification to a specific user by userId.
  * Used for targeted notifications like assignment alerts.
  */
+// ─── Resend (transactional email) ──────────────────────────────────────
+// Net-new capability — nothing in this codebase sent real email before this
+// (the password-reset flow, for example, only ever displayed its code in
+// the console). Requires RESEND_API_KEY (and ideally a verified sending
+// domain) configured on Render; silently no-ops with a warning if unset,
+// matching how other optional external integrations degrade in this file.
+async function sendResendEmail(opts: { to: string[]; subject: string; html: string; attachmentFilename?: string; attachmentBuffer?: Buffer }): Promise<boolean> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) { console.warn('[Resend] RESEND_API_KEY not set, skipping email send'); return false; }
+  try {
+    const body: Record<string, any> = {
+      from: process.env.RESEND_FROM_EMAIL || "Talion's Eye <dispatch@talion.ch>",
+      to: opts.to,
+      subject: opts.subject,
+      html: opts.html,
+    };
+    if (opts.attachmentBuffer && opts.attachmentFilename) {
+      body.attachments = [{ filename: opts.attachmentFilename, content: opts.attachmentBuffer.toString('base64') }];
+    }
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      console.error('[Resend] Send failed:', response.status, await response.text().catch(() => ''));
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error('[Resend] Send error:', e);
+    return false;
+  }
+}
+
+// Builds the full report PDF into a Buffer rather than streaming straight to
+// an HTTP response — reused both by the direct-download route and as an
+// email attachment, which needs the bytes in hand before the Resend call.
+async function generateIncidentReportPdfBuffer(report: IncidentReport): Promise<Buffer> {
+  const PDFDocument = require('pdfkit');
+  const doc = new PDFDocument({ margin: 50 });
+  const chunks: Buffer[] = [];
+  doc.on('data', (c: Buffer) => chunks.push(c));
+  const done = new Promise<Buffer>((resolve) => doc.on('end', () => resolve(Buffer.concat(chunks))));
+
+  const SEVERITY_LABELS: Record<string, string> = { low: 'Faible', medium: 'Moyenne', high: 'Élevée', critical: 'Critique' };
+
+  doc.fontSize(20).font('Helvetica-Bold').text("Rapport d'incident");
+  doc.fontSize(10).font('Helvetica').fillColor('#666').text(`ID : ${report.id}`);
+  doc.fillColor('#000');
+  doc.moveDown(0.5).fontSize(12).font('Helvetica');
+  doc.text(`Date/heure des faits : ${new Date(report.occurredAt).toLocaleString('fr-FR')}`);
+  doc.text(`Lieu : ${report.location.address}`);
+  doc.font('Helvetica-Bold').text(`Sévérité : ${SEVERITY_LABELS[report.severity] || report.severity}`).font('Helvetica');
+  doc.moveDown(0.5).font('Helvetica-Bold').fontSize(14).text('Faits');
+  doc.font('Helvetica').fontSize(12).text(report.narrative || '(non renseigné)');
+  doc.moveDown(0.5).fontSize(10).font('Helvetica-Oblique');
+  doc.text(`Rédigé par ${report.createdByName} le ${new Date(report.createdAt).toLocaleString('fr-FR')}`);
+  if (report.finalizedBy) {
+    doc.text(`Finalisé par ${adminUsers.get(report.finalizedBy)?.name || report.finalizedBy} le ${new Date(report.finalizedAt!).toLocaleString('fr-FR')}`);
+  }
+
+  for (const mediaUrl of report.media) {
+    try {
+      const resp = await fetch(mediaUrl);
+      if (!resp.ok) continue;
+      const contentType = resp.headers.get('content-type') || '';
+      if (!contentType.startsWith('image/')) continue; // pdfkit can't embed video — skip, PDF stays photo-only
+      const buf = Buffer.from(await resp.arrayBuffer());
+      doc.addPage();
+      doc.image(buf, { fit: [480, 650], align: 'center', valign: 'center' });
+    } catch (e) { /* skip unreadable media, don't fail the whole PDF */ }
+  }
+
+  doc.end();
+  return done;
+}
+
 async function sendPushToUser(userId: string, title: string, body: string, data: Record<string, any> = {}) {
   const targetTokens: string[] = [];
   for (const [token, entry] of pushTokens) {
@@ -4641,6 +4759,32 @@ app.post('/api/sos', async (req, res) => {
         { priority: 'high' }
       ).catch(() => {});
     }
+  }
+
+  // Auto-seed a draft Incident Report (Repository) when the reporter is
+  // staff — see the IncidentReport interface comment for why this can't be
+  // narrowed further to "only the Create Alert modal, not the SOS button."
+  const reporterRole = userId ? adminUsers.get(userId)?.role : undefined;
+  if (reporterRole === 'responder' || reporterRole === 'dispatcher') {
+    const draft: IncidentReport = {
+      id: uuidv4(),
+      organizationId: alert.organizationId,
+      status: 'draft',
+      origin: 'mobile_agent',
+      linkedAlertId: alert.id,
+      occurredAt: alert.createdAt,
+      location: alert.location,
+      severity: alert.severity,
+      narrative: alert.description,
+      media: [],
+      createdBy: userId!,
+      createdByName: userName || userId!,
+      createdAt: Date.now(),
+      distributions: [],
+    };
+    incidentReports.set(draft.id, draft);
+    saveIncidentReportToSupabase(draft).catch(e => console.error('[IncidentReport] Supabase save error:', e));
+    broadcastToOrg(draft.organizationId, { type: 'incidentReportDraftCreated', data: draft });
   }
 
   console.log(`[SOS REST] Alert ${alert.id} created and broadcast to ${wss.clients.size} clients`);
@@ -7978,6 +8122,195 @@ setInterval(() => {
   }
 }, 60000);
 
+// ─── Incident Reports (Repository, Phase 2) ───────────────────────────────
+// All routes dispatcher+ only (view, write, distribute); delete is admin+,
+// same bar as every other destructive route in this file.
+// Narrow, dispatcher-accessible account list for the distribution recipient
+// picker (GET /admin/users is admin+ only, too high a bar for a plain
+// dispatcher distributing a report). Minimal fields only.
+app.get('/api/incident-reports/recipients', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const list = Array.from(adminUsers.values())
+    .filter(u => canAccessOrg(req.supabaseUser!, u.organizationId) && u.status !== 'deactivated')
+    .map(u => ({ id: u.id, name: u.name, email: u.email, role: u.role }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  res.json(list);
+});
+
+app.get('/api/incident-reports', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const statusFilter = req.query.status as string | undefined;
+  let list = Array.from(incidentReports.values()).filter(r => canAccessOrg(req.supabaseUser!, r.organizationId));
+  if (statusFilter && statusFilter !== 'all') list = list.filter(r => r.status === statusFilter);
+  list.sort((a, b) => b.createdAt - a.createdAt);
+  res.json(list);
+});
+
+app.get('/api/incident-reports/:id', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const report = incidentReports.get(req.params.id as string);
+  if (!report) return res.status(404).json({ error: 'Report not found' });
+  if (!canAccessOrg(req.supabaseUser!, report.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  res.json(report);
+});
+
+// Path 1 — Dispatch writes the whole report directly. No draft phase: it's
+// created straight to 'finalized' since there's nothing left to complete.
+app.post('/api/incident-reports', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const { occurredAt, location, severity, narrative } = req.body;
+  if (!occurredAt || !location?.address || !severity || !narrative) {
+    return res.status(400).json({ error: 'occurredAt, location.address, severity, and narrative are required' });
+  }
+  if (!['low', 'medium', 'high', 'critical'].includes(severity)) return res.status(400).json({ error: 'Invalid severity' });
+  const now = Date.now();
+  const caller = adminUsers.get(req.supabaseUser!.id);
+  const report: IncidentReport = {
+    id: uuidv4(),
+    organizationId: req.supabaseUser!.organizationId,
+    status: 'finalized',
+    origin: 'dispatch',
+    occurredAt: Number(occurredAt),
+    location: { latitude: location.latitude, longitude: location.longitude, address: location.address },
+    severity,
+    narrative,
+    media: [],
+    createdBy: req.supabaseUser!.id,
+    createdByName: caller?.name || 'Dispatch',
+    createdAt: now,
+    finalizedBy: req.supabaseUser!.id,
+    finalizedAt: now,
+    distributions: [],
+  };
+  incidentReports.set(report.id, report);
+  saveIncidentReportToSupabase(report).catch(e => console.error('[IncidentReport] Supabase save error:', e));
+  addAuditEntry('incident', 'Incident Report Created', req.supabaseUser!.id, `Report ${report.id}: ${narrative.slice(0, 80)}`, report.id, report.organizationId);
+  broadcastToOrg(report.organizationId, { type: 'incidentReportCreated', data: report });
+  res.status(201).json(report);
+});
+
+// Path 2 completion — Dispatch edits a draft seeded by a mobile "Create
+// Alert" (see the hook inside POST /api/sos), and/or finalizes it. Also
+// doubles as the edit route for already-finalized reports (e.g. a typo
+// fix), since there's no meaningful difference in what's editable.
+app.put('/api/incident-reports/:id', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const report = incidentReports.get(req.params.id as string);
+  if (!report) return res.status(404).json({ error: 'Report not found' });
+  if (!canAccessOrg(req.supabaseUser!, report.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  const { occurredAt, location, severity, narrative, finalize } = req.body;
+  if (occurredAt) report.occurredAt = Number(occurredAt);
+  if (location?.address) report.location = { latitude: location.latitude, longitude: location.longitude, address: location.address };
+  if (severity && ['low', 'medium', 'high', 'critical'].includes(severity)) report.severity = severity;
+  if (typeof narrative === 'string') report.narrative = narrative;
+  if (finalize && report.status === 'draft') {
+    report.status = 'finalized';
+    report.finalizedBy = req.supabaseUser!.id;
+    report.finalizedAt = Date.now();
+  }
+  incidentReports.set(report.id, report);
+  saveIncidentReportToSupabase(report).catch(e => console.error('[IncidentReport] Supabase save error:', e));
+  addAuditEntry('incident', 'Incident Report Updated', req.supabaseUser!.id, `Updated report ${report.id}`, report.id, report.organizationId);
+  broadcastToOrg(report.organizationId, { type: 'incidentReportUpdated', data: report });
+  res.json(report);
+});
+
+app.post('/api/incident-reports/:id/media', requireAuth, requireRole('dispatcher'), upload.array('media', 8), async (req: any, res) => {
+  const report = incidentReports.get(req.params.id as string);
+  if (!report) return res.status(404).json({ error: 'Report not found' });
+  if (!canAccessOrg(req.supabaseUser!, report.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files uploaded' });
+  const urls: string[] = await Promise.all(req.files.map((f: any) => uploadFileToSupabaseStorage(f)));
+  report.media.push(...urls);
+  incidentReports.set(report.id, report);
+  saveIncidentReportToSupabase(report).catch(e => console.error('[IncidentReport] Supabase save error:', e));
+  res.json({ media: report.media });
+});
+
+app.delete('/api/incident-reports/:id/media', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const report = incidentReports.get(req.params.id as string);
+  if (!report) return res.status(404).json({ error: 'Report not found' });
+  if (!canAccessOrg(req.supabaseUser!, report.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  report.media = report.media.filter(m => m !== req.body.url);
+  incidentReports.set(report.id, report);
+  saveIncidentReportToSupabase(report).catch(e => console.error('[IncidentReport] Supabase save error:', e));
+  res.json({ media: report.media });
+});
+
+app.get('/api/incident-reports/:id/pdf', requireAuth, requireRole('dispatcher'), async (req, res) => {
+  const report = incidentReports.get(req.params.id as string);
+  if (!report) return res.status(404).json({ error: 'Report not found' });
+  if (!canAccessOrg(req.supabaseUser!, report.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  const buffer = await generateIncidentReportPdfBuffer(report);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="rapport-incident-${report.id}.pdf"`);
+  res.send(buffer);
+});
+
+// Recipients must be real Talion accounts in the same organization — no
+// free-text external email, by explicit choice. Auto-finalizes a draft on
+// distribution (sending it out implies Dispatch considers it complete).
+app.post('/api/incident-reports/:id/distribute', requireAuth, requireRole('dispatcher'), async (req, res) => {
+  const report = incidentReports.get(req.params.id as string);
+  if (!report) return res.status(404).json({ error: 'Report not found' });
+  if (!canAccessOrg(req.supabaseUser!, report.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  const recipientIds: string[] = Array.isArray(req.body.recipientIds) ? req.body.recipientIds : [];
+  const methods: ('email' | 'push')[] = Array.isArray(req.body.methods) ? req.body.methods : [];
+  if (recipientIds.length === 0) return res.status(400).json({ error: 'recipientIds is required' });
+  if (methods.length === 0) return res.status(400).json({ error: 'At least one method (email or push) is required' });
+
+  const recipients = recipientIds
+    .map(id => adminUsers.get(id))
+    .filter((u): u is AdminUser => !!u && canAccessOrg(req.supabaseUser!, u.organizationId));
+  if (recipients.length === 0) return res.status(400).json({ error: 'No valid recipients' });
+
+  // Pick up any photos the linked mobile alert gained after the draft was
+  // seeded — very likely, since AlertCreationModal uploads them in a
+  // separate request right after creating the alert.
+  if (report.linkedAlertId) {
+    const alert = alerts.get(report.linkedAlertId);
+    if (alert?.photos) report.media = Array.from(new Set([...report.media, ...alert.photos]));
+  }
+  if (report.status === 'draft') {
+    report.status = 'finalized';
+    report.finalizedBy = req.supabaseUser!.id;
+    report.finalizedAt = Date.now();
+  }
+
+  const pdfBuffer = methods.includes('email') ? await generateIncidentReportPdfBuffer(report) : null;
+  const SEVERITY_LABELS: Record<string, string> = { low: 'Faible', medium: 'Moyenne', high: 'Élevée', critical: 'Critique' };
+  const sender = adminUsers.get(req.supabaseUser!.id);
+  let emailsSent = 0, pushesSent = 0;
+  for (const recipient of recipients) {
+    if (methods.includes('email') && recipient.email && pdfBuffer) {
+      const ok = await sendResendEmail({
+        to: [recipient.email],
+        subject: `Rapport d'incident — ${report.location.address}`,
+        html: `<p>Bonjour ${recipient.firstName || ''},</p><p>Vous trouverez ci-joint un rapport d'incident envoyé par ${sender?.name || 'Dispatch'}.</p><p>Sévérité : ${SEVERITY_LABELS[report.severity]}<br>Date : ${new Date(report.occurredAt).toLocaleString('fr-FR')}<br>Lieu : ${report.location.address}</p>`,
+        attachmentFilename: `rapport-incident-${report.id}.pdf`,
+        attachmentBuffer: pdfBuffer,
+      });
+      if (ok) emailsSent++;
+    }
+    if (methods.includes('push')) {
+      await sendPushToUser(recipient.id, "📄 Rapport d'incident", `${sender?.name || 'Dispatch'} a partagé un rapport — ${report.location.address}`, { type: 'incident_report', reportId: report.id }).catch(() => {});
+      pushesSent++;
+    }
+  }
+
+  report.distributions.push({ recipientIds: recipients.map(r => r.id), methods, sentAt: Date.now(), sentBy: req.supabaseUser!.id });
+  incidentReports.set(report.id, report);
+  saveIncidentReportToSupabase(report).catch(e => console.error('[IncidentReport] Supabase save error:', e));
+  addAuditEntry('incident', 'Incident Report Distributed', req.supabaseUser!.id, `Report ${report.id} sent to ${recipients.length} recipient(s) (${emailsSent} email, ${pushesSent} push)`, report.id, report.organizationId);
+  broadcastToOrg(report.organizationId, { type: 'incidentReportUpdated', data: report });
+  res.json({ success: true, emailsSent, pushesSent, report });
+});
+
+app.delete('/api/incident-reports/:id', requireAuth, requireRole('admin'), (req, res) => {
+  const report = incidentReports.get(req.params.id as string);
+  if (!report) return res.status(404).json({ error: 'Report not found' });
+  if (!canAccessOrg(req.supabaseUser!, report.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  incidentReports.delete(report.id);
+  deleteIncidentReportFromSupabase(report.id).catch(e => console.error('[IncidentReport] Supabase delete error:', e));
+  addAuditEntry('incident', 'Incident Report Deleted', req.supabaseUser!.id, `Deleted report ${report.id}`, report.id, report.organizationId);
+  res.json({ success: true });
+});
+
 // ─── Patrol checkpoints (GPS waypoints per site, for ronde verification) ─
 app.get('/admin/patrol-checkpoints', requireAuth, requireRole('admin'), (req, res) => {
   const siteId = req.query.siteId as string | undefined;
@@ -9035,6 +9368,7 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
     loadPatrolSitesFromSupabase(),
     loadKeyRegistryFromSupabase(),
     loadConsignesFromSupabase(),
+    loadIncidentReportsFromSupabase(),
     loadPatrolCheckpointsFromSupabase(),
     loadBlackbookFromSupabase(),
     loadPTTChannelsFromSupabase(),
@@ -9245,6 +9579,48 @@ async function deleteKeyRegistryEntryFromSupabase(id: string): Promise<void> {
     const { error } = await supabaseAdmin.from('key_registry').delete().eq('id', id);
     if (error) console.error('[Supabase] deleteKeyRegistryEntryFromSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] deleteKeyRegistryEntryFromSupabase error:', e); }
+}
+
+async function loadIncidentReportsFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('incident_reports').select('*');
+    if (error) { console.error('[Supabase] Failed to load incident_reports:', error.message); return; }
+    if (data && data.length > 0) {
+      incidentReports.clear();
+      data.forEach((r: any) => {
+        incidentReports.set(r.id, {
+          id: r.id, organizationId: r.organization_id || undefined, status: r.status, origin: r.origin,
+          linkedAlertId: r.linked_alert_id || undefined, occurredAt: r.occurred_at,
+          location: r.location || { address: 'Unknown' }, severity: r.severity, narrative: r.narrative || '',
+          media: r.media || [], createdBy: r.created_by, createdByName: r.created_by_name, createdAt: r.created_at || Date.now(),
+          finalizedBy: r.finalized_by || undefined, finalizedAt: r.finalized_at || undefined,
+          distributions: r.distributions || [],
+        });
+      });
+      console.log(`[Supabase] Loaded ${data.length} incident reports`);
+    }
+  } catch (e) { console.error('[Supabase] loadIncidentReportsFromSupabase error:', e); }
+}
+
+async function saveIncidentReportToSupabase(report: IncidentReport): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('incident_reports').upsert({
+      id: report.id, organization_id: report.organizationId || null, status: report.status, origin: report.origin,
+      linked_alert_id: report.linkedAlertId || null, occurred_at: report.occurredAt,
+      location: report.location, severity: report.severity, narrative: report.narrative, media: report.media,
+      created_by: report.createdBy, created_by_name: report.createdByName, created_at: report.createdAt,
+      finalized_by: report.finalizedBy || null, finalized_at: report.finalizedAt || null,
+      distributions: report.distributions,
+    });
+    if (error) console.error('[Supabase] saveIncidentReportToSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] saveIncidentReportToSupabase error:', e); }
+}
+
+async function deleteIncidentReportFromSupabase(id: string): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('incident_reports').delete().eq('id', id);
+    if (error) console.error('[Supabase] deleteIncidentReportFromSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] deleteIncidentReportFromSupabase error:', e); }
 }
 
 async function loadConsignesFromSupabase(): Promise<void> {
