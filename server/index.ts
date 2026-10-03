@@ -461,6 +461,38 @@ function redactOrganization(org: Organization): Omit<Organization, 'ssoClientSec
 // configures its own patrol sites (see /admin/patrol-sites). PatrolReport
 // still stores the site as a denormalized name string, not this id, to
 // match the existing PatrolReport.location convention.
+// ─── Dispatch "Repository" — operational forms (keys, incident reports,
+// shift/vehicle handovers). Each form type is its own bespoke interface +
+// Supabase table + routes, same convention as PatrolReport/PatrolSite above,
+// not a generic form-submission framework (none exists in this codebase).
+
+// Key registry: Dispatch-only CRUD (requireRole('dispatcher'), which via
+// ROLE_HIERARCHY also admits admin/superadmin). "takenBy" is deliberately
+// free text, not an account reference — a key can be handed to someone with
+// no Talion account (a contractor, a cleaner), and Dispatch is always the
+// one recording the movement, never the person who physically holds the key.
+interface KeyMovement {
+  action: 'created' | 'out' | 'in';
+  takenBy?: string; // free text, only set on 'out'
+  recordedBy: string; // the Dispatch account that logged this movement
+  timestamp: number;
+  notes?: string;
+}
+interface KeyRegistryEntry {
+  id: string;
+  organizationId?: string;
+  keyNumber: string;
+  description: string; // what the key corresponds to (e.g. "Porte principale résidence X")
+  status: 'in' | 'out';
+  takenBy?: string; // free text, set while status === 'out'
+  takenAt?: number;
+  history: KeyMovement[];
+  createdAt: number;
+  createdBy: string;
+  updatedAt: number;
+}
+const keyRegistry = new Map<string, KeyRegistryEntry>();
+
 interface PatrolSite {
   id: string;
   organizationId: string;
@@ -7693,6 +7725,101 @@ app.delete('/admin/patrol-sites/:id', requireAuth, requireRole('admin'), (req, r
   res.json({ success: true });
 });
 
+// ─── Dispatch Repository: Key registry ───────────────────────────────────
+// View access: any staff role (responder+) — useful for a responder on-site
+// to know who currently holds a key. Write access (create/edit/checkout/
+// checkin): Dispatch only (requireRole('dispatcher'), which also admits
+// admin/superadmin per ROLE_HIERARCHY). Delete: admin+ only, same bar as
+// other destructive routes in this file (e.g. DELETE /alerts/:id).
+app.get('/api/repository/keys', requireAuth, requireRole('responder'), (req, res) => {
+  const keys = Array.from(keyRegistry.values())
+    .filter(k => canAccessOrg(req.supabaseUser!, k.organizationId))
+    .sort((a, b) => a.keyNumber.localeCompare(b.keyNumber));
+  res.json(keys);
+});
+
+app.post('/api/repository/keys', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const keyNumber = (req.body.keyNumber || '').trim();
+  const description = (req.body.description || '').trim();
+  if (!keyNumber || !description) return res.status(400).json({ error: 'keyNumber and description are required' });
+  const now = Date.now();
+  const entry: KeyRegistryEntry = {
+    id: uuidv4(),
+    organizationId: req.supabaseUser!.organizationId,
+    keyNumber,
+    description,
+    status: 'in',
+    history: [{ action: 'created', recordedBy: req.supabaseUser!.id, timestamp: now }],
+    createdAt: now,
+    createdBy: req.supabaseUser!.id,
+    updatedAt: now,
+  };
+  keyRegistry.set(entry.id, entry);
+  saveKeyRegistryEntryToSupabase(entry).catch(e => console.error('[KeyRegistry] Supabase save error:', e));
+  addAuditEntry('system', 'Key Registered', req.supabaseUser!.id, `Registered key ${keyNumber}: ${description}`, entry.id, entry.organizationId);
+  res.status(201).json(entry);
+});
+
+app.put('/api/repository/keys/:id', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const entry = keyRegistry.get(req.params.id as string);
+  if (!entry) return res.status(404).json({ error: 'Key not found' });
+  if (!canAccessOrg(req.supabaseUser!, entry.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  if (typeof req.body.keyNumber === 'string' && req.body.keyNumber.trim()) entry.keyNumber = req.body.keyNumber.trim();
+  if (typeof req.body.description === 'string' && req.body.description.trim()) entry.description = req.body.description.trim();
+  entry.updatedAt = Date.now();
+  keyRegistry.set(entry.id, entry);
+  saveKeyRegistryEntryToSupabase(entry).catch(e => console.error('[KeyRegistry] Supabase save error:', e));
+  addAuditEntry('system', 'Key Updated', req.supabaseUser!.id, `Updated key ${entry.keyNumber}`, entry.id, entry.organizationId);
+  res.json(entry);
+});
+
+app.post('/api/repository/keys/:id/checkout', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const entry = keyRegistry.get(req.params.id as string);
+  if (!entry) return res.status(404).json({ error: 'Key not found' });
+  if (!canAccessOrg(req.supabaseUser!, entry.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  if (entry.status === 'out') return res.status(400).json({ error: 'Key is already checked out' });
+  const takenBy = (req.body.takenBy || '').trim();
+  if (!takenBy) return res.status(400).json({ error: 'takenBy is required' });
+  const now = Date.now();
+  entry.status = 'out';
+  entry.takenBy = takenBy;
+  entry.takenAt = now;
+  entry.updatedAt = now;
+  entry.history.push({ action: 'out', takenBy, recordedBy: req.supabaseUser!.id, timestamp: now, notes: req.body.notes || undefined });
+  keyRegistry.set(entry.id, entry);
+  saveKeyRegistryEntryToSupabase(entry).catch(e => console.error('[KeyRegistry] Supabase save error:', e));
+  addAuditEntry('system', 'Key Checked Out', req.supabaseUser!.id, `Key ${entry.keyNumber} given to ${takenBy}`, entry.id, entry.organizationId);
+  res.json(entry);
+});
+
+app.post('/api/repository/keys/:id/checkin', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const entry = keyRegistry.get(req.params.id as string);
+  if (!entry) return res.status(404).json({ error: 'Key not found' });
+  if (!canAccessOrg(req.supabaseUser!, entry.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  if (entry.status === 'in') return res.status(400).json({ error: 'Key is already checked in' });
+  const now = Date.now();
+  const previouslyTakenBy = entry.takenBy;
+  entry.status = 'in';
+  entry.takenBy = undefined;
+  entry.takenAt = undefined;
+  entry.updatedAt = now;
+  entry.history.push({ action: 'in', recordedBy: req.supabaseUser!.id, timestamp: now, notes: req.body.notes || undefined });
+  keyRegistry.set(entry.id, entry);
+  saveKeyRegistryEntryToSupabase(entry).catch(e => console.error('[KeyRegistry] Supabase save error:', e));
+  addAuditEntry('system', 'Key Checked In', req.supabaseUser!.id, `Key ${entry.keyNumber} returned (was with ${previouslyTakenBy || 'unknown'})`, entry.id, entry.organizationId);
+  res.json(entry);
+});
+
+app.delete('/api/repository/keys/:id', requireAuth, requireRole('admin'), (req, res) => {
+  const entry = keyRegistry.get(req.params.id as string);
+  if (!entry) return res.status(404).json({ error: 'Key not found' });
+  if (!canAccessOrg(req.supabaseUser!, entry.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  keyRegistry.delete(entry.id);
+  deleteKeyRegistryEntryFromSupabase(entry.id).catch(e => console.error('[KeyRegistry] Supabase delete error:', e));
+  addAuditEntry('system', 'Key Deleted', req.supabaseUser!.id, `Deleted key ${entry.keyNumber}`, entry.id, entry.organizationId);
+  res.json({ success: true });
+});
+
 // ─── Patrol checkpoints (GPS waypoints per site, for ronde verification) ─
 app.get('/admin/patrol-checkpoints', requireAuth, requireRole('admin'), (req, res) => {
   const siteId = req.query.siteId as string | undefined;
@@ -8748,6 +8875,7 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
     loadAlertsFromSupabase(),
     loadPatrolReportsFromSupabase(),
     loadPatrolSitesFromSupabase(),
+    loadKeyRegistryFromSupabase(),
     loadPatrolCheckpointsFromSupabase(),
     loadBlackbookFromSupabase(),
     loadPTTChannelsFromSupabase(),
@@ -8919,6 +9047,45 @@ async function deletePatrolSiteFromSupabase(siteId: string): Promise<void> {
     const { error } = await supabaseAdmin.from('patrol_sites').delete().eq('id', siteId);
     if (error) console.error('[Supabase] deletePatrolSiteFromSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] deletePatrolSiteFromSupabase error:', e); }
+}
+
+async function loadKeyRegistryFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('key_registry').select('*');
+    if (error) { console.error('[Supabase] Failed to load key_registry:', error.message); return; }
+    if (data && data.length > 0) {
+      keyRegistry.clear();
+      data.forEach((k: any) => {
+        keyRegistry.set(k.id, {
+          id: k.id, organizationId: k.organization_id || undefined,
+          keyNumber: k.key_number, description: k.description, status: k.status,
+          takenBy: k.taken_by || undefined, takenAt: k.taken_at || undefined,
+          history: k.history || [], createdAt: k.created_at || Date.now(),
+          createdBy: k.created_by, updatedAt: k.updated_at || k.created_at || Date.now(),
+        });
+      });
+      console.log(`[Supabase] Loaded ${data.length} key registry entries`);
+    }
+  } catch (e) { console.error('[Supabase] loadKeyRegistryFromSupabase error:', e); }
+}
+
+async function saveKeyRegistryEntryToSupabase(entry: KeyRegistryEntry): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('key_registry').upsert({
+      id: entry.id, organization_id: entry.organizationId || null,
+      key_number: entry.keyNumber, description: entry.description, status: entry.status,
+      taken_by: entry.takenBy || null, taken_at: entry.takenAt || null,
+      history: entry.history, created_at: entry.createdAt, created_by: entry.createdBy, updated_at: entry.updatedAt,
+    });
+    if (error) console.error('[Supabase] saveKeyRegistryEntryToSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] saveKeyRegistryEntryToSupabase error:', e); }
+}
+
+async function deleteKeyRegistryEntryFromSupabase(id: string): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('key_registry').delete().eq('id', id);
+    if (error) console.error('[Supabase] deleteKeyRegistryEntryFromSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] deleteKeyRegistryEntryFromSupabase error:', e); }
 }
 
 async function loadPatrolCheckpointsFromSupabase(): Promise<void> {

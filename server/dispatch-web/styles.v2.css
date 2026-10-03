@@ -2833,3 +2833,38 @@ tr.is-duress { background: rgba(185,28,28,0.12) !important; font-weight: 700; }
   display: flex;
   flex-direction: column;
 }
+
+/* Repository (Registres) tab — internal sub-navigation across form types */
+.repo-subnav {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 12px;
+}
+.repo-subnav-item {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.repo-subnav-item:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-hover);
+}
+.repo-subnav-item.active {
+  background: var(--bg-active);
+  border-color: currentColor;
+  color: var(--text-primary);
+}
+.repo-subtab-content {
+  display: none;
+}
+.repo-subtab-content.active {
+  display: block;
+}

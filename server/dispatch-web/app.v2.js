@@ -826,7 +826,7 @@ function switchTab(tab) {
   document.querySelector(`.nav-item[data-tab="${tab}"]`)?.classList.add('active');
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.getElementById(`tab-${tab}`)?.classList.add('active');
-  const titles = { overview: "Vue d'ensemble", incidents: "Gestion des incidents", responders: "Unités d'intervention", broadcast: "Diffusion", map: "Carte en direct", messages: "Messages", patrol: "Rapports de Ronde", ptt: "Push-to-Talk", archives: "Archives", families: "Familles", visits: "Visites", blackbook: "Blackbook", 'main-courante': "Main Courante", 'threat-analysis': "Analyse IA", health: "Santé Système", kpis: "Statistiques" };
+  const titles = { overview: "Vue d'ensemble", incidents: "Gestion des incidents", responders: "Unités d'intervention", broadcast: "Diffusion", map: "Carte en direct", messages: "Messages", patrol: "Rapports de Ronde", ptt: "Push-to-Talk", archives: "Archives", families: "Familles", visits: "Visites", blackbook: "Blackbook", 'main-courante': "Main Courante", repository: "Registres", 'threat-analysis': "Analyse IA", health: "Santé Système", kpis: "Statistiques" };
   document.getElementById('pageTitle').textContent = titles[tab] || tab;
   if (tab === 'map') {
     setTimeout(() => { if (dispatchMap) { dispatchMap.invalidateSize(); } else { initMap(); } }, 100);
@@ -848,6 +848,9 @@ function switchTab(tab) {
   }
   if (tab === 'main-courante') {
     ensureFamilyGroupsLoaded().then(() => { populateFamilySelect('mcFamilySelect'); loadMainCourante(); });
+  }
+  if (tab === 'repository') {
+    loadKeys();
   }
   if (tab === 'threat-analysis') {
     ensureFamilyGroupsLoaded().then(() => { populateFamilySelect('taFamilySelect'); loadThreatAnalyses(); });
@@ -1640,6 +1643,162 @@ async function submitMainCouranteNote() {
     if (document.getElementById('mcFamilySelect').value === userId) loadMainCourante();
   } catch (e) {
     alert('Erreur réseau');
+  }
+}
+
+// ─── Repository: Key registry ──────────────────────────────────────────
+let keysCache = [];
+
+function switchRepoSubtab(subtab) {
+  document.querySelectorAll('.repo-subnav-item').forEach(n => n.classList.remove('active'));
+  document.querySelector(`.repo-subnav-item[data-subtab="${subtab}"]`)?.classList.add('active');
+  document.querySelectorAll('.repo-subtab-content').forEach(t => t.classList.remove('active'));
+  document.getElementById(`repo-subtab-${subtab}`)?.classList.add('active');
+  if (subtab === 'repo-keys') loadKeys();
+}
+
+async function loadKeys() {
+  try {
+    const res = await fetch(`${API_BASE}/api/repository/keys`);
+    keysCache = res.ok ? await res.json() : [];
+    renderKeysTable();
+  } catch (e) {
+    console.error('[Keys] load error:', e);
+  }
+}
+
+function renderKeysTable() {
+  const tbody = document.getElementById('keysTableBody');
+  if (!tbody) return;
+  document.getElementById('keysInCount').textContent = `${keysCache.filter(k => k.status === 'in').length} en place`;
+  document.getElementById('keysOutCount').textContent = `${keysCache.filter(k => k.status === 'out').length} sorties`;
+  if (keysCache.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state">Aucune clé enregistrée</div></td></tr>';
+    return;
+  }
+  tbody.innerHTML = keysCache.map(k => `
+    <tr>
+      <td><strong>${escapeHtml(k.keyNumber)}</strong></td>
+      <td>${escapeHtml(k.description)}</td>
+      <td><span class="badge ${k.status === 'in' ? 'badge-success' : 'badge-error'}">${k.status === 'in' ? 'En place' : 'Sortie'}</span></td>
+      <td>${k.status === 'out' ? escapeHtml(k.takenBy || '') : '—'}</td>
+      <td>${k.status === 'out' && k.takenAt ? formatTimeAgo(k.takenAt) : '—'}</td>
+      <td>
+        ${k.status === 'in'
+          ? `<button class="btn btn-secondary btn-sm" onclick="openCheckoutKeyModal('${k.id}')">Sortir</button>`
+          : `<button class="btn btn-primary btn-sm" onclick="checkinKey('${k.id}')">Rendre</button>`}
+        <button class="btn btn-secondary btn-sm" onclick="deleteKey('${k.id}')" title="Supprimer">🗑️</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function openAddKeyModal() {
+  document.getElementById('newKeyNumber').value = '';
+  document.getElementById('newKeyDescription').value = '';
+  document.getElementById('addKeyModal').style.display = 'flex';
+}
+
+function closeAddKeyModal() {
+  document.getElementById('addKeyModal').style.display = 'none';
+}
+
+async function submitAddKey() {
+  const keyNumber = document.getElementById('newKeyNumber').value.trim();
+  const description = document.getElementById('newKeyDescription').value.trim();
+  if (!keyNumber || !description) { showToast('Numéro et description requis', 'error'); return; }
+  try {
+    const res = await fetch(`${API_BASE}/api/repository/keys`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keyNumber, description }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors de l\'enregistrement', 'error');
+      return;
+    }
+    closeAddKeyModal();
+    loadKeys();
+    showToast('Clé enregistrée', 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
+}
+
+let checkoutKeyTargetId = null;
+
+function openCheckoutKeyModal(id) {
+  const key = keysCache.find(k => k.id === id);
+  if (!key) return;
+  checkoutKeyTargetId = id;
+  document.getElementById('checkoutKeyLabel').textContent = `— ${key.keyNumber} (${key.description})`;
+  document.getElementById('checkoutKeyTakenBy').value = '';
+  document.getElementById('checkoutKeyNotes').value = '';
+  document.getElementById('checkoutKeyModal').style.display = 'flex';
+}
+
+function closeCheckoutKeyModal() {
+  document.getElementById('checkoutKeyModal').style.display = 'none';
+  checkoutKeyTargetId = null;
+}
+
+async function submitCheckoutKey() {
+  const takenBy = document.getElementById('checkoutKeyTakenBy').value.trim();
+  const notes = document.getElementById('checkoutKeyNotes').value.trim();
+  if (!takenBy) { showToast('Indiquez qui prend la clé', 'error'); return; }
+  try {
+    const res = await fetch(`${API_BASE}/api/repository/keys/${checkoutKeyTargetId}/checkout`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ takenBy, notes }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors de la sortie', 'error');
+      return;
+    }
+    closeCheckoutKeyModal();
+    loadKeys();
+    showToast('Sortie de clé enregistrée', 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
+}
+
+async function checkinKey(id) {
+  const key = keysCache.find(k => k.id === id);
+  if (!key) return;
+  if (!confirm(`Confirmer le retour de la clé ${key.keyNumber} ?`)) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/repository/keys/${id}/checkin`, { method: 'POST' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors du retour', 'error');
+      return;
+    }
+    loadKeys();
+    showToast('Clé rendue', 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
+}
+
+async function deleteKey(id) {
+  const key = keysCache.find(k => k.id === id);
+  if (!key) return;
+  if (!confirm(`Supprimer la clé ${key.keyNumber} du registre ? Action irréversible.`)) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/repository/keys/${id}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors de la suppression', 'error');
+      return;
+    }
+    loadKeys();
+    showToast('Clé supprimée', 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
   }
 }
 

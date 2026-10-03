@@ -61,6 +61,9 @@
       <a href="#" class="nav-item" data-tab="main-courante">
         <span class="nav-icon">&#x1F4D6;</span> Main Courante
       </a>
+      <a href="#" class="nav-item" data-tab="repository">
+        <span class="nav-icon">&#x1F4C1;</span> Registres
+      </a>
       <a href="#" class="nav-item" data-tab="threat-analysis">
         <span class="nav-icon">&#x1F9E0;</span> Analyse IA
       </a>
@@ -878,6 +881,78 @@
         <div class="empty-state">Sélectionnez une famille</div>
       </div>
     </section>
+
+    <!-- Repository Tab — multi-form operational registry (keys, incident
+         reports, dispatch/vehicle handovers). Forms are added sub-tab by
+         sub-tab as each is built; only "Clés" exists so far. -->
+    <section class="tab-content" id="tab-repository">
+      <div class="repo-subnav">
+        <button class="repo-subnav-item active" data-subtab="repo-keys" onclick="switchRepoSubtab('repo-keys')">&#x1F511; Clés</button>
+      </div>
+
+      <div class="repo-subtab-content active" id="repo-subtab-repo-keys">
+        <div class="toolbar">
+          <div class="toolbar-stats">
+            <span class="badge badge-success" id="keysInCount">0 en place</span>
+            <span class="badge badge-error" id="keysOutCount">0 sorties</span>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="openAddKeyModal()">&#x2795; Enregistrer une clé</button>
+        </div>
+        <div class="table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>N° clé</th>
+                <th>Correspond à</th>
+                <th>Statut</th>
+                <th>Prise par</th>
+                <th>Depuis</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="keysTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Add Key Modal -->
+    <div class="modal-overlay" id="addKeyModal" style="display:none;">
+      <div class="modal" style="max-width:440px;">
+        <h3 class="modal-title">Enregistrer une clé</h3>
+        <div class="form-group">
+          <label>Numéro de clé</label>
+          <input type="text" id="newKeyNumber" class="form-control" placeholder="ex. 12">
+        </div>
+        <div class="form-group">
+          <label>Correspond à</label>
+          <input type="text" id="newKeyDescription" class="form-control" placeholder="ex. Porte principale résidence X">
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+          <button class="btn btn-secondary" onclick="closeAddKeyModal()">Annuler</button>
+          <button class="btn btn-primary" onclick="submitAddKey()">Enregistrer</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Checkout Key Modal -->
+    <div class="modal-overlay" id="checkoutKeyModal" style="display:none;">
+      <div class="modal" style="max-width:440px;">
+        <h3 class="modal-title">Sortie de clé <span id="checkoutKeyLabel"></span></h3>
+        <div class="form-group">
+          <label>Prise par</label>
+          <input type="text" id="checkoutKeyTakenBy" class="form-control" placeholder="Nom de la personne">
+        </div>
+        <div class="form-group">
+          <label>Notes (optionnel)</label>
+          <textarea id="checkoutKeyNotes" class="form-control" rows="2"></textarea>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+          <button class="btn btn-secondary" onclick="closeCheckoutKeyModal()">Annuler</button>
+          <button class="btn btn-primary" onclick="submitCheckoutKey()">Confirmer la sortie</button>
+        </div>
+      </div>
+    </div>
 
     <!-- Analyse IA Tab -->
     <section class="tab-content" id="tab-threat-analysis">
