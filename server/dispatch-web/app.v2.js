@@ -281,6 +281,30 @@ function handleWsMessage(msg) {
       break;
     }
 
+    case 'consigneCreated': {
+      consignesCache.unshift(msg.data);
+      updateConsignesBadge();
+      if (document.getElementById('tab-consignes')?.classList.contains('active')) renderConsignes();
+      showToast(`📋 Nouvelle consigne: ${msg.data.text}`, 'info');
+      break;
+    }
+
+    case 'consigneUpdated': {
+      const idx = consignesCache.findIndex(c => c.id === msg.data.id);
+      if (idx >= 0) consignesCache[idx] = msg.data; else consignesCache.unshift(msg.data);
+      updateConsignesBadge();
+      if (document.getElementById('tab-consignes')?.classList.contains('active')) renderConsignes();
+      break;
+    }
+
+    case 'consigneClosed': {
+      // Message only carries the id, not the full closed/deleted record — a
+      // full reload keeps the "Expirées / clôturées" filter (which still
+      // needs to show closed entries) correct, unlike patching the cache.
+      loadConsignes();
+      break;
+    }
+
     case 'acceptanceTimeout': {
       const respName = msg.responderName || msg.responderId;
       showToast(`\u23F0 ${respName} n'a pas accept\u00e9 l'incident ${formatIncidentId(msg.alertId)} dans les 5 min`, 'warning');
@@ -752,6 +776,9 @@ document.addEventListener('DOMContentLoaded', () => {
   setupCheckpointAdminUI();
   checkEmergencyOverrideStatus();
   applyOrganizationBranding();
+  // Loaded at startup (not just when the Consignes tab opens) — the nav
+  // badge must reflect unacknowledged consignes from every tab, immediately.
+  loadConsignes();
   // Show audio unlock reminder
   setTimeout(() => {
     if (!browserNotificationsEnabled) {
@@ -826,7 +853,7 @@ function switchTab(tab) {
   document.querySelector(`.nav-item[data-tab="${tab}"]`)?.classList.add('active');
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.getElementById(`tab-${tab}`)?.classList.add('active');
-  const titles = { overview: "Vue d'ensemble", incidents: "Gestion des incidents", responders: "Unités d'intervention", broadcast: "Diffusion", map: "Carte en direct", messages: "Messages", patrol: "Rapports de Ronde", ptt: "Push-to-Talk", archives: "Archives", families: "Familles", visits: "Visites", blackbook: "Blackbook", 'main-courante': "Main Courante", repository: "Registres", 'threat-analysis': "Analyse IA", health: "Santé Système", kpis: "Statistiques" };
+  const titles = { overview: "Vue d'ensemble", incidents: "Gestion des incidents", responders: "Unités d'intervention", broadcast: "Diffusion", map: "Carte en direct", messages: "Messages", patrol: "Rapports de Ronde", ptt: "Push-to-Talk", archives: "Archives", families: "Familles", visits: "Visites", blackbook: "Blackbook", 'main-courante': "Main Courante", repository: "Registres", consignes: "Consignes", 'threat-analysis': "Analyse IA", health: "Santé Système", kpis: "Statistiques" };
   document.getElementById('pageTitle').textContent = titles[tab] || tab;
   if (tab === 'map') {
     setTimeout(() => { if (dispatchMap) { dispatchMap.invalidateSize(); } else { initMap(); } }, 100);
@@ -851,6 +878,9 @@ function switchTab(tab) {
   }
   if (tab === 'repository') {
     loadKeys();
+  }
+  if (tab === 'consignes') {
+    loadConsignes();
   }
   if (tab === 'threat-analysis') {
     ensureFamilyGroupsLoaded().then(() => { populateFamilySelect('taFamilySelect'); loadThreatAnalyses(); });
@@ -1797,6 +1827,221 @@ async function deleteKey(id) {
     }
     loadKeys();
     showToast('Clé supprimée', 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
+}
+
+// ─── Consignes (Dispatch standing-instructions board) ──────────────────
+let consignesCache = [];
+let consigneFilter = 'active';
+let editingConsigneId = null;
+
+async function loadConsignes() {
+  try {
+    const res = await fetch(`${API_BASE}/api/consignes`);
+    consignesCache = res.ok ? await res.json() : [];
+    updateConsignesBadge();
+    renderConsignes();
+  } catch (e) {
+    console.error('[Consignes] load error:', e);
+  }
+}
+
+function consigneIsActive(c) {
+  if (c.closedAt) return false;
+  if (c.durationType === 'temporary' && c.expiresAt && Date.now() > c.expiresAt) return false;
+  return true;
+}
+
+// Visible from every tab, not just Consignes — the whole point is nothing
+// requires remembering to go check a board.
+function updateConsignesBadge() {
+  const me = currentDispatchUser();
+  const unacked = consignesCache.filter(c => consigneIsActive(c) && !c.acknowledgedBy?.some(a => a.userId === me.id)).length;
+  const badge = document.getElementById('consignesNavBadge');
+  if (!badge) return;
+  if (unacked > 0) {
+    badge.textContent = String(unacked);
+    badge.style.display = '';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function setConsigneFilter(filter) {
+  consigneFilter = filter;
+  document.querySelectorAll('#tab-consignes .repo-subnav-item').forEach(n => n.classList.toggle('active', n.dataset.cfilter === filter));
+  renderConsignes();
+}
+
+const CONSIGNE_PRIORITY_COLOR = { normal: '#6b7280', important: '#f59e0b', urgent: '#ef4444' };
+const CONSIGNE_PRIORITY_LABEL = { normal: 'Normale', important: 'Importante', urgent: 'Urgente' };
+
+function consigneDurationLabel(c) {
+  if (c.durationType === 'permanent') return 'Permanente';
+  if (c.durationType === 'temporary') return `Jusqu'au ${new Date(c.expiresAt).toLocaleString('fr-FR')}`;
+  const when = new Date(c.scheduledFor).toLocaleString('fr-FR');
+  return Date.now() > c.scheduledFor ? `⚠️ Échéance passée (${when})` : `À venir: ${when}`;
+}
+
+function renderConsignes() {
+  const container = document.getElementById('consignesList');
+  if (!container) return;
+  let list = consignesCache;
+  if (consigneFilter === 'active') list = list.filter(consigneIsActive);
+  else if (consigneFilter === 'expired') list = list.filter(c => !consigneIsActive(c));
+  // Unacknowledged-by-me first, then priority, then recency — the point is
+  // making what YOU haven't seen yet impossible to miss, not just sorting
+  // by date like a generic feed.
+  const me = currentDispatchUser();
+  const priorityRank = { urgent: 0, important: 1, normal: 2 };
+  list = [...list].sort((a, b) => {
+    const aUnacked = !a.acknowledgedBy?.some(x => x.userId === me.id);
+    const bUnacked = !b.acknowledgedBy?.some(x => x.userId === me.id);
+    if (aUnacked !== bUnacked) return aUnacked ? -1 : 1;
+    if (priorityRank[a.priority] !== priorityRank[b.priority]) return priorityRank[a.priority] - priorityRank[b.priority];
+    return b.createdAt - a.createdAt;
+  });
+  if (list.length === 0) {
+    container.innerHTML = '<div class="empty-state">Aucune consigne</div>';
+    return;
+  }
+  const isAdmin = localStorage.getItem('talion_role') === 'admin' || localStorage.getItem('talion_role') === 'superadmin';
+  container.innerHTML = list.map(c => {
+    const iAcked = c.acknowledgedBy?.some(a => a.userId === me.id);
+    return `
+    <div class="provider-row" style="border-left:4px solid ${CONSIGNE_PRIORITY_COLOR[c.priority]};${!iAcked ? 'background:var(--bg-hover);' : ''}">
+      <div style="flex:1;">
+        <div class="provider-row-name">
+          <span class="badge" style="background:${CONSIGNE_PRIORITY_COLOR[c.priority]};color:#fff;">${CONSIGNE_PRIORITY_LABEL[c.priority]}</span>
+          ${escapeHtml(c.text)}
+        </div>
+        <div class="provider-row-detail">${consigneDurationLabel(c)} · ${escapeHtml(c.createdByName)}, ${formatTimeAgo(c.createdAt)}</div>
+        <div class="provider-row-detail" style="font-style:italic;">${c.acknowledgedBy?.length || 0} agent(s) ont pris connaissance${c.closedAt ? ' · Clôturée' : ''}</div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;">
+        ${!iAcked ? `<button class="btn btn-primary btn-sm" onclick="acknowledgeConsigne('${c.id}')">✓ J'ai pris connaissance</button>` : ''}
+        ${!c.closedAt ? `
+          <button class="btn btn-secondary btn-sm" onclick="openEditConsigneModal('${c.id}')">Modifier</button>
+          <button class="btn btn-secondary btn-sm" onclick="closeConsigne('${c.id}')">Clôturer</button>
+        ` : ''}
+        ${isAdmin ? `<button class="btn btn-secondary btn-sm" onclick="deleteConsigne('${c.id}')" title="Supprimer">🗑️</button>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function updateConsigneDurationFields() {
+  const type = document.getElementById('newConsigneDuration').value;
+  document.getElementById('consigneExpiresGroup').style.display = type === 'temporary' ? 'block' : 'none';
+  document.getElementById('consigneScheduledGroup').style.display = type === 'scheduled' ? 'block' : 'none';
+}
+
+function openAddConsigneModal() {
+  editingConsigneId = null;
+  document.getElementById('consigneModalTitle').textContent = 'Nouvelle consigne';
+  document.getElementById('newConsigneText').value = '';
+  document.getElementById('newConsignePriority').value = 'normal';
+  document.getElementById('newConsigneDuration').value = 'permanent';
+  document.getElementById('newConsigneExpiresAt').value = '';
+  document.getElementById('newConsigneScheduledFor').value = '';
+  updateConsigneDurationFields();
+  document.getElementById('addConsigneModal').style.display = 'flex';
+}
+
+function openEditConsigneModal(id) {
+  const c = consignesCache.find(x => x.id === id);
+  if (!c) return;
+  editingConsigneId = id;
+  document.getElementById('consigneModalTitle').textContent = 'Modifier la consigne';
+  document.getElementById('newConsigneText').value = c.text;
+  document.getElementById('newConsignePriority').value = c.priority;
+  document.getElementById('newConsigneDuration').value = c.durationType;
+  document.getElementById('newConsigneExpiresAt').value = c.expiresAt ? toDatetimeLocal(c.expiresAt) : '';
+  document.getElementById('newConsigneScheduledFor').value = c.scheduledFor ? toDatetimeLocal(c.scheduledFor) : '';
+  updateConsigneDurationFields();
+  document.getElementById('addConsigneModal').style.display = 'flex';
+}
+
+function toDatetimeLocal(ts) {
+  const d = new Date(ts);
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 16);
+}
+
+function closeAddConsigneModal() {
+  document.getElementById('addConsigneModal').style.display = 'none';
+  editingConsigneId = null;
+}
+
+async function submitConsigne() {
+  const text = document.getElementById('newConsigneText').value.trim();
+  const priority = document.getElementById('newConsignePriority').value;
+  const durationType = document.getElementById('newConsigneDuration').value;
+  const expiresAtRaw = document.getElementById('newConsigneExpiresAt').value;
+  const scheduledForRaw = document.getElementById('newConsigneScheduledFor').value;
+  if (!text) { showToast('Le texte est requis', 'error'); return; }
+  if (durationType === 'temporary' && !expiresAtRaw) { showToast('Indiquez une date de fin', 'error'); return; }
+  if (durationType === 'scheduled' && !scheduledForRaw) { showToast('Indiquez une date et heure', 'error'); return; }
+  const body = {
+    text, priority, durationType,
+    expiresAt: expiresAtRaw ? new Date(expiresAtRaw).getTime() : undefined,
+    scheduledFor: scheduledForRaw ? new Date(scheduledForRaw).getTime() : undefined,
+  };
+  try {
+    const url = editingConsigneId ? `${API_BASE}/api/consignes/${editingConsigneId}` : `${API_BASE}/api/consignes`;
+    const res = await fetch(url, {
+      method: editingConsigneId ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors de l\'enregistrement', 'error');
+      return;
+    }
+    closeAddConsigneModal();
+    loadConsignes();
+    showToast('Consigne enregistrée', 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
+}
+
+async function acknowledgeConsigne(id) {
+  try {
+    const res = await fetch(`${API_BASE}/api/consignes/${id}/acknowledge`, { method: 'POST' });
+    if (!res.ok) return;
+    const updated = await res.json();
+    const idx = consignesCache.findIndex(c => c.id === id);
+    if (idx >= 0) consignesCache[idx] = updated;
+    updateConsignesBadge();
+    renderConsignes();
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
+}
+
+async function closeConsigne(id) {
+  if (!confirm('Clôturer cette consigne ?')) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/consignes/${id}/close`, { method: 'POST' });
+    if (!res.ok) { showToast('Erreur lors de la clôture', 'error'); return; }
+    loadConsignes();
+    showToast('Consigne clôturée', 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
+}
+
+async function deleteConsigne(id) {
+  if (!confirm('Supprimer définitivement cette consigne ?')) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/consignes/${id}`, { method: 'DELETE' });
+    if (!res.ok) { showToast('Erreur lors de la suppression', 'error'); return; }
+    loadConsignes();
+    showToast('Consigne supprimée', 'success');
   } catch (e) {
     showToast('Erreur de connexion', 'error');
   }

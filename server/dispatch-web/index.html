@@ -64,6 +64,10 @@
       <a href="#" class="nav-item" data-tab="repository">
         <span class="nav-icon">&#x1F4C1;</span> Registres
       </a>
+      <a href="#" class="nav-item" data-tab="consignes">
+        <span class="nav-icon">&#x1F4CB;</span> Consignes
+        <span id="consignesNavBadge" class="nav-badge" style="display:none;">0</span>
+      </a>
       <a href="#" class="nav-item" data-tab="threat-analysis">
         <span class="nav-icon">&#x1F9E0;</span> Analyse IA
       </a>
@@ -950,6 +954,61 @@
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
           <button class="btn btn-secondary" onclick="closeCheckoutKeyModal()">Annuler</button>
           <button class="btn btn-primary" onclick="submitCheckoutKey()">Confirmer la sortie</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Consignes Tab — Dispatch standing-instructions board. Own top-level
+         tab (not a Repository sub-tab) given how load-bearing this is for
+         shift continuity; dispatcher+ only (view and write both). -->
+    <section class="tab-content" id="tab-consignes">
+      <div class="toolbar">
+        <div class="toolbar-stats">
+          <button class="repo-subnav-item active" data-cfilter="active" onclick="setConsigneFilter('active')">Actives</button>
+          <button class="repo-subnav-item" data-cfilter="expired" onclick="setConsigneFilter('expired')">Expirées / clôturées</button>
+          <button class="repo-subnav-item" data-cfilter="all" onclick="setConsigneFilter('all')">Toutes</button>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="openAddConsigneModal()">&#x2795; Nouvelle consigne</button>
+      </div>
+      <div id="consignesList" class="patrol-reports-grid"></div>
+    </section>
+
+    <!-- Add/Edit Consigne Modal -->
+    <div class="modal-overlay" id="addConsigneModal" style="display:none;">
+      <div class="modal" style="max-width:480px;">
+        <h3 class="modal-title" id="consigneModalTitle">Nouvelle consigne</h3>
+        <div class="form-group">
+          <label>Texte</label>
+          <textarea id="newConsigneText" class="form-control" rows="3" placeholder="ex. Portail nord en panne, utiliser l'entrée sud"></textarea>
+        </div>
+        <div class="form-group">
+          <label>Priorité</label>
+          <select id="newConsignePriority" class="form-control">
+            <option value="normal">Normale</option>
+            <option value="important">Importante</option>
+            <option value="urgent">Urgente</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Durée</label>
+          <select id="newConsigneDuration" class="form-control" onchange="updateConsigneDurationFields()">
+            <option value="permanent">Permanente (jusqu'à clôture manuelle)</option>
+            <option value="temporary">Temporaire (date de fin)</option>
+            <option value="scheduled">Ponctuelle (date et heure précises)</option>
+          </select>
+        </div>
+        <div class="form-group" id="consigneExpiresGroup" style="display:none;">
+          <label>Expire le</label>
+          <input type="datetime-local" id="newConsigneExpiresAt" class="form-control">
+        </div>
+        <div class="form-group" id="consigneScheduledGroup" style="display:none;">
+          <label>Date et heure précises</label>
+          <input type="datetime-local" id="newConsigneScheduledFor" class="form-control">
+          <span style="font-size:12px;color:var(--text-faint);">Une notification sera envoyée à Dispatch à ce moment précis.</span>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+          <button class="btn btn-secondary" onclick="closeAddConsigneModal()">Annuler</button>
+          <button class="btn btn-primary" onclick="submitConsigne()">Enregistrer</button>
         </div>
       </div>
     </div>

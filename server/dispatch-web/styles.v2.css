@@ -85,6 +85,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .nav-item.active { background: var(--bg-active); color: var(--text-primary); }
 [data-theme="light"] .nav-item.active { color: #0369a1; }
 .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+.nav-badge { margin-left: auto; background: #ef4444; color: #fff; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 10px; }
 .sidebar-footer { padding: 12px 16px; border-top: 1px solid var(--border-main); }
 .console-link { display: block; padding: 8px 12px; margin-bottom: 8px; border-radius: 6px; background: var(--bg-hover); color: var(--text-muted); text-decoration: none; font-size: 12px; text-align: center; transition: all 0.15s; }
 .console-link:hover { background: var(--border-main); color: var(--text-body); }

@@ -493,6 +493,41 @@ interface KeyRegistryEntry {
 }
 const keyRegistry = new Map<string, KeyRegistryEntry>();
 
+// ─── Consignes (Dispatch standing-instructions board) ─────────────────────
+// Solves oral shift-handover info loss: dispatcher+-only (view AND create/
+// close — no responder access, per explicit instruction), own top-level
+// console tab rather than a Repository sub-tab given how load-bearing this
+// is. Three duration shapes:
+//   - permanent: no auto-expiry, stays active until manually closed.
+//   - temporary: auto-"expires" (filtered out of the active view, but kept
+//     for history) once now > expiresAt — computed at read time, not a
+//     stored boolean, so it's always correct without a cron job.
+//   - scheduled: tied to one specific moment (scheduledFor). Never
+//     auto-expires — real-world point-in-time instructions ("close the
+//     gate at 2pm") usually need a human to confirm they were actually
+//     handled, not a timer. Instead it (a) fires one push notification to
+//     every dispatcher+ in the org at that moment (see the setInterval
+//     below) and (b) is flagged "à venir"/"échéance passée" client-side by
+//     comparing now to scheduledFor, until a dispatcher closes it.
+interface ConsigneAck { userId: string; userName: string; timestamp: number; }
+interface ConsigneEntry {
+  id: string;
+  organizationId?: string;
+  text: string;
+  priority: 'normal' | 'important' | 'urgent';
+  durationType: 'permanent' | 'temporary' | 'scheduled';
+  expiresAt?: number; // 'temporary' only
+  scheduledFor?: number; // 'scheduled' only
+  scheduledNotifSent?: boolean; // guards the one-shot push at scheduledFor
+  createdBy: string;
+  createdByName: string;
+  createdAt: number;
+  closedAt?: number;
+  closedBy?: string;
+  acknowledgedBy: ConsigneAck[];
+}
+const consignes = new Map<string, ConsigneEntry>();
+
 interface PatrolSite {
   id: string;
   organizationId: string;
@@ -7820,6 +7855,129 @@ app.delete('/api/repository/keys/:id', requireAuth, requireRole('admin'), (req, 
   res.json({ success: true });
 });
 
+// ─── Consignes (Dispatch standing-instructions board) ─────────────────────
+// Dispatcher+ only, both reading and writing — explicit instruction, no
+// responder access (unlike the key registry's broader view access).
+app.get('/api/consignes', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const list = Array.from(consignes.values())
+    .filter(c => canAccessOrg(req.supabaseUser!, c.organizationId))
+    .sort((a, b) => b.createdAt - a.createdAt);
+  res.json(list);
+});
+
+app.post('/api/consignes', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const text = (req.body.text || '').trim();
+  const priority = ['normal', 'important', 'urgent'].includes(req.body.priority) ? req.body.priority : 'normal';
+  const durationType = req.body.durationType;
+  if (!text) return res.status(400).json({ error: 'text is required' });
+  if (!['permanent', 'temporary', 'scheduled'].includes(durationType)) {
+    return res.status(400).json({ error: "durationType must be 'permanent', 'temporary', or 'scheduled'" });
+  }
+  if (durationType === 'temporary' && !req.body.expiresAt) {
+    return res.status(400).json({ error: 'expiresAt is required for a temporary consigne' });
+  }
+  if (durationType === 'scheduled' && !req.body.scheduledFor) {
+    return res.status(400).json({ error: 'scheduledFor is required for a scheduled consigne' });
+  }
+  const now = Date.now();
+  const caller = adminUsers.get(req.supabaseUser!.id);
+  const entry: ConsigneEntry = {
+    id: uuidv4(),
+    organizationId: req.supabaseUser!.organizationId,
+    text,
+    priority,
+    durationType,
+    expiresAt: durationType === 'temporary' ? Number(req.body.expiresAt) : undefined,
+    scheduledFor: durationType === 'scheduled' ? Number(req.body.scheduledFor) : undefined,
+    createdBy: req.supabaseUser!.id,
+    createdByName: caller?.name || 'Dispatch',
+    createdAt: now,
+    acknowledgedBy: [],
+  };
+  consignes.set(entry.id, entry);
+  saveConsigneToSupabase(entry).catch(e => console.error('[Consignes] Supabase save error:', e));
+  addAuditEntry('system', 'Consigne Created', req.supabaseUser!.id, `[${priority.toUpperCase()}] ${text}`, entry.id, entry.organizationId);
+  broadcastToOrg(entry.organizationId, { type: 'consigneCreated', data: entry });
+  res.status(201).json(entry);
+});
+
+app.put('/api/consignes/:id', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const entry = consignes.get(req.params.id as string);
+  if (!entry) return res.status(404).json({ error: 'Consigne not found' });
+  if (!canAccessOrg(req.supabaseUser!, entry.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  if (typeof req.body.text === 'string' && req.body.text.trim()) entry.text = req.body.text.trim();
+  if (['normal', 'important', 'urgent'].includes(req.body.priority)) entry.priority = req.body.priority;
+  if (entry.durationType === 'temporary' && req.body.expiresAt) entry.expiresAt = Number(req.body.expiresAt);
+  if (entry.durationType === 'scheduled' && req.body.scheduledFor) {
+    entry.scheduledFor = Number(req.body.scheduledFor);
+    entry.scheduledNotifSent = false; // editing the time re-arms the reminder
+  }
+  consignes.set(entry.id, entry);
+  saveConsigneToSupabase(entry).catch(e => console.error('[Consignes] Supabase save error:', e));
+  addAuditEntry('system', 'Consigne Updated', req.supabaseUser!.id, `Updated consigne ${entry.id}`, entry.id, entry.organizationId);
+  broadcastToOrg(entry.organizationId, { type: 'consigneUpdated', data: entry });
+  res.json(entry);
+});
+
+app.post('/api/consignes/:id/acknowledge', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const entry = consignes.get(req.params.id as string);
+  if (!entry) return res.status(404).json({ error: 'Consigne not found' });
+  if (!canAccessOrg(req.supabaseUser!, entry.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  if (!entry.acknowledgedBy.some(a => a.userId === req.supabaseUser!.id)) {
+    const caller = adminUsers.get(req.supabaseUser!.id);
+    entry.acknowledgedBy.push({ userId: req.supabaseUser!.id, userName: caller?.name || 'Dispatch', timestamp: Date.now() });
+    consignes.set(entry.id, entry);
+    saveConsigneToSupabase(entry).catch(e => console.error('[Consignes] Supabase save error:', e));
+    broadcastToOrg(entry.organizationId, { type: 'consigneUpdated', data: entry });
+  }
+  res.json(entry);
+});
+
+app.post('/api/consignes/:id/close', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const entry = consignes.get(req.params.id as string);
+  if (!entry) return res.status(404).json({ error: 'Consigne not found' });
+  if (!canAccessOrg(req.supabaseUser!, entry.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  entry.closedAt = Date.now();
+  entry.closedBy = req.supabaseUser!.id;
+  consignes.set(entry.id, entry);
+  saveConsigneToSupabase(entry).catch(e => console.error('[Consignes] Supabase save error:', e));
+  addAuditEntry('system', 'Consigne Closed', req.supabaseUser!.id, `Closed consigne ${entry.id}`, entry.id, entry.organizationId);
+  broadcastToOrg(entry.organizationId, { type: 'consigneClosed', consigneId: entry.id });
+  res.json(entry);
+});
+
+app.delete('/api/consignes/:id', requireAuth, requireRole('admin'), (req, res) => {
+  const entry = consignes.get(req.params.id as string);
+  if (!entry) return res.status(404).json({ error: 'Consigne not found' });
+  if (!canAccessOrg(req.supabaseUser!, entry.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  consignes.delete(entry.id);
+  deleteConsigneFromSupabase(entry.id).catch(e => console.error('[Consignes] Supabase delete error:', e));
+  addAuditEntry('system', 'Consigne Deleted', req.supabaseUser!.id, `Deleted consigne ${entry.id}`, entry.id, entry.organizationId);
+  broadcastToOrg(entry.organizationId, { type: 'consigneClosed', consigneId: entry.id });
+  res.json({ success: true });
+});
+
+// Fires the one-shot push reminder for 'scheduled' consignes once their
+// moment arrives — every dispatcher+ account in the org gets notified, not
+// just whoever happens to have the console open (unlike the WS broadcasts
+// above, which only reach currently-connected clients).
+setInterval(() => {
+  const now = Date.now();
+  for (const entry of consignes.values()) {
+    if (entry.durationType !== 'scheduled' || entry.scheduledNotifSent || entry.closedAt) continue;
+    if (!entry.scheduledFor || entry.scheduledFor > now) continue;
+    entry.scheduledNotifSent = true;
+    consignes.set(entry.id, entry);
+    saveConsigneToSupabase(entry).catch(e => console.error('[Consignes] Supabase save error:', e));
+    const recipients = Array.from(adminUsers.values()).filter(u =>
+      u.organizationId === entry.organizationId && ['dispatcher', 'admin', 'superadmin'].includes(u.role)
+    );
+    recipients.forEach(u => {
+      sendPushToUser(u.id, '📋 Consigne programmée', entry.text, { type: 'consigne', consigneId: entry.id }).catch(() => {});
+    });
+  }
+}, 60000);
+
 // ─── Patrol checkpoints (GPS waypoints per site, for ronde verification) ─
 app.get('/admin/patrol-checkpoints', requireAuth, requireRole('admin'), (req, res) => {
   const siteId = req.query.siteId as string | undefined;
@@ -8876,6 +9034,7 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
     loadPatrolReportsFromSupabase(),
     loadPatrolSitesFromSupabase(),
     loadKeyRegistryFromSupabase(),
+    loadConsignesFromSupabase(),
     loadPatrolCheckpointsFromSupabase(),
     loadBlackbookFromSupabase(),
     loadPTTChannelsFromSupabase(),
@@ -9086,6 +9245,50 @@ async function deleteKeyRegistryEntryFromSupabase(id: string): Promise<void> {
     const { error } = await supabaseAdmin.from('key_registry').delete().eq('id', id);
     if (error) console.error('[Supabase] deleteKeyRegistryEntryFromSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] deleteKeyRegistryEntryFromSupabase error:', e); }
+}
+
+async function loadConsignesFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('consignes').select('*');
+    if (error) { console.error('[Supabase] Failed to load consignes:', error.message); return; }
+    if (data && data.length > 0) {
+      consignes.clear();
+      data.forEach((c: any) => {
+        consignes.set(c.id, {
+          id: c.id, organizationId: c.organization_id || undefined,
+          text: c.text, priority: c.priority, durationType: c.duration_type,
+          expiresAt: c.expires_at || undefined, scheduledFor: c.scheduled_for || undefined,
+          scheduledNotifSent: c.scheduled_notif_sent || false,
+          createdBy: c.created_by, createdByName: c.created_by_name, createdAt: c.created_at || Date.now(),
+          closedAt: c.closed_at || undefined, closedBy: c.closed_by || undefined,
+          acknowledgedBy: c.acknowledged_by || [],
+        });
+      });
+      console.log(`[Supabase] Loaded ${data.length} consignes`);
+    }
+  } catch (e) { console.error('[Supabase] loadConsignesFromSupabase error:', e); }
+}
+
+async function saveConsigneToSupabase(entry: ConsigneEntry): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('consignes').upsert({
+      id: entry.id, organization_id: entry.organizationId || null,
+      text: entry.text, priority: entry.priority, duration_type: entry.durationType,
+      expires_at: entry.expiresAt || null, scheduled_for: entry.scheduledFor || null,
+      scheduled_notif_sent: entry.scheduledNotifSent || false,
+      created_by: entry.createdBy, created_by_name: entry.createdByName, created_at: entry.createdAt,
+      closed_at: entry.closedAt || null, closed_by: entry.closedBy || null,
+      acknowledged_by: entry.acknowledgedBy,
+    });
+    if (error) console.error('[Supabase] saveConsigneToSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] saveConsigneToSupabase error:', e); }
+}
+
+async function deleteConsigneFromSupabase(id: string): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('consignes').delete().eq('id', id);
+    if (error) console.error('[Supabase] deleteConsigneFromSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] deleteConsigneFromSupabase error:', e); }
 }
 
 async function loadPatrolCheckpointsFromSupabase(): Promise<void> {
