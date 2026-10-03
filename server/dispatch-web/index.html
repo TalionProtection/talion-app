@@ -894,6 +894,7 @@
         <button class="repo-subnav-item active" data-subtab="repo-keys" onclick="switchRepoSubtab('repo-keys')">&#x1F511; Clés</button>
         <button class="repo-subnav-item" data-subtab="repo-incidents" onclick="switchRepoSubtab('repo-incidents')">&#x1F4C4; Rapports d'incident</button>
         <button class="repo-subnav-item" data-subtab="repo-handovers" onclick="switchRepoSubtab('repo-handovers')">&#x1F504; Relève Dispatch</button>
+        <button class="repo-subnav-item" data-subtab="repo-vehicles" onclick="switchRepoSubtab('repo-vehicles')">&#x1F697; Relève véhicule</button>
       </div>
 
       <div class="repo-subtab-content active" id="repo-subtab-repo-keys">
@@ -940,7 +941,37 @@
         </div>
         <div id="handoversList" class="patrol-reports-grid"></div>
       </div>
+
+      <div class="repo-subtab-content" id="repo-subtab-repo-vehicles">
+        <div class="toolbar">
+          <div class="toolbar-stats">
+            <span style="font-size:12px;color:var(--text-muted);">Rempli par les agents (app/page dédiée) — consultation seule ici.</span>
+          </div>
+          <button class="btn btn-secondary btn-sm" onclick="openManageVehiclesModal()">&#x1F697; Gérer le parc</button>
+        </div>
+        <div id="vehicleHandoversList" class="patrol-reports-grid"></div>
+      </div>
     </section>
+
+    <!-- Manage Vehicle Registry Modal -->
+    <div class="modal-overlay" id="manageVehiclesModal" style="display:none;">
+      <div class="modal" style="max-width:440px;">
+        <h3 class="modal-title">Parc de véhicules</h3>
+        <div id="vehicleRegistryList" style="margin-bottom:16px;"></div>
+        <div class="form-group">
+          <label>Plaque</label>
+          <input type="text" class="form-control" id="newVehiclePlate" placeholder="ex. GE 123456">
+        </div>
+        <div class="form-group">
+          <label>Libellé (optionnel)</label>
+          <input type="text" class="form-control" id="newVehicleLabel" placeholder="ex. Véhicule 1">
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+          <button class="btn btn-secondary" onclick="closeManageVehiclesModal()">Fermer</button>
+          <button class="btn btn-primary" onclick="submitAddVehicle()">Ajouter</button>
+        </div>
+      </div>
+    </div>
 
     <!-- Add/Edit Dispatch Handover Modal -->
     <div class="modal-overlay" id="addHandoverModal" style="display:none;">

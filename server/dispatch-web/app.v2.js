@@ -328,6 +328,17 @@ function handleWsMessage(msg) {
       break;
     }
 
+    case 'vehicleHandoverCreated':
+    case 'vehicleHandoverUpdated': {
+      const vhIdx = vehicleHandoversCache.findIndex(h => h.id === msg.data.id);
+      if (vhIdx >= 0) vehicleHandoversCache[vhIdx] = msg.data; else vehicleHandoversCache.unshift(msg.data);
+      if (document.getElementById('tab-repository')?.classList.contains('active')) renderVehicleHandovers();
+      if (msg.type === 'vehicleHandoverCreated' && msg.data.hasAnomaly) {
+        showToast(`⚠️ Anomalie véhicule ${msg.data.vehiclePlate} — Dispatch notifié par email`, 'warning');
+      }
+      break;
+    }
+
     case 'acceptanceTimeout': {
       const respName = msg.responderName || msg.responderId;
       showToast(`\u23F0 ${respName} n'a pas accept\u00e9 l'incident ${formatIncidentId(msg.alertId)} dans les 5 min`, 'warning');
@@ -1713,6 +1724,7 @@ function switchRepoSubtab(subtab) {
   if (subtab === 'repo-keys') loadKeys();
   if (subtab === 'repo-incidents') loadIncidentReports();
   if (subtab === 'repo-handovers') loadHandovers();
+  if (subtab === 'repo-vehicles') loadVehicleHandovers();
 }
 
 async function loadKeys() {
@@ -2433,6 +2445,131 @@ async function deleteHandover(id) {
     if (!res.ok) { showToast('Erreur lors de la suppression', 'error'); return; }
     loadHandovers();
     showToast('Relève supprimée', 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
+}
+
+// ─── Repository: Vehicle handover consult + vehicle registry management ──
+// Filled only by agents (app / standalone /vehicle-handover/ page) — this
+// side is read-only consultation for Dispatch, plus managing the fleet
+// list those agents pick from.
+let vehicleHandoversCache = [];
+let vehicleRegistryCache = [];
+
+async function loadVehicleHandovers() {
+  try {
+    const res = await fetch(`${API_BASE}/api/vehicle-handovers`);
+    vehicleHandoversCache = res.ok ? await res.json() : [];
+    renderVehicleHandovers();
+  } catch (e) {
+    console.error('[VehicleHandovers] load error:', e);
+  }
+}
+
+function renderVehicleHandovers() {
+  const container = document.getElementById('vehicleHandoversList');
+  if (!container) return;
+  if (vehicleHandoversCache.length === 0) {
+    container.innerHTML = '<div class="empty-state">Aucune relève véhicule enregistrée</div>';
+    return;
+  }
+  container.innerHTML = vehicleHandoversCache.map(h => `
+    <div class="provider-row" style="border-left:4px solid ${h.hasAnomaly ? '#ef4444' : '#22c55e'};">
+      <div style="flex:1;">
+        <div class="provider-row-name">
+          ${h.hasAnomaly ? '<span class="badge badge-error">⚠ Anomalie</span>' : '<span class="badge badge-success">OK</span>'}
+          <span class="badge ${h.status === 'complete' ? 'badge-success' : 'badge-error'}">${h.status === 'complete' ? 'Signé' : 'Signature en attente'}</span>
+          ${escapeHtml(h.vehiclePlate)} — ${h.mileage} km
+        </div>
+        <div class="provider-row-detail">${escapeHtml(h.incomingAgentName)} → ${escapeHtml(h.outgoingAgentName)} · ${new Date(h.createdAt).toLocaleString('fr-FR')}</div>
+        ${h.uniformComments ? `<div class="provider-row-detail">Uniforme : ${escapeHtml(h.uniformComments)}</div>` : ''}
+        ${h.damageLocations?.length > 0 ? `<div class="provider-row-detail" style="color:#ef4444;">Dommages : ${h.damageLocations.map(escapeHtml).join(', ')}${h.damageNotes ? ' — ' + escapeHtml(h.damageNotes) : ''}</div>` : ''}
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;">
+        <button class="btn btn-secondary btn-sm" onclick="downloadVehicleHandoverPdf('${h.id}')">📄 PDF</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function downloadVehicleHandoverPdf(id) {
+  try {
+    const res = await fetch(`${API_BASE}/api/vehicle-handovers/${id}/pdf`);
+    if (!res.ok) throw new Error('failed');
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = `releve-vehicule-${id}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+  } catch (e) {
+    showToast('Erreur export PDF', 'error');
+  }
+}
+
+async function openManageVehiclesModal() {
+  document.getElementById('newVehiclePlate').value = '';
+  document.getElementById('newVehicleLabel').value = '';
+  document.getElementById('manageVehiclesModal').style.display = 'flex';
+  await loadVehicleRegistry();
+}
+
+function closeManageVehiclesModal() {
+  document.getElementById('manageVehiclesModal').style.display = 'none';
+}
+
+async function loadVehicleRegistry() {
+  const listEl = document.getElementById('vehicleRegistryList');
+  listEl.innerHTML = 'Chargement...';
+  try {
+    const res = await fetch(`${API_BASE}/api/vehicle-registry`);
+    vehicleRegistryCache = res.ok ? await res.json() : [];
+    listEl.innerHTML = vehicleRegistryCache.map(v => `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border-subtle);">
+        <span>${escapeHtml(v.plate)}${v.label ? ' — ' + escapeHtml(v.label) : ''}</span>
+        <button class="btn btn-secondary btn-sm" onclick="deleteVehicle('${v.id}')" title="Supprimer">🗑️</button>
+      </div>
+    `).join('') || '<div class="empty-state">Aucun véhicule</div>';
+  } catch (e) {
+    listEl.innerHTML = '<div class="empty-state">Erreur de chargement</div>';
+  }
+}
+
+async function submitAddVehicle() {
+  const plate = document.getElementById('newVehiclePlate').value.trim();
+  const label = document.getElementById('newVehicleLabel').value.trim();
+  if (!plate) { showToast('La plaque est requise', 'error'); return; }
+  try {
+    const res = await fetch(`${API_BASE}/api/vehicle-registry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plate, label }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors de l\'ajout', 'error');
+      return;
+    }
+    document.getElementById('newVehiclePlate').value = '';
+    document.getElementById('newVehicleLabel').value = '';
+    loadVehicleRegistry();
+    showToast('Véhicule ajouté', 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
+}
+
+async function deleteVehicle(id) {
+  if (!confirm('Supprimer ce véhicule du parc ?')) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/vehicle-registry/${id}`, { method: 'DELETE' });
+    if (!res.ok) { showToast('Erreur lors de la suppression', 'error'); return; }
+    loadVehicleRegistry();
+    showToast('Véhicule supprimé', 'success');
   } catch (e) {
     showToast('Erreur de connexion', 'error');
   }

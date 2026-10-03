@@ -414,6 +414,12 @@ app.use('/dispatch-v2', serveConsoleDynamic(path.join(PROJECT_ROOT, 'server', 'd
 // Keep old path for backward compat
 app.use('/dispatch-console', serveConsoleDynamic(path.join(PROJECT_ROOT, 'server', 'dispatch-web')));
 
+// Standalone, lightweight page for the vehicle handover form — deliberately
+// NOT the full dispatch-web console (responders have no login destination
+// there at all, see console-login's role check). Scoped to exactly this one
+// form, not a general "responder console."
+app.use('/vehicle-handover', serveConsoleDynamic(path.join(PROJECT_ROOT, 'server', 'vehicle-handover-web')));
+
 // Serve login page
 app.use('/console', serveConsoleDynamic(path.join(PROJECT_ROOT, 'server', 'console-login')));
 app.use('/console-login', serveConsoleDynamic(path.join(PROJECT_ROOT, 'server', 'console-login')));
@@ -589,6 +595,78 @@ interface DispatchHandoverReport {
   updatedAt: number;
 }
 const dispatchHandovers = new Map<string, DispatchHandoverReport>();
+
+// ─── Vehicle registry + handover report (Repository, Phase 4) ─────────────
+// Prerequisite fleet list, same shape/convention as the key registry.
+// Dispatcher+ manage, responder+ can read (they need it to fill the
+// handover form).
+interface VehicleEntry {
+  id: string;
+  organizationId?: string;
+  plate: string;
+  label?: string;
+  createdAt: number;
+}
+const vehicleRegistry = new Map<string, VehicleEntry>();
+
+// Digitized, verbatim, from Billy's real paper/Microsoft-Forms process
+// ("Patrol - Hand Over"). Both server and dispatch-web/the standalone agent
+// page reference these exact labels so the recorded data and the printed
+// PDF read exactly like the familiar form.
+const VEHICLE_UNIFORM_CHECKLIST_ITEMS = [
+  'Tenue GIS', 'Patch Patrol', 'Gilet Sécurité', 'Téléphone', 'Clé du véhicule',
+  'Bip portails + Clef 09H + Bat 11', 'Carte GPS life 360',
+];
+const VEHICLE_CHECKLIST_ITEMS = [
+  'Communiquer toute anomalie via le groupe WhatsApp : GISGVA (CC & PATROL) Team',
+  'Contrôle extérieur du véhicule',
+  "Vérification du niveau d'autonomie du véhicule",
+  "Vérification de l'état visuel des pneus (profil et pression)",
+  'Vérification des feux de signalisation et clignotants',
+  'Vérification des freins et essuie-glaces',
+  'Vérification des voyants sur le tableau de bord',
+  'Vérification de la propreté intérieure et extérieure',
+  'Matériel - Câble USB présent',
+  'Matériel - Escabeau',
+  'Matériel - Plumeau',
+  'Matériel - Extincteur présent',
+  'Matériel - Boîte à clefs présente',
+  'Matériel - Raclette pare-brise présente',
+  'Matériel - 3 sacs scellés',
+];
+const VEHICLE_DAMAGE_LOCATIONS = ['Pare-choc avant', 'Pare-choc arrière', 'Portières droites', 'Portières gauches', 'Capot', 'Jantes/roues'];
+
+// Two-signature flow, matching the real process ("l'agent entrant vérifie
+// le véhicule et les 2 agents signent"): the incoming agent fills out and
+// submits the whole thing (their submission IS their signature, recorded
+// immediately), then it sits 'pending_outgoing_signature' until the
+// outgoing agent separately confirms. hasAnomaly (any checklist item
+// unchecked, or any damage location selected) is computed at submission
+// and triggers one automatic PDF email to every dispatcher+ in the org —
+// no manual distribution step like Incident Reports, this one is automatic
+// by design ("si une anomalie apparaît... envoyé par email au Dispatch").
+interface VehicleHandoverReport {
+  id: string;
+  organizationId?: string;
+  vehiclePlate: string;
+  mileage: number;
+  uniformChecklist: Record<string, boolean>;
+  uniformComments: string;
+  vehicleChecklist: Record<string, boolean>;
+  damageLocations: string[];
+  damageNotes: string;
+  incomingAgentId: string;
+  incomingAgentName: string;
+  incomingSignedAt: number;
+  outgoingAgentId: string;
+  outgoingAgentName: string;
+  outgoingSignedAt?: number;
+  status: 'pending_outgoing_signature' | 'complete';
+  hasAnomaly: boolean;
+  createdAt: number;
+  anomalyEmailSentAt?: number;
+}
+const vehicleHandovers = new Map<string, VehicleHandoverReport>();
 
 interface PatrolSite {
   id: string;
@@ -4548,6 +4626,50 @@ async function generateIncidentReportPdfBuffer(report: IncidentReport): Promise<
   return done;
 }
 
+async function generateVehicleHandoverPdfBuffer(report: VehicleHandoverReport): Promise<Buffer> {
+  const PDFDocument = require('pdfkit');
+  const doc = new PDFDocument({ margin: 50 });
+  const chunks: Buffer[] = [];
+  doc.on('data', (c: Buffer) => chunks.push(c));
+  const done = new Promise<Buffer>((resolve) => doc.on('end', () => resolve(Buffer.concat(chunks))));
+
+  doc.fontSize(20).font('Helvetica-Bold').text('Relève véhicule');
+  doc.fontSize(10).font('Helvetica').fillColor('#666').text(`ID : ${report.id}`);
+  doc.fillColor('#000');
+  doc.moveDown(0.5).fontSize(12).font('Helvetica');
+  doc.text(`Véhicule : ${report.vehiclePlate}`);
+  doc.text(`Kilométrage : ${report.mileage} km`);
+  doc.text(`Agent entrant : ${report.incomingAgentName} (signé le ${new Date(report.incomingSignedAt).toLocaleString('fr-FR')})`);
+  doc.text(`Agent sortant : ${report.outgoingAgentName}${report.outgoingSignedAt ? ` (signé le ${new Date(report.outgoingSignedAt).toLocaleString('fr-FR')})` : ' (signature en attente)'}`);
+  if (report.hasAnomaly) doc.font('Helvetica-Bold').fillColor('#dc2626').text('⚠ Anomalie signalée').fillColor('#000').font('Helvetica');
+
+  doc.moveDown(0.5).font('Helvetica-Bold').fontSize(14).text('Prise de service — Uniforme');
+  doc.fontSize(11).font('Helvetica');
+  VEHICLE_UNIFORM_CHECKLIST_ITEMS.forEach(item => {
+    const ok = report.uniformChecklist[item];
+    doc.fillColor(ok ? '#000' : '#dc2626').text(`${ok ? '✓' : '✗'} ${item}`);
+  });
+  doc.fillColor('#000');
+  if (report.uniformComments) doc.moveDown(0.3).font('Helvetica-Oblique').text(`Commentaires : ${report.uniformComments}`).font('Helvetica');
+
+  doc.moveDown(0.5).font('Helvetica-Bold').fontSize(14).text('Contrôle du véhicule');
+  doc.fontSize(11).font('Helvetica');
+  VEHICLE_CHECKLIST_ITEMS.forEach(item => {
+    const ok = report.vehicleChecklist[item];
+    doc.fillColor(ok ? '#000' : '#dc2626').text(`${ok ? '✓' : '✗'} ${item}`);
+  });
+  doc.fillColor('#000');
+
+  if (report.damageLocations.length > 0) {
+    doc.moveDown(0.5).font('Helvetica-Bold').fillColor('#dc2626').text('Dommages additionnels constatés').fillColor('#000').font('Helvetica');
+    doc.text(report.damageLocations.join(', '));
+    if (report.damageNotes) doc.font('Helvetica-Oblique').text(report.damageNotes).font('Helvetica');
+  }
+
+  doc.end();
+  return done;
+}
+
 async function sendPushToUser(userId: string, title: string, body: string, data: Record<string, any> = {}) {
   const targetTokens: string[] = [];
   for (const [token, entry] of pushTokens) {
@@ -8419,6 +8541,208 @@ app.delete('/api/dispatch-handovers/:id', requireAuth, requireRole('admin'), (re
   res.json({ success: true });
 });
 
+// ─── Vehicle registry (Repository, Phase 4 prerequisite) ──────────────────
+// Dispatcher+ manage, responder+ read (they need it to fill the handover
+// form — from either the standalone agent page or, later, mobile).
+app.get('/api/vehicle-registry', requireAuth, requireRole('responder'), (req, res) => {
+  const list = Array.from(vehicleRegistry.values())
+    .filter(v => canAccessOrg(req.supabaseUser!, v.organizationId))
+    .sort((a, b) => a.plate.localeCompare(b.plate));
+  res.json(list);
+});
+
+app.post('/api/vehicle-registry', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const plate = (req.body.plate || '').trim();
+  if (!plate) return res.status(400).json({ error: 'plate is required' });
+  const vehicle: VehicleEntry = {
+    id: uuidv4(),
+    organizationId: req.supabaseUser!.organizationId,
+    plate,
+    label: (req.body.label || '').trim() || undefined,
+    createdAt: Date.now(),
+  };
+  vehicleRegistry.set(vehicle.id, vehicle);
+  saveVehicleEntryToSupabase(vehicle).catch(e => console.error('[VehicleRegistry] Supabase save error:', e));
+  addAuditEntry('system', 'Vehicle Registered', req.supabaseUser!.id, `Registered vehicle ${plate}`, vehicle.id, vehicle.organizationId);
+  res.status(201).json(vehicle);
+});
+
+app.delete('/api/vehicle-registry/:id', requireAuth, requireRole('admin'), (req, res) => {
+  const vehicle = vehicleRegistry.get(req.params.id as string);
+  if (!vehicle) return res.status(404).json({ error: 'Vehicle not found' });
+  if (!canAccessOrg(req.supabaseUser!, vehicle.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  vehicleRegistry.delete(vehicle.id);
+  deleteVehicleEntryFromSupabase(vehicle.id).catch(e => console.error('[VehicleRegistry] Supabase delete error:', e));
+  addAuditEntry('system', 'Vehicle Deleted', req.supabaseUser!.id, `Deleted vehicle ${vehicle.plate}`, vehicle.id, vehicle.organizationId);
+  res.json({ success: true });
+});
+
+// Shared checklist labels — the standalone agent page and the dispatch-web
+// consult view both fetch this instead of hardcoding the list twice.
+app.get('/api/vehicle-handovers/checklist-items', requireAuth, requireRole('responder'), (req, res) => {
+  res.json({
+    uniform: VEHICLE_UNIFORM_CHECKLIST_ITEMS,
+    vehicle: VEHICLE_CHECKLIST_ITEMS,
+    damageLocations: VEHICLE_DAMAGE_LOCATIONS,
+  });
+});
+
+// Narrow, responder-accessible staff list for picking the outgoing agent —
+// GET /api/incident-reports/recipients is dispatcher+ only, too high a bar
+// for a responder filling this form on the standalone page.
+app.get('/api/vehicle-handovers/agents', requireAuth, requireRole('responder'), (req, res) => {
+  const list = Array.from(adminUsers.values())
+    .filter(u => canAccessOrg(req.supabaseUser!, u.organizationId) && u.status !== 'deactivated' && ['responder', 'dispatcher', 'admin', 'superadmin'].includes(u.role))
+    .map(u => ({ id: u.id, name: u.name, role: u.role }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  res.json(list);
+});
+
+// ─── Vehicle handover reports (Repository, Phase 4) ────────────────────────
+// Create/sign: responder+ only. Full consult list: dispatcher+ only. An
+// agent who isn't dispatcher+ can still see (and sign) the one report
+// that's specifically pending their own signature, via the /pending route
+// below — they just can't browse the whole history.
+app.get('/api/vehicle-handovers', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const list = Array.from(vehicleHandovers.values())
+    .filter(h => canAccessOrg(req.supabaseUser!, h.organizationId))
+    .sort((a, b) => b.createdAt - a.createdAt);
+  res.json(list);
+});
+
+app.get('/api/vehicle-handovers/pending', requireAuth, requireRole('responder'), (req, res) => {
+  const list = Array.from(vehicleHandovers.values()).filter(h =>
+    canAccessOrg(req.supabaseUser!, h.organizationId) &&
+    h.status === 'pending_outgoing_signature' &&
+    h.outgoingAgentId === req.supabaseUser!.id
+  );
+  res.json(list);
+});
+
+app.get('/api/vehicle-handovers/:id', requireAuth, requireRole('responder'), (req, res) => {
+  const report = vehicleHandovers.get(req.params.id as string);
+  if (!report) return res.status(404).json({ error: 'Report not found' });
+  const caller = req.supabaseUser!;
+  const isInvolved = caller.id === report.incomingAgentId || caller.id === report.outgoingAgentId;
+  const isDispatch = ['dispatcher', 'admin', 'superadmin'].includes(caller.role);
+  if (!canAccessOrg(caller, report.organizationId) || !(isInvolved || isDispatch)) {
+    return res.status(403).json({ error: 'Not authorized' });
+  }
+  res.json(report);
+});
+
+app.post('/api/vehicle-handovers', requireAuth, requireRole('responder'), (req, res) => {
+  const { vehiclePlate, mileage, uniformChecklist, uniformComments, vehicleChecklist, damageLocations, damageNotes, outgoingAgentId } = req.body;
+  if (!vehiclePlate || typeof mileage !== 'number' || !outgoingAgentId) {
+    return res.status(400).json({ error: 'vehiclePlate, mileage, and outgoingAgentId are required' });
+  }
+  const outgoingAgent = adminUsers.get(outgoingAgentId);
+  if (!outgoingAgent || !canAccessOrg(req.supabaseUser!, outgoingAgent.organizationId)) {
+    return res.status(400).json({ error: 'Invalid outgoingAgentId' });
+  }
+  const incomingAgent = adminUsers.get(req.supabaseUser!.id);
+  const now = Date.now();
+
+  // Normalize to exactly the known item set — a missing/unchecked item
+  // defaults to false (not OK), the safer default for a safety checklist.
+  const normalizedUniform: Record<string, boolean> = {};
+  VEHICLE_UNIFORM_CHECKLIST_ITEMS.forEach(item => { normalizedUniform[item] = !!uniformChecklist?.[item]; });
+  const normalizedVehicle: Record<string, boolean> = {};
+  VEHICLE_CHECKLIST_ITEMS.forEach(item => { normalizedVehicle[item] = !!vehicleChecklist?.[item]; });
+  const normalizedDamage: string[] = Array.isArray(damageLocations) ? damageLocations.filter((d: string) => VEHICLE_DAMAGE_LOCATIONS.includes(d) || d === 'Autre') : [];
+
+  const hasAnomaly = Object.values(normalizedUniform).some(v => !v) || Object.values(normalizedVehicle).some(v => !v) || normalizedDamage.length > 0;
+
+  const report: VehicleHandoverReport = {
+    id: uuidv4(),
+    organizationId: req.supabaseUser!.organizationId,
+    vehiclePlate,
+    mileage,
+    uniformChecklist: normalizedUniform,
+    uniformComments: (uniformComments || '').trim(),
+    vehicleChecklist: normalizedVehicle,
+    damageLocations: normalizedDamage,
+    damageNotes: (damageNotes || '').trim(),
+    incomingAgentId: req.supabaseUser!.id,
+    incomingAgentName: incomingAgent?.name || 'Agent',
+    incomingSignedAt: now,
+    outgoingAgentId,
+    outgoingAgentName: outgoingAgent.name,
+    status: 'pending_outgoing_signature',
+    hasAnomaly,
+    createdAt: now,
+  };
+  vehicleHandovers.set(report.id, report);
+  saveVehicleHandoverToSupabase(report).catch(e => console.error('[VehicleHandover] Supabase save error:', e));
+  addAuditEntry('system', 'Vehicle Handover Created', req.supabaseUser!.id, `${report.incomingAgentName} → ${report.outgoingAgentName}, véhicule ${vehiclePlate}${hasAnomaly ? ' (ANOMALIE)' : ''}`, report.id, report.organizationId);
+  broadcastToOrg(report.organizationId, { type: 'vehicleHandoverCreated', data: report });
+
+  // Automatic distribution on anomaly — no manual send step, unlike
+  // Incident Reports (explicit requirement: "si une anomalie apparaît...
+  // envoyé par email au Dispatch en PDF").
+  if (hasAnomaly) {
+    generateVehicleHandoverPdfBuffer(report).then(async (pdfBuffer) => {
+      const dispatchRecipients = Array.from(adminUsers.values()).filter(u =>
+        u.organizationId === report.organizationId && ['dispatcher', 'admin', 'superadmin'].includes(u.role) && u.email
+      );
+      for (const recipient of dispatchRecipients) {
+        await sendResendEmail({
+          to: [recipient.email],
+          subject: `⚠️ Anomalie relève véhicule — ${vehiclePlate}`,
+          html: `<p>Une anomalie a été signalée lors de la relève du véhicule <strong>${vehiclePlate}</strong> par ${report.incomingAgentName}.</p><p>Rapport ci-joint.</p>`,
+          attachmentFilename: `releve-vehicule-${report.id}.pdf`,
+          attachmentBuffer: pdfBuffer,
+        });
+      }
+      report.anomalyEmailSentAt = Date.now();
+      vehicleHandovers.set(report.id, report);
+      saveVehicleHandoverToSupabase(report).catch(e => console.error('[VehicleHandover] Supabase save error:', e));
+    }).catch(e => console.error('[VehicleHandover] Anomaly email error:', e));
+  }
+
+  res.status(201).json(report);
+});
+
+app.post('/api/vehicle-handovers/:id/sign', requireAuth, requireRole('responder'), (req, res) => {
+  const report = vehicleHandovers.get(req.params.id as string);
+  if (!report) return res.status(404).json({ error: 'Report not found' });
+  if (!canAccessOrg(req.supabaseUser!, report.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  if (req.supabaseUser!.id !== report.outgoingAgentId) return res.status(403).json({ error: 'Only the designated outgoing agent can sign this report' });
+  if (report.status === 'complete') return res.status(400).json({ error: 'Already signed' });
+  report.outgoingSignedAt = Date.now();
+  report.status = 'complete';
+  vehicleHandovers.set(report.id, report);
+  saveVehicleHandoverToSupabase(report).catch(e => console.error('[VehicleHandover] Supabase save error:', e));
+  addAuditEntry('system', 'Vehicle Handover Signed', req.supabaseUser!.id, `Signed handover ${report.id}`, report.id, report.organizationId);
+  broadcastToOrg(report.organizationId, { type: 'vehicleHandoverUpdated', data: report });
+  res.json(report);
+});
+
+app.get('/api/vehicle-handovers/:id/pdf', requireAuth, requireRole('responder'), async (req, res) => {
+  const report = vehicleHandovers.get(req.params.id as string);
+  if (!report) return res.status(404).json({ error: 'Report not found' });
+  const caller = req.supabaseUser!;
+  const isInvolved = caller.id === report.incomingAgentId || caller.id === report.outgoingAgentId;
+  const isDispatch = ['dispatcher', 'admin', 'superadmin'].includes(caller.role);
+  if (!canAccessOrg(caller, report.organizationId) || !(isInvolved || isDispatch)) {
+    return res.status(403).json({ error: 'Not authorized' });
+  }
+  const buffer = await generateVehicleHandoverPdfBuffer(report);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="releve-vehicule-${report.id}.pdf"`);
+  res.send(buffer);
+});
+
+app.delete('/api/vehicle-handovers/:id', requireAuth, requireRole('admin'), (req, res) => {
+  const report = vehicleHandovers.get(req.params.id as string);
+  if (!report) return res.status(404).json({ error: 'Report not found' });
+  if (!canAccessOrg(req.supabaseUser!, report.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  vehicleHandovers.delete(report.id);
+  deleteVehicleHandoverFromSupabase(report.id).catch(e => console.error('[VehicleHandover] Supabase delete error:', e));
+  addAuditEntry('system', 'Vehicle Handover Deleted', req.supabaseUser!.id, `Deleted handover ${report.id}`, report.id, report.organizationId);
+  res.json({ success: true });
+});
+
 // ─── Patrol checkpoints (GPS waypoints per site, for ronde verification) ─
 app.get('/admin/patrol-checkpoints', requireAuth, requireRole('admin'), (req, res) => {
   const siteId = req.query.siteId as string | undefined;
@@ -9478,6 +9802,8 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
     loadConsignesFromSupabase(),
     loadIncidentReportsFromSupabase(),
     loadDispatchHandoversFromSupabase(),
+    loadVehicleRegistryFromSupabase(),
+    loadVehicleHandoversFromSupabase(),
     loadPatrolCheckpointsFromSupabase(),
     loadBlackbookFromSupabase(),
     loadPTTChannelsFromSupabase(),
@@ -9770,6 +10096,78 @@ async function deleteDispatchHandoverFromSupabase(id: string): Promise<void> {
     const { error } = await supabaseAdmin.from('dispatch_handovers').delete().eq('id', id);
     if (error) console.error('[Supabase] deleteDispatchHandoverFromSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] deleteDispatchHandoverFromSupabase error:', e); }
+}
+
+async function loadVehicleRegistryFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('vehicle_registry').select('*');
+    if (error) { console.error('[Supabase] Failed to load vehicle_registry:', error.message); return; }
+    if (data && data.length > 0) {
+      vehicleRegistry.clear();
+      data.forEach((v: any) => {
+        vehicleRegistry.set(v.id, { id: v.id, organizationId: v.organization_id || undefined, plate: v.plate, label: v.label || undefined, createdAt: v.created_at || Date.now() });
+      });
+      console.log(`[Supabase] Loaded ${data.length} vehicle registry entries`);
+    }
+  } catch (e) { console.error('[Supabase] loadVehicleRegistryFromSupabase error:', e); }
+}
+
+async function saveVehicleEntryToSupabase(vehicle: VehicleEntry): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('vehicle_registry').upsert({
+      id: vehicle.id, organization_id: vehicle.organizationId || null, plate: vehicle.plate, label: vehicle.label || null, created_at: vehicle.createdAt,
+    });
+    if (error) console.error('[Supabase] saveVehicleEntryToSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] saveVehicleEntryToSupabase error:', e); }
+}
+
+async function deleteVehicleEntryFromSupabase(id: string): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('vehicle_registry').delete().eq('id', id);
+    if (error) console.error('[Supabase] deleteVehicleEntryFromSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] deleteVehicleEntryFromSupabase error:', e); }
+}
+
+async function loadVehicleHandoversFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('vehicle_handovers').select('*');
+    if (error) { console.error('[Supabase] Failed to load vehicle_handovers:', error.message); return; }
+    if (data && data.length > 0) {
+      vehicleHandovers.clear();
+      data.forEach((h: any) => {
+        vehicleHandovers.set(h.id, {
+          id: h.id, organizationId: h.organization_id || undefined, vehiclePlate: h.vehicle_plate, mileage: h.mileage,
+          uniformChecklist: h.uniform_checklist || {}, uniformComments: h.uniform_comments || '',
+          vehicleChecklist: h.vehicle_checklist || {}, damageLocations: h.damage_locations || [], damageNotes: h.damage_notes || '',
+          incomingAgentId: h.incoming_agent_id, incomingAgentName: h.incoming_agent_name, incomingSignedAt: h.incoming_signed_at,
+          outgoingAgentId: h.outgoing_agent_id, outgoingAgentName: h.outgoing_agent_name, outgoingSignedAt: h.outgoing_signed_at || undefined,
+          status: h.status, hasAnomaly: h.has_anomaly || false, createdAt: h.created_at || Date.now(), anomalyEmailSentAt: h.anomaly_email_sent_at || undefined,
+        });
+      });
+      console.log(`[Supabase] Loaded ${data.length} vehicle handovers`);
+    }
+  } catch (e) { console.error('[Supabase] loadVehicleHandoversFromSupabase error:', e); }
+}
+
+async function saveVehicleHandoverToSupabase(report: VehicleHandoverReport): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('vehicle_handovers').upsert({
+      id: report.id, organization_id: report.organizationId || null, vehicle_plate: report.vehiclePlate, mileage: report.mileage,
+      uniform_checklist: report.uniformChecklist, uniform_comments: report.uniformComments,
+      vehicle_checklist: report.vehicleChecklist, damage_locations: report.damageLocations, damage_notes: report.damageNotes,
+      incoming_agent_id: report.incomingAgentId, incoming_agent_name: report.incomingAgentName, incoming_signed_at: report.incomingSignedAt,
+      outgoing_agent_id: report.outgoingAgentId, outgoing_agent_name: report.outgoingAgentName, outgoing_signed_at: report.outgoingSignedAt || null,
+      status: report.status, has_anomaly: report.hasAnomaly, created_at: report.createdAt, anomaly_email_sent_at: report.anomalyEmailSentAt || null,
+    });
+    if (error) console.error('[Supabase] saveVehicleHandoverToSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] saveVehicleHandoverToSupabase error:', e); }
+}
+
+async function deleteVehicleHandoverFromSupabase(id: string): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('vehicle_handovers').delete().eq('id', id);
+    if (error) console.error('[Supabase] deleteVehicleHandoverFromSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] deleteVehicleHandoverFromSupabase error:', e); }
 }
 
 async function loadConsignesFromSupabase(): Promise<void> {

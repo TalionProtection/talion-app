@@ -333,6 +333,10 @@
           window.location.href = '/admin-console/';
         } else if (data.user.role === 'dispatcher') {
           window.location.href = '/dispatch-v2/';
+        } else if (data.user.role === 'responder') {
+          // Responders get no access to the full dispatch console — just
+          // this one standalone form, not a general "responder console."
+          window.location.href = '/vehicle-handover/';
         } else {
           errorEl.textContent = "Ce compte n'a pas accès à une console (rôle: " + data.user.role + ").";
           errorEl.style.display = 'block';
