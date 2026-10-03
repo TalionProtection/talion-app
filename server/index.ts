@@ -568,6 +568,28 @@ interface IncidentReport {
 }
 const incidentReports = new Map<string, IncidentReport>();
 
+// ─── Dispatch shift handover (Repository, Phase 3) ────────────────────────
+// Dispatcher+ only, one-shot creation (no draft/finalize split like Incident
+// Reports — there's no mobile-seeded path here). Embeds a read-only
+// snapshot of whatever Consignes were active at creation time, so the
+// incoming operator has everything in one place instead of needing to
+// cross-reference the Consignes board separately.
+interface DispatchHandoverConsigneSnapshot { id: string; text: string; priority: ConsigneEntry['priority']; }
+interface DispatchHandoverReport {
+  id: string;
+  organizationId?: string;
+  outgoingOperatorId: string;
+  outgoingOperatorName: string;
+  incomingOperatorId: string;
+  incomingOperatorName: string;
+  summary: string; // résumé des incidents / points en cours
+  notes: string; // consignes pour la suite
+  consignesSnapshot: DispatchHandoverConsigneSnapshot[];
+  createdAt: number;
+  updatedAt: number;
+}
+const dispatchHandovers = new Map<string, DispatchHandoverReport>();
+
 interface PatrolSite {
   id: string;
   organizationId: string;
@@ -8316,6 +8338,87 @@ app.delete('/api/incident-reports/:id', requireAuth, requireRole('admin'), (req,
   res.json({ success: true });
 });
 
+// ─── Dispatch shift handover (Repository, Phase 3) ────────────────────────
+app.get('/api/dispatch-handovers', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const list = Array.from(dispatchHandovers.values())
+    .filter(h => canAccessOrg(req.supabaseUser!, h.organizationId))
+    .sort((a, b) => b.createdAt - a.createdAt);
+  res.json(list);
+});
+
+app.get('/api/dispatch-handovers/:id', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const handover = dispatchHandovers.get(req.params.id as string);
+  if (!handover) return res.status(404).json({ error: 'Handover not found' });
+  if (!canAccessOrg(req.supabaseUser!, handover.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  res.json(handover);
+});
+
+app.post('/api/dispatch-handovers', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const incomingOperatorId = (req.body.incomingOperatorId || '').trim();
+  const summary = (req.body.summary || '').trim();
+  const notes = (req.body.notes || '').trim();
+  if (!incomingOperatorId || !summary) return res.status(400).json({ error: 'incomingOperatorId and summary are required' });
+  const incomingOperator = adminUsers.get(incomingOperatorId);
+  if (!incomingOperator || !canAccessOrg(req.supabaseUser!, incomingOperator.organizationId)) {
+    return res.status(400).json({ error: 'Invalid incomingOperatorId' });
+  }
+  const outgoing = adminUsers.get(req.supabaseUser!.id);
+  const now = Date.now();
+  const activeConsignes = Array.from(consignes.values()).filter(c =>
+    canAccessOrg(req.supabaseUser!, c.organizationId) && !c.closedAt && (c.durationType !== 'temporary' || !c.expiresAt || now < c.expiresAt)
+  );
+  const handover: DispatchHandoverReport = {
+    id: uuidv4(),
+    organizationId: req.supabaseUser!.organizationId,
+    outgoingOperatorId: req.supabaseUser!.id,
+    outgoingOperatorName: outgoing?.name || 'Dispatch',
+    incomingOperatorId,
+    incomingOperatorName: incomingOperator.name,
+    summary,
+    notes,
+    consignesSnapshot: activeConsignes.map(c => ({ id: c.id, text: c.text, priority: c.priority })),
+    createdAt: now,
+    updatedAt: now,
+  };
+  dispatchHandovers.set(handover.id, handover);
+  saveDispatchHandoverToSupabase(handover).catch(e => console.error('[DispatchHandover] Supabase save error:', e));
+  addAuditEntry('system', 'Dispatch Handover Created', req.supabaseUser!.id, `Relève ${handover.outgoingOperatorName} → ${handover.incomingOperatorName}`, handover.id, handover.organizationId);
+  broadcastToOrg(handover.organizationId, { type: 'dispatchHandoverCreated', data: handover });
+  res.status(201).json(handover);
+});
+
+app.put('/api/dispatch-handovers/:id', requireAuth, requireRole('dispatcher'), (req, res) => {
+  const handover = dispatchHandovers.get(req.params.id as string);
+  if (!handover) return res.status(404).json({ error: 'Handover not found' });
+  if (!canAccessOrg(req.supabaseUser!, handover.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  if (typeof req.body.summary === 'string' && req.body.summary.trim()) handover.summary = req.body.summary.trim();
+  if (typeof req.body.notes === 'string') handover.notes = req.body.notes.trim();
+  if (req.body.incomingOperatorId && req.body.incomingOperatorId !== handover.incomingOperatorId) {
+    const incomingOperator = adminUsers.get(req.body.incomingOperatorId);
+    if (!incomingOperator || !canAccessOrg(req.supabaseUser!, incomingOperator.organizationId)) {
+      return res.status(400).json({ error: 'Invalid incomingOperatorId' });
+    }
+    handover.incomingOperatorId = incomingOperator.id;
+    handover.incomingOperatorName = incomingOperator.name;
+  }
+  handover.updatedAt = Date.now();
+  dispatchHandovers.set(handover.id, handover);
+  saveDispatchHandoverToSupabase(handover).catch(e => console.error('[DispatchHandover] Supabase save error:', e));
+  addAuditEntry('system', 'Dispatch Handover Updated', req.supabaseUser!.id, `Updated handover ${handover.id}`, handover.id, handover.organizationId);
+  broadcastToOrg(handover.organizationId, { type: 'dispatchHandoverUpdated', data: handover });
+  res.json(handover);
+});
+
+app.delete('/api/dispatch-handovers/:id', requireAuth, requireRole('admin'), (req, res) => {
+  const handover = dispatchHandovers.get(req.params.id as string);
+  if (!handover) return res.status(404).json({ error: 'Handover not found' });
+  if (!canAccessOrg(req.supabaseUser!, handover.organizationId)) return res.status(403).json({ error: 'Not authorized' });
+  dispatchHandovers.delete(handover.id);
+  deleteDispatchHandoverFromSupabase(handover.id).catch(e => console.error('[DispatchHandover] Supabase delete error:', e));
+  addAuditEntry('system', 'Dispatch Handover Deleted', req.supabaseUser!.id, `Deleted handover ${handover.id}`, handover.id, handover.organizationId);
+  res.json({ success: true });
+});
+
 // ─── Patrol checkpoints (GPS waypoints per site, for ronde verification) ─
 app.get('/admin/patrol-checkpoints', requireAuth, requireRole('admin'), (req, res) => {
   const siteId = req.query.siteId as string | undefined;
@@ -9374,6 +9477,7 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
     loadKeyRegistryFromSupabase(),
     loadConsignesFromSupabase(),
     loadIncidentReportsFromSupabase(),
+    loadDispatchHandoversFromSupabase(),
     loadPatrolCheckpointsFromSupabase(),
     loadBlackbookFromSupabase(),
     loadPTTChannelsFromSupabase(),
@@ -9626,6 +9730,46 @@ async function deleteIncidentReportFromSupabase(id: string): Promise<void> {
     const { error } = await supabaseAdmin.from('incident_reports').delete().eq('id', id);
     if (error) console.error('[Supabase] deleteIncidentReportFromSupabase error:', error.message);
   } catch (e) { console.error('[Supabase] deleteIncidentReportFromSupabase error:', e); }
+}
+
+async function loadDispatchHandoversFromSupabase(): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdmin.from('dispatch_handovers').select('*');
+    if (error) { console.error('[Supabase] Failed to load dispatch_handovers:', error.message); return; }
+    if (data && data.length > 0) {
+      dispatchHandovers.clear();
+      data.forEach((h: any) => {
+        dispatchHandovers.set(h.id, {
+          id: h.id, organizationId: h.organization_id || undefined,
+          outgoingOperatorId: h.outgoing_operator_id, outgoingOperatorName: h.outgoing_operator_name,
+          incomingOperatorId: h.incoming_operator_id, incomingOperatorName: h.incoming_operator_name,
+          summary: h.summary || '', notes: h.notes || '', consignesSnapshot: h.consignes_snapshot || [],
+          createdAt: h.created_at || Date.now(), updatedAt: h.updated_at || h.created_at || Date.now(),
+        });
+      });
+      console.log(`[Supabase] Loaded ${data.length} dispatch handovers`);
+    }
+  } catch (e) { console.error('[Supabase] loadDispatchHandoversFromSupabase error:', e); }
+}
+
+async function saveDispatchHandoverToSupabase(handover: DispatchHandoverReport): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('dispatch_handovers').upsert({
+      id: handover.id, organization_id: handover.organizationId || null,
+      outgoing_operator_id: handover.outgoingOperatorId, outgoing_operator_name: handover.outgoingOperatorName,
+      incoming_operator_id: handover.incomingOperatorId, incoming_operator_name: handover.incomingOperatorName,
+      summary: handover.summary, notes: handover.notes, consignes_snapshot: handover.consignesSnapshot,
+      created_at: handover.createdAt, updated_at: handover.updatedAt,
+    });
+    if (error) console.error('[Supabase] saveDispatchHandoverToSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] saveDispatchHandoverToSupabase error:', e); }
+}
+
+async function deleteDispatchHandoverFromSupabase(id: string): Promise<void> {
+  try {
+    const { error } = await supabaseAdmin.from('dispatch_handovers').delete().eq('id', id);
+    if (error) console.error('[Supabase] deleteDispatchHandoverFromSupabase error:', error.message);
+  } catch (e) { console.error('[Supabase] deleteDispatchHandoverFromSupabase error:', e); }
 }
 
 async function loadConsignesFromSupabase(): Promise<void> {

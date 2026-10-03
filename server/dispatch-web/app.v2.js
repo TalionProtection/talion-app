@@ -320,6 +320,14 @@ function handleWsMessage(msg) {
       break;
     }
 
+    case 'dispatchHandoverCreated':
+    case 'dispatchHandoverUpdated': {
+      const hoIdx = handoversCache.findIndex(h => h.id === msg.data.id);
+      if (hoIdx >= 0) handoversCache[hoIdx] = msg.data; else handoversCache.unshift(msg.data);
+      if (document.getElementById('tab-repository')?.classList.contains('active')) renderHandovers();
+      break;
+    }
+
     case 'acceptanceTimeout': {
       const respName = msg.responderName || msg.responderId;
       showToast(`\u23F0 ${respName} n'a pas accept\u00e9 l'incident ${formatIncidentId(msg.alertId)} dans les 5 min`, 'warning');
@@ -1704,6 +1712,7 @@ function switchRepoSubtab(subtab) {
   document.getElementById(`repo-subtab-${subtab}`)?.classList.add('active');
   if (subtab === 'repo-keys') loadKeys();
   if (subtab === 'repo-incidents') loadIncidentReports();
+  if (subtab === 'repo-handovers') loadHandovers();
 }
 
 async function loadKeys() {
@@ -2315,6 +2324,115 @@ async function deleteIncidentReport(id) {
     if (!res.ok) { showToast('Erreur lors de la suppression', 'error'); return; }
     loadIncidentReports();
     showToast('Rapport supprimé', 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
+}
+
+// ─── Repository: Dispatch shift handover ────────────────────────────────
+let handoversCache = [];
+
+async function loadHandovers() {
+  try {
+    const res = await fetch(`${API_BASE}/api/dispatch-handovers`);
+    handoversCache = res.ok ? await res.json() : [];
+    renderHandovers();
+  } catch (e) {
+    console.error('[Handovers] load error:', e);
+  }
+}
+
+function renderHandovers() {
+  const container = document.getElementById('handoversList');
+  if (!container) return;
+  if (handoversCache.length === 0) {
+    container.innerHTML = '<div class="empty-state">Aucune relève enregistrée</div>';
+    return;
+  }
+  const isAdmin = localStorage.getItem('talion_role') === 'admin' || localStorage.getItem('talion_role') === 'superadmin';
+  container.innerHTML = handoversCache.map(h => `
+    <div class="provider-row">
+      <div style="flex:1;">
+        <div class="provider-row-name">${escapeHtml(h.outgoingOperatorName)} → ${escapeHtml(h.incomingOperatorName)}</div>
+        <div class="provider-row-detail">${new Date(h.createdAt).toLocaleString('fr-FR')}</div>
+        <div class="provider-row-detail"><strong>Points en cours :</strong> ${escapeHtml(h.summary)}</div>
+        ${h.notes ? `<div class="provider-row-detail"><strong>Consignes :</strong> ${escapeHtml(h.notes)}</div>` : ''}
+        ${h.consignesSnapshot?.length > 0 ? `<div class="provider-row-detail" style="font-style:italic;">${h.consignesSnapshot.length} consigne(s) active(s) au moment de la relève : ${h.consignesSnapshot.map(c => escapeHtml(c.text)).join(' · ')}</div>` : ''}
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;">
+        ${isAdmin ? `<button class="btn btn-secondary btn-sm" onclick="deleteHandover('${h.id}')" title="Supprimer">🗑️</button>` : ''}
+      </div>
+    </div>
+  `).join('');
+}
+
+async function openAddHandoverModal() {
+  const me = currentDispatchUser();
+  document.getElementById('hoOutgoingDisplay').value = me.name || '';
+  document.getElementById('hoSummary').value = '';
+  document.getElementById('hoNotes').value = '';
+
+  const select = document.getElementById('hoIncomingOperator');
+  select.innerHTML = '<option value="">Chargement...</option>';
+  try {
+    if (irRecipientsCache.length === 0) {
+      const res = await fetch(`${API_BASE}/api/incident-reports/recipients`);
+      irRecipientsCache = res.ok ? await res.json() : [];
+    }
+    const operators = irRecipientsCache.filter(u => ['dispatcher', 'admin', 'superadmin'].includes(u.role) && u.id !== me.id);
+    select.innerHTML = operators.map(u => `<option value="${u.id}">${escapeHtml(u.name)}</option>`).join('') || '<option value="">Aucun autre opérateur</option>';
+  } catch (e) {
+    select.innerHTML = '<option value="">Erreur de chargement</option>';
+  }
+
+  const activeConsignes = consignesCache.filter(c => consigneIsActive(c));
+  const previewGroup = document.getElementById('hoConsignesPreviewGroup');
+  if (activeConsignes.length > 0) {
+    document.getElementById('hoConsignesPreview').innerHTML = activeConsignes.map(c => `• ${escapeHtml(c.text)}`).join('<br>');
+    previewGroup.style.display = 'block';
+  } else {
+    previewGroup.style.display = 'none';
+  }
+
+  document.getElementById('addHandoverModal').style.display = 'flex';
+}
+
+function closeAddHandoverModal() {
+  document.getElementById('addHandoverModal').style.display = 'none';
+}
+
+async function submitHandover() {
+  const incomingOperatorId = document.getElementById('hoIncomingOperator').value;
+  const summary = document.getElementById('hoSummary').value.trim();
+  const notes = document.getElementById('hoNotes').value.trim();
+  if (!incomingOperatorId) { showToast('Sélectionnez un opérateur entrant', 'error'); return; }
+  if (!summary) { showToast('Le résumé est requis', 'error'); return; }
+  try {
+    const res = await fetch(`${API_BASE}/api/dispatch-handovers`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ incomingOperatorId, summary, notes }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Erreur lors de l\'enregistrement', 'error');
+      return;
+    }
+    closeAddHandoverModal();
+    loadHandovers();
+    showToast('Relève enregistrée', 'success');
+  } catch (e) {
+    showToast('Erreur de connexion', 'error');
+  }
+}
+
+async function deleteHandover(id) {
+  if (!confirm('Supprimer cette relève ?')) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/dispatch-handovers/${id}`, { method: 'DELETE' });
+    if (!res.ok) { showToast('Erreur lors de la suppression', 'error'); return; }
+    loadHandovers();
+    showToast('Relève supprimée', 'success');
   } catch (e) {
     showToast('Erreur de connexion', 'error');
   }

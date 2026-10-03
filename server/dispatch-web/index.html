@@ -893,6 +893,7 @@
       <div class="repo-subnav">
         <button class="repo-subnav-item active" data-subtab="repo-keys" onclick="switchRepoSubtab('repo-keys')">&#x1F511; Clés</button>
         <button class="repo-subnav-item" data-subtab="repo-incidents" onclick="switchRepoSubtab('repo-incidents')">&#x1F4C4; Rapports d'incident</button>
+        <button class="repo-subnav-item" data-subtab="repo-handovers" onclick="switchRepoSubtab('repo-handovers')">&#x1F504; Relève Dispatch</button>
       </div>
 
       <div class="repo-subtab-content active" id="repo-subtab-repo-keys">
@@ -931,7 +932,46 @@
         </div>
         <div id="incidentReportsList" class="patrol-reports-grid"></div>
       </div>
+
+      <div class="repo-subtab-content" id="repo-subtab-repo-handovers">
+        <div class="toolbar">
+          <div></div>
+          <button class="btn btn-primary btn-sm" onclick="openAddHandoverModal()">&#x2795; Nouvelle relève</button>
+        </div>
+        <div id="handoversList" class="patrol-reports-grid"></div>
+      </div>
     </section>
+
+    <!-- Add/Edit Dispatch Handover Modal -->
+    <div class="modal-overlay" id="addHandoverModal" style="display:none;">
+      <div class="modal" style="max-width:520px;">
+        <h3 class="modal-title">Nouvelle relève Dispatch</h3>
+        <div class="form-group">
+          <label>Opérateur sortant</label>
+          <input type="text" class="form-control" id="hoOutgoingDisplay" disabled>
+        </div>
+        <div class="form-group">
+          <label>Opérateur entrant</label>
+          <select id="hoIncomingOperator" class="form-control"></select>
+        </div>
+        <div class="form-group">
+          <label>Résumé des incidents / points en cours</label>
+          <textarea id="hoSummary" class="form-control" rows="4" placeholder="Ce qui est en cours, à surveiller..."></textarea>
+        </div>
+        <div class="form-group">
+          <label>Consignes pour la suite</label>
+          <textarea id="hoNotes" class="form-control" rows="3"></textarea>
+        </div>
+        <div class="form-group" id="hoConsignesPreviewGroup" style="display:none;">
+          <label>Consignes actives (jointes automatiquement)</label>
+          <div id="hoConsignesPreview" style="font-size:12px;color:var(--text-muted);"></div>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+          <button class="btn btn-secondary" onclick="closeAddHandoverModal()">Annuler</button>
+          <button class="btn btn-primary" onclick="submitHandover()">Enregistrer</button>
+        </div>
+      </div>
+    </div>
 
     <!-- Add/Edit Incident Report Modal -->
     <div class="modal-overlay" id="addIncidentReportModal" style="display:none;">
