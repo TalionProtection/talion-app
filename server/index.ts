@@ -613,27 +613,49 @@ const vehicleRegistry = new Map<string, VehicleEntry>();
 // ("Patrol - Hand Over"). Both server and dispatch-web/the standalone agent
 // page reference these exact labels so the recorded data and the printed
 // PDF read exactly like the familiar form.
-const VEHICLE_UNIFORM_CHECKLIST_ITEMS = [
-  'Tenue GIS', 'Patch Patrol', 'Gilet Sécurité', 'Téléphone', 'Clé du véhicule',
-  'Bip portails + Clef 09H + Bat 11', 'Carte GPS life 360',
+//
+// Grouped into categories — single source of truth for both the flat
+// checklist arrays below (unchanged shape, for the manual form/PDF/existing
+// code) AND the voice-fill feature's category-by-category confirmation
+// (see /api/vehicle-handovers/voice-extract): an item silently not
+// mentioned defaults to OK (fast), but a whole CATEGORY silently not
+// addressed does not — the AI must ask one follow-up per still-missing
+// category until every category has an explicit answer, so "agent forgot
+// to even think about it" can't be confused with "agent checked and it's
+// fine." See conversation with Billy, 2026-10-10.
+const VEHICLE_CHECKLIST_CATEGORIES: { id: string; label: string; items: string[] }[] = [
+  {
+    id: 'uniforme',
+    label: 'Uniforme et équipement personnel',
+    items: ['Tenue GIS', 'Patch Patrol', 'Gilet Sécurité', 'Téléphone', 'Clé du véhicule', 'Bip portails + Clef 09H + Bat 11', 'Carte GPS life 360'],
+  },
+  {
+    id: 'exterieur',
+    label: 'Extérieur, pneus et feux',
+    items: ['Contrôle extérieur du véhicule', "Vérification de l'état visuel des pneus (profil et pression)", 'Vérification des feux de signalisation et clignotants'],
+  },
+  {
+    id: 'mecanique',
+    label: 'Mécanique et tableau de bord',
+    items: ["Vérification du niveau d'autonomie du véhicule", 'Vérification des freins et essuie-glaces', 'Vérification des voyants sur le tableau de bord'],
+  },
+  {
+    id: 'proprete_materiel',
+    label: 'Propreté et matériel embarqué',
+    items: [
+      'Vérification de la propreté intérieure et extérieure',
+      'Matériel - Câble USB présent', 'Matériel - Escabeau', 'Matériel - Plumeau', 'Matériel - Extincteur présent',
+      'Matériel - Boîte à clefs présente', 'Matériel - Raclette pare-brise présente', 'Matériel - 3 sacs scellés',
+    ],
+  },
+  {
+    id: 'communication',
+    label: 'Communication',
+    items: ['Communiquer toute anomalie via le groupe WhatsApp : GISGVA (CC & PATROL) Team'],
+  },
 ];
-const VEHICLE_CHECKLIST_ITEMS = [
-  'Communiquer toute anomalie via le groupe WhatsApp : GISGVA (CC & PATROL) Team',
-  'Contrôle extérieur du véhicule',
-  "Vérification du niveau d'autonomie du véhicule",
-  "Vérification de l'état visuel des pneus (profil et pression)",
-  'Vérification des feux de signalisation et clignotants',
-  'Vérification des freins et essuie-glaces',
-  'Vérification des voyants sur le tableau de bord',
-  'Vérification de la propreté intérieure et extérieure',
-  'Matériel - Câble USB présent',
-  'Matériel - Escabeau',
-  'Matériel - Plumeau',
-  'Matériel - Extincteur présent',
-  'Matériel - Boîte à clefs présente',
-  'Matériel - Raclette pare-brise présente',
-  'Matériel - 3 sacs scellés',
-];
+const VEHICLE_UNIFORM_CHECKLIST_ITEMS = VEHICLE_CHECKLIST_CATEGORIES[0].items;
+const VEHICLE_CHECKLIST_ITEMS = VEHICLE_CHECKLIST_CATEGORIES.slice(1).flatMap(c => c.items);
 const VEHICLE_DAMAGE_LOCATIONS = ['Pare-choc avant', 'Pare-choc arrière', 'Portières droites', 'Portières gauches', 'Capot', 'Jantes/roues'];
 
 // Two-signature flow, matching the real process ("l'agent entrant vérifie
@@ -4637,6 +4659,98 @@ async function generateIncidentReportPdfBuffer(report: IncidentReport): Promise<
   return done;
 }
 
+// ─── Vehicle handover: voice/text fast-fill (Repository, AI exploration) ──
+// Same direct-fetch/claude-haiku-4-5/JSON-prompting convention as
+// callThreatAnalysisAI/callEntityExtractionAI above — deliberately not
+// reinvented. Stateless: the client resends the whole conversation each
+// turn, server has nothing to persist between calls.
+//
+// Design: an item not explicitly flagged as a problem defaults to OK (the
+// whole point — the agent describes what's WRONG, not confirms all ~22
+// items one by one). But a whole CATEGORY never mentioned does NOT
+// silently default to OK — missingCategories + followUpQuestion force one
+// short, batched follow-up per still-unaddressed category until every
+// category has an explicit answer. Closes the "agent simply forgot to
+// check" gap without losing the speed win. See conversation with Billy,
+// 2026-10-10.
+type VehicleVoiceExtractionResult =
+  | {
+      ok: true;
+      uniformChecklist: Record<string, boolean>; uniformComments: string;
+      vehicleChecklist: Record<string, boolean>; damageLocations: string[]; damageNotes: string;
+      mileage: number | null; missingCategories: string[]; followUpQuestion: string | null;
+    }
+  | { ok: false; reason: string };
+
+async function callVehicleVoiceExtractionAI(turns: { role: 'agent' | 'assistant'; text: string }[]): Promise<VehicleVoiceExtractionResult> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) { console.warn('[VehicleVoiceExtract] ANTHROPIC_API_KEY not set'); return { ok: false, reason: 'Clé API non configurée sur le serveur (ANTHROPIC_API_KEY absente)' }; }
+  const categoriesDescription = VEHICLE_CHECKLIST_CATEGORIES.map(c => `- id "${c.id}" ("${c.label}"): ${c.items.join(' / ')}`).join('\n');
+  const conversationText = turns.map(t => `${t.role === 'agent' ? 'Agent' : 'Assistant'}: ${t.text}`).join('\n');
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5',
+        max_tokens: 1500,
+        system: `Tu assistes un agent de sécurité qui dicte à l'oral l'état d'une relève de véhicule, pour remplir rapidement un checklist. Voici les catégories et leurs items exacts :
+${categoriesDescription}
+
+Dommages additionnels possibles (liste fixe) : ${VEHICLE_DAMAGE_LOCATIONS.join(', ')}.
+
+Règles impératives :
+- Un item explicitement signalé comme un problème par l'agent est "false" (pas ok).
+- Tout item non signalé comme un problème, MAIS appartenant à une catégorie que l'agent a explicitement abordée (même en disant "le reste c'est bon"), est "true" (ok) par défaut.
+- Une catégorie jamais évoquée, même indirectement, ne doit JAMAIS être supposée ok — liste-la dans missingCategories.
+- Si missingCategories n'est pas vide, formule UNE SEULE question de relance courte et naturelle en français qui regroupe toutes les catégories manquantes (jamais une question par catégorie séparément).
+- N'invente jamais un problème qui n'a pas été mentionné par l'agent.
+- Le kilométrage et les dommages ne sont PAS des catégories du checklist — n'influencent pas missingCategories.
+
+Réponds UNIQUEMENT en JSON strict, sans texte autour ni bloc markdown (pas de \`\`\`), avec exactement cette forme :
+{"uniformChecklist": {"<item exact>": true|false, ...}, "uniformComments": "...", "vehicleChecklist": {"<item exact>": true|false, ...}, "damageLocations": ["..."], "damageNotes": "...", "mileage": <number ou null>, "missingCategories": ["<id categorie>", ...], "followUpQuestion": "<question ou null si missingCategories est vide>"}`,
+        messages: [{ role: 'user', content: conversationText }],
+      }),
+    });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      console.error('[VehicleVoiceExtract] Anthropic API error:', resp.status, body);
+      return { ok: false, reason: `Anthropic a répondu ${resp.status}: ${body.slice(0, 300)}` };
+    }
+    const data = await resp.json() as any;
+    const text = data?.content?.[0]?.text;
+    if (!text) return { ok: false, reason: 'Réponse Anthropic sans contenu texte exploitable' };
+    const fenceMatch = text.trim().match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
+    const jsonText = fenceMatch ? fenceMatch[1] : text.trim();
+    let parsed: any;
+    try {
+      parsed = JSON.parse(jsonText);
+    } catch (e) {
+      return { ok: false, reason: `JSON invalide renvoyé par le modèle: ${String(text).slice(0, 300)}` };
+    }
+    // Normalize to the known item/category set regardless of what the model
+    // returned — same safety-net pattern as the manual POST
+    // /api/vehicle-handovers route. A missing key within an ALREADY-
+    // addressed category defaults true (ok), matching the stated rule.
+    const uniformChecklist: Record<string, boolean> = {};
+    VEHICLE_UNIFORM_CHECKLIST_ITEMS.forEach(item => { uniformChecklist[item] = parsed.uniformChecklist?.[item] !== false; });
+    const vehicleChecklist: Record<string, boolean> = {};
+    VEHICLE_CHECKLIST_ITEMS.forEach(item => { vehicleChecklist[item] = parsed.vehicleChecklist?.[item] !== false; });
+    const damageLocations: string[] = Array.isArray(parsed.damageLocations) ? parsed.damageLocations.filter((d: string) => VEHICLE_DAMAGE_LOCATIONS.includes(d) || d === 'Autre') : [];
+    const missingCategories: string[] = Array.isArray(parsed.missingCategories) ? parsed.missingCategories.filter((id: string) => VEHICLE_CHECKLIST_CATEGORIES.some(c => c.id === id)) : [];
+    return {
+      ok: true,
+      uniformChecklist, uniformComments: typeof parsed.uniformComments === 'string' ? parsed.uniformComments : '',
+      vehicleChecklist, damageLocations, damageNotes: typeof parsed.damageNotes === 'string' ? parsed.damageNotes : '',
+      mileage: typeof parsed.mileage === 'number' ? parsed.mileage : null,
+      missingCategories, followUpQuestion: missingCategories.length > 0 && typeof parsed.followUpQuestion === 'string' ? parsed.followUpQuestion : null,
+    };
+  } catch (e) {
+    console.error('[VehicleVoiceExtract] callVehicleVoiceExtractionAI error:', e);
+    return { ok: false, reason: `Erreur réseau: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
 async function generateVehicleHandoverPdfBuffer(report: VehicleHandoverReport): Promise<Buffer> {
   const PDFDocument = require('pdfkit');
   const doc = new PDFDocument({ margin: 50 });
@@ -8595,6 +8709,7 @@ app.get('/api/vehicle-handovers/checklist-items', requireAuth, requireRole('resp
     uniform: VEHICLE_UNIFORM_CHECKLIST_ITEMS,
     vehicle: VEHICLE_CHECKLIST_ITEMS,
     damageLocations: VEHICLE_DAMAGE_LOCATIONS,
+    categories: VEHICLE_CHECKLIST_CATEGORIES.map(c => ({ id: c.id, label: c.label })),
   });
 });
 
@@ -8607,6 +8722,20 @@ app.get('/api/vehicle-handovers/agents', requireAuth, requireRole('responder'), 
     .map(u => ({ id: u.id, name: u.name, role: u.role }))
     .sort((a, b) => a.name.localeCompare(b.name));
   res.json(list);
+});
+
+// Voice/text fast-fill — stateless, client resends the growing conversation
+// each turn. Loops (client-side) until missingCategories is empty, then the
+// client pre-fills the normal manual form with the extraction for the agent
+// to review and submit through the UNCHANGED POST /api/vehicle-handovers
+// below — this is purely an assistive pre-fill layer, not a new submission
+// path.
+app.post('/api/vehicle-handovers/voice-extract', requireAuth, requireRole('responder'), async (req, res) => {
+  const turns = Array.isArray(req.body.turns) ? req.body.turns : [];
+  if (turns.length === 0) return res.status(400).json({ error: 'turns is required' });
+  const result = await callVehicleVoiceExtractionAI(turns);
+  if (!result.ok) return res.status(503).json({ error: result.reason });
+  res.json(result);
 });
 
 // ─── Vehicle handover reports (Repository, Phase 4) ────────────────────────

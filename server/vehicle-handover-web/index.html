@@ -59,6 +59,16 @@
     .pending-card .meta { font-size: 12px; color: #64748b; margin-top: 4px; }
     .logout-link { display: block; text-align: center; margin-top: 16px; font-size: 12px; color: #64748b; text-decoration: none; }
     .anomaly-flag { color: #ef4444; font-weight: 700; }
+    .voice-card { border: 1px solid #3b82f6; background: linear-gradient(135deg, rgba(59,130,246,0.08), rgba(30,58,95,0.15)); }
+    .voice-intro { font-size: 12px; color: #94a3b8; margin-bottom: 12px; line-height: 1.5; }
+    .voice-log { margin-bottom: 12px; max-height: 260px; overflow-y: auto; }
+    .voice-turn { padding: 10px 12px; border-radius: 10px; margin-bottom: 8px; font-size: 13px; line-height: 1.4; }
+    .voice-turn.assistant { background: #0f1923; color: #cbd5e1; }
+    .voice-turn.agent { background: #1e3a5f; color: #fff; margin-left: 24px; }
+    .voice-mic-hint { font-size: 11px; color: #64748b; margin-top: 4px; }
+    .btn-voice { background: #3b82f6; }
+    .btn-voice:hover { background: #2563eb; }
+    .btn-outline { background: transparent; border: 1px solid #2d3d4f; color: #94a3b8; }
   </style>
 </head>
 <body>
@@ -109,6 +119,21 @@
           <div class="form-group">
             <label>Agent sortant (qui vous transmet le véhicule)</label>
             <select id="fOutgoingAgent"></select>
+          </div>
+        </div>
+
+        <div class="card voice-card">
+          <h2>🎙️ Remplir à la voix (rapide)</h2>
+          <p class="voice-intro">Décrivez ce qui ne va pas — le reste est considéré en ordre. Ex: « tout est ok sauf les pneus et une rayure à l'arrière, 45200 km ». Utilisez le micro du clavier pour dicter.</p>
+          <div id="voiceLog" class="voice-log" style="display:none;"></div>
+          <div class="form-group" id="voiceInputGroup" style="display:none;">
+            <textarea id="voiceInput" rows="3" placeholder="Tapez ou dictez votre réponse..."></textarea>
+            <div class="voice-mic-hint">💡 Appuyez sur le micro de votre clavier pour dicter.</div>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-voice" id="voiceStartBtn" onclick="startVoiceFill()">🎙️ Démarrer</button>
+            <button class="btn btn-voice" id="voiceSendBtn" style="display:none;" onclick="sendVoiceTurn()">Envoyer</button>
+            <button class="btn btn-outline" id="voiceCancelBtn" style="display:none;width:auto;padding:14px;" onclick="cancelVoiceFill()">Annuler</button>
           </div>
         </div>
 
@@ -268,6 +293,112 @@
       document.getElementById('fOutgoingAgent').innerHTML = others.map(a =>
         `<option value="${a.id}">${a.name}</option>`
       ).join('') || '<option value="">Aucun autre agent</option>';
+    }
+
+    // ─── Voice/text fast-fill ────────────────────────────────────────
+    // Stateless conversation: we hold the growing turn list client-side and
+    // resend it whole each time — the server has nothing to persist between
+    // calls. Loops until the server reports no missing categories, then
+    // pre-fills the normal manual form for the agent to review and submit
+    // exactly as before (no new submission path).
+    let voiceTurns = [];
+    let voiceBusy = false;
+
+    function startVoiceFill() {
+      voiceTurns = [{ role: 'assistant', text: "Décrivez l'état du véhicule, de l'uniforme et des équipements." }];
+      document.getElementById('voiceLog').style.display = 'block';
+      document.getElementById('voiceInputGroup').style.display = 'block';
+      document.getElementById('voiceStartBtn').style.display = 'none';
+      document.getElementById('voiceSendBtn').style.display = 'inline-block';
+      document.getElementById('voiceCancelBtn').style.display = 'inline-block';
+      renderVoiceLog();
+      document.getElementById('voiceInput').focus();
+    }
+
+    function cancelVoiceFill() {
+      voiceTurns = [];
+      document.getElementById('voiceLog').style.display = 'none';
+      document.getElementById('voiceLog').innerHTML = '';
+      document.getElementById('voiceInputGroup').style.display = 'none';
+      document.getElementById('voiceInput').value = '';
+      document.getElementById('voiceStartBtn').style.display = 'inline-block';
+      document.getElementById('voiceSendBtn').style.display = 'none';
+      document.getElementById('voiceCancelBtn').style.display = 'none';
+    }
+
+    function renderVoiceLog() {
+      document.getElementById('voiceLog').innerHTML = voiceTurns.map(t =>
+        `<div class="voice-turn ${t.role}">${t.text.replace(/</g, '&lt;')}</div>`
+      ).join('');
+      const log = document.getElementById('voiceLog');
+      log.scrollTop = log.scrollHeight;
+    }
+
+    async function sendVoiceTurn() {
+      if (voiceBusy) return;
+      const input = document.getElementById('voiceInput');
+      const text = input.value.trim();
+      if (!text) return;
+      voiceTurns.push({ role: 'agent', text });
+      input.value = '';
+      renderVoiceLog();
+
+      voiceBusy = true;
+      const sendBtn = document.getElementById('voiceSendBtn');
+      sendBtn.disabled = true;
+      sendBtn.textContent = '...';
+      try {
+        const res = await apiFetch('/api/vehicle-handovers/voice-extract', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ turns: voiceTurns }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          voiceTurns.push({ role: 'assistant', text: '⚠️ ' + (err.error || "Erreur, réessayez.") });
+          renderVoiceLog();
+          return;
+        }
+        const extraction = await res.json();
+        if (extraction.missingCategories && extraction.missingCategories.length > 0) {
+          voiceTurns.push({ role: 'assistant', text: extraction.followUpQuestion || 'Pouvez-vous préciser le reste ?' });
+          renderVoiceLog();
+        } else {
+          applyVoiceExtractionToForm(extraction);
+          cancelVoiceFill();
+          const successEl = document.getElementById('formSuccess');
+          successEl.textContent = '✅ Formulaire pré-rempli par la voix — vérifiez puis enregistrez.';
+          successEl.style.display = 'block';
+          document.getElementById('fUniformChecklist').scrollIntoView({ behavior: 'smooth' });
+        }
+      } catch (e) {
+        voiceTurns.push({ role: 'assistant', text: '⚠️ Erreur de connexion, réessayez.' });
+        renderVoiceLog();
+      } finally {
+        voiceBusy = false;
+        sendBtn.disabled = false;
+        sendBtn.textContent = 'Envoyer';
+      }
+    }
+
+    function applyVoiceExtractionToForm(extraction) {
+      applyChecklistExtraction('fUniformChecklist', checklistItems.uniform, extraction.uniformChecklist);
+      applyChecklistExtraction('fVehicleChecklist', checklistItems.vehicle, extraction.vehicleChecklist);
+      document.getElementById('fUniformComments').value = extraction.uniformComments || '';
+      document.getElementById('fDamageNotes').value = extraction.damageNotes || '';
+      if (extraction.mileage) document.getElementById('fMileage').value = extraction.mileage;
+      document.querySelectorAll('#fDamageGrid input[data-damage]').forEach(input => {
+        const loc = checklistItems.damageLocations[Number(input.dataset.damage)];
+        input.checked = (extraction.damageLocations || []).includes(loc);
+      });
+      document.getElementById('fDamageOther').checked = (extraction.damageLocations || []).includes('Autre');
+    }
+
+    function applyChecklistExtraction(containerId, items, record) {
+      document.querySelectorAll(`#${containerId} input[type=checkbox]`).forEach(input => {
+        const item = items[Number(input.dataset.item)];
+        input.checked = record?.[item] !== false;
+      });
     }
 
     function collectChecklist(containerId, items) {
